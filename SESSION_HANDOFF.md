@@ -50,7 +50,7 @@ ESB מפתחת APIs שמתממשקים ל-Kafka (producer/consumer), Couchbase, 
 
 | שלב | סטטוס | הערות |
 |---|---|---|
-| Phase A — Custom Canvas (WebChat from CDN) | ✅ עובד | סוכן `crbf3_ESBTestscripter` (No-auth, ללא Tools) |
+| Phase A — Custom Canvas (WebChat from CDN) | ✅ עובד | סוכן `<your-copilot-studio-agent>` (in `.env`) (No-auth, ללא Tools) |
 | Phase A — file upload בצ'אט (📎) | ✅ עובד | WebChat built-in |
 | Phase A — auto JSON detection | ✅ עובד | Store middleware תופס DIRECT_LINE/INCOMING_ACTIVITY |
 | Phase B trigger אוטומטי | ✅ עובד | מעבר חלק ל-pipeline ברגע שזוהה JSON |
@@ -67,7 +67,7 @@ ESB מפתחת APIs שמתממשקים ל-Kafka (producer/consumer), Couchbase, 
 ### 4.1 למה Custom Canvas ולא iframe או SDK
 
 **ניסיונות שכשלו:**
-1. **Microsoft 365 Agents SDK** (Python, msal) — קיבל `AADSTS650057`. ה-App Registration `06e21821-e0d1-4d57-b2ea-5c31bf242e11` חסר הרשאת `CopilotStudio.Copilots.Invoke` על `api.powerplatform.com`. **IT לא הוסיף את ההרשאה — עדיין ממתין.**
+1. **Microsoft 365 Agents SDK** (Python, msal) — קיבל `AADSTS650057`. ה-App Registration של הסוכן (Agent app ID — ב-`.env`) חסר הרשאת `CopilotStudio.Copilots.Invoke` על `api.powerplatform.com`. **IT לא הוסיף את ההרשאה — עדיין ממתין.**
 2. **Web app iframe (פשוט)** — עם `Microsoft authentication` Microsoft מסירים את ה-Embed code. עם `No authentication`, ה-Tools של הסוכן נכשלים עם `AuthenticationNotConfigured`.
 3. **Web app iframe + סוכן stripped-down (ללא Tools)** — עבד אבל יש Cross-Origin (לא יכולנו לקרוא JSON אוטומטית), היוזר היה צריך copy-paste ידני.
 
@@ -83,7 +83,7 @@ ESB מפתחת APIs שמתממשקים ל-Kafka (producer/consumer), Couchbase, 
 - **Azure OpenAI נפרד** — דורש credentials מ-IT
 - **Foundry של היוזר** ← זה מה שבחרנו (כבר מוגדר)
 
-Endpoint: `https://qa-ai-hero-foundry.services.ai.azure.com/`
+Endpoint: `https://<your-foundry-resource>.services.ai.azure.com/` (in `.env`)
 Model deployment: `gpt-4.1-mini`
 
 (זה Azure-style endpoint — `AsyncAzureOpenAI` SDK שכבר השתמשנו בו מתחבר אליו ישירות, אין צורך ב-`AsyncOpenAI` נפרד.)
@@ -201,7 +201,7 @@ Model deployment: `gpt-4.1-mini`
 
 ## 9. תיעוד נדרש בסוכן Copilot Studio
 
-הוסף ל-Instructions של `crbf3_ESBTestscripter` (Copilot Studio):
+הוסף ל-Instructions של `<your-copilot-studio-agent>` (in `.env`) (Copilot Studio):
 
 ```
 כללי כתיבה של תסריטי בדיקה ב-steps:
@@ -241,11 +241,11 @@ JSON output מבנה:
    py main.py --server
    ```
 
-2. **למלא `.env` במחשב העבודה** (מערכים שצריך):
+2. **למלא `.env` במחשב העבודה** (לא לכלול במסמכים פומביים — להעתיק מ-`.env` של הבית):
    ```
-   COPILOT_TOKEN_ENDPOINT=https://defaultf4c80c7ce1aa40908a5dc87dde95d0.ee.environment.api.powerplatform.com/powervirtualagents/botsbyschema/crbf3_ESBTestscripter/directline/token?api-version=2022-03-01-preview
-   AZURE_OPENAI_ENDPOINT=https://qa-ai-hero-foundry.services.ai.azure.com/
-   AZURE_OPENAI_KEY=<from Foundry portal>
+   COPILOT_TOKEN_ENDPOINT=<copy from local .env or from Copilot Studio agent → Channels → Custom website>
+   AZURE_OPENAI_ENDPOINT=<copy from local .env or Foundry portal>
+   AZURE_OPENAI_KEY=<copy from local .env or Foundry portal>
    AZURE_OPENAI_DEPLOYMENT=gpt-4.1-mini
    RUNNER_MODE=esb
    ```

@@ -23,7 +23,7 @@
 - **Python 3.9+** (בעבודה: `py` במקום `python`. בדוק עם `py --version`)
 - **גישה לרשת מכבי** (לקריאות ESB אמיתיות) — מהבית אפשר רק במצב mock
 - **Azure AI Foundry** עם מודל `gpt-4.1-mini` פרוס
-- **Copilot Studio agent** (`crbf3_ESBTestscripter`, No-auth, ללא Tools)
+- **Copilot Studio agent** (`<your-copilot-studio-agent>`, No-auth, ללא Tools)
 
 ---
 
@@ -57,16 +57,19 @@ notepad .env   # מלא לפי הסקציה למטה
 
 ```env
 # Phase A — Custom Canvas (★ מסלול ראשי)
-COPILOT_TOKEN_ENDPOINT=https://defaultf4c80c7ce1aa40908a5dc87dde95d0.ee.environment.api.powerplatform.com/powervirtualagents/botsbyschema/crbf3_ESBTestscripter/directline/token?api-version=2022-03-01-preview
+# מ-Copilot Studio agent → Channels → Custom website → Token endpoint
+COPILOT_TOKEN_ENDPOINT=<your-foundry-token-endpoint>
 
-# Phase B — Foundry chat completions
-AZURE_OPENAI_ENDPOINT=https://qa-ai-hero-foundry.services.ai.azure.com/
-AZURE_OPENAI_KEY=<מ-Foundry portal>
-AZURE_OPENAI_DEPLOYMENT=gpt-4.1-mini
+# Phase B — Foundry / Azure OpenAI chat completions
+AZURE_OPENAI_ENDPOINT=<your-foundry-endpoint>
+AZURE_OPENAI_KEY=<from-foundry-portal>
+AZURE_OPENAI_DEPLOYMENT=<your-model-deployment-name>
 
 # Runner mode
 RUNNER_MODE=esb     # esb=קריאות אמיתיות (דורש רשת מכבי). mock=דמה
 ```
+
+⚠ **לא לפרסם** את ה-URLs / Keys האמיתיים — שמור אותם מקומית ב-`.env` (gitignored).
 
 לכל ההגדרות — ראה [`.env.example`](.env.example).
 
