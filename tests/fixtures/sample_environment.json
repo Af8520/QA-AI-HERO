@@ -1,0 +1,8 @@
+{
+  "name": "ESB Test Env",
+  "values": [
+    {"key": "baseUrl", "value": "https://api-test.local/esb", "enabled": true},
+    {"key": "patientId", "value": "123456", "enabled": true},
+    {"key": "token", "value": "test-token", "enabled": true}
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "info": {
+    "name": "ESB Sample Collection",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "POST /patients/admit",
+      "request": {
+        "method": "POST",
+        "header": [
+          {"key": "Content-Type", "value": "application/json"},
+          {"key": "Authorization", "value": "Bearer {{token}}"}
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"patientId\": \"{{patientId}}\",\n  \"event_type\": \"ADMISSION\"\n}",
+          "options": {"raw": {"language": "json"}}
+        },
+        "url": {
+          "raw": "{{baseUrl}}/patients/admit",
+          "host": ["{{baseUrl}}"],
+          "path": ["patients", "admit"]
+        }
+      }
+    },
+    {
+      "name": "GET /patients/{id}",
+      "request": {
+        "method": "GET",
+        "header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+        "url": {
+          "raw": "{{baseUrl}}/patients/{{patientId}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["patients", "{{patientId}}"]
+        }
+      }
+    }
+  ]
+}

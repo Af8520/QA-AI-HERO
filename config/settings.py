@@ -1,0 +1,108 @@
+from typing import Literal, Optional
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+        extra="ignore",
+    )
+
+    # Copilot Studio Agent (Phase A) — שדות מובנים לפי microsoft-agents-copilotstudio-client SDK
+    COPILOT_ENVIRONMENT_ID: Optional[str] = None       # e.g. Default-f4c80c7c-e1aa-4090-...
+    COPILOT_AGENT_IDENTIFIER: Optional[str] = None     # Schema name (e.g. crbf3_integrationQaTestGenerator)
+    COPILOT_TENANT_ID: Optional[str] = None
+    COPILOT_APP_CLIENT_ID: Optional[str] = None        # Agent app ID
+    COPILOT_CLOUD: str = "PROD"                        # PROD | GOV | HIGH | DOD | ...
+    COPILOT_AGENT_TYPE: str = "PUBLISHED"              # PUBLISHED | PREBUILT
+    # Direct connection URL מ-"Native app" channel ב-Copilot Studio.
+    # אם מוגדר — מחליף את environment_id/cloud (השדות נשארים נדרשים רק ל-MSAL auth).
+    COPILOT_DIRECT_CONNECT_URL: Optional[str] = None
+    # Embed mode (fallback): URL ל-iframe של WebChat (מ-Channels -> Web app -> Embed code).
+    # אם מסופק — ה-UI מציג iframe במקום chat שלנו, והיוזר מזין ידנית את suite_id בסיום.
+    COPILOT_WEBCHAT_URL: Optional[str] = None
+    # Canvas mode (★ מסלול ראשי): Token endpoint מ-Copilot Studio Custom website channel.
+    # אם מסופק — ה-UI מטמיע Bot Framework WebChat עם file upload + auto JSON detection.
+    COPILOT_TOKEN_ENDPOINT: Optional[str] = None
+
+    # Azure AI Foundry — מסלול חלופי לכתיבת test cases (עוקף את Copilot Studio)
+    AZURE_FOUNDRY_ENDPOINT: Optional[str] = None
+    FOUNDRY_WRITER_AGENT_ID: Optional[str] = None
+    # אימות: browser (פותח דפדפן, ברירת מחדל) | device_code (CLI code) | default (chain — דורש az login/VS)
+    FOUNDRY_AUTH_MODE: str = "browser"
+    # אופציות אימות: interactive (פותח דפדפן), device_code (CLI), client_secret (server-to-server), token (ידני)
+    COPILOT_AUTH_MODE: str = "interactive"
+    COPILOT_CLIENT_SECRET: Optional[str] = None        # רק אם COPILOT_AUTH_MODE=client_secret
+    COPILOT_TOKEN: Optional[str] = None                # רק אם COPILOT_AUTH_MODE=token (paste manually)
+
+    # Azure OpenAI (Phase B)
+    AZURE_OPENAI_ENDPOINT: Optional[str] = None
+    AZURE_OPENAI_KEY: Optional[str] = None
+    AZURE_OPENAI_DEPLOYMENT: str = "gpt51-qa"
+    AZURE_OPENAI_API_VERSION: str = "2024-08-01-preview"
+
+    # Azure DevOps
+    ADO_ORG_URL: Optional[str] = None
+    ADO_PROJECT: Optional[str] = None
+    ADO_PAT: Optional[str] = None
+
+    # Runner mode
+    RUNNER_MODE: Literal["mock", "esb"] = "mock"
+    PLAYWRIGHT_HEADLESS: bool = True
+    VERIFY_SSL: bool = True
+
+    # Confluent Control Center
+    CONFLUENT_URL: Optional[str] = None
+    CONFLUENT_USERNAME: Optional[str] = None
+    CONFLUENT_PASSWORD: Optional[str] = None
+
+    # Kibana
+    KIBANA_URL: Optional[str] = None
+    KIBANA_USERNAME: Optional[str] = None
+    KIBANA_PASSWORD: Optional[str] = None
+
+    # HTTP
+    HTTP_TIMEOUT_SECONDS: int = 30
+
+    # Server
+    HOST: str = "0.0.0.0"
+    PORT: int = 8000
+    LOG_LEVEL: str = "INFO"
+
+    @property
+    def copilot_canvas_mode(self) -> bool:
+        return bool(self.COPILOT_TOKEN_ENDPOINT)
+
+    @property
+    def copilot_embed_mode(self) -> bool:
+        # Canvas mode מקבל עדיפות אם שניהם מוגדרים.
+        if self.copilot_canvas_mode:
+            return False
+        return bool(self.COPILOT_WEBCHAT_URL)
+
+    @property
+    def foundry_enabled(self) -> bool:
+        return bool(self.AZURE_FOUNDRY_ENDPOINT and self.FOUNDRY_WRITER_AGENT_ID)
+
+    @property
+    def copilot_real_enabled(self) -> bool:
+        # ל-MSAL נדרשים תמיד tenant + client. ל-endpoint או direct_url, או env_id+agent_id.
+        auth_ready = bool(self.COPILOT_TENANT_ID and self.COPILOT_APP_CLIENT_ID)
+        endpoint_ready = bool(self.COPILOT_DIRECT_CONNECT_URL) or bool(
+            self.COPILOT_ENVIRONMENT_ID and self.COPILOT_AGENT_IDENTIFIER
+        )
+        return auth_ready and endpoint_ready
+
+    @property
+    def ado_enabled(self) -> bool:
+        return bool(self.ADO_ORG_URL and self.ADO_PROJECT and self.ADO_PAT)
+
+    @property
+    def azure_openai_enabled(self) -> bool:
+        return bool(self.AZURE_OPENAI_ENDPOINT and self.AZURE_OPENAI_KEY)
+
+
+settings = Settings()

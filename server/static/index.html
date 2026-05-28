@@ -1,0 +1,939 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>QA-AI-Hero — מכבי</title>
+<script src="https://cdn.botframework.com/botframework-webchat/latest/webchat.js"></script>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-elev: #161b22;
+    --bg-bubble-agent: #21262d;
+    --bg-bubble-user: #1f6feb;
+    --text: #c9d1d9;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+    --success: #3fb950;
+    --warn: #d29922;
+    --danger: #f85149;
+    --border: #30363d;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
+    height: 100vh; overflow: hidden;
+  }
+  .app {
+    display: flex; flex-direction: column; height: 100vh; max-width: 920px; margin: 0 auto;
+  }
+  header {
+    padding: 16px 24px; background: var(--bg-elev); border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+  .phase-pill {
+    background: var(--bg); border: 1px solid var(--border); padding: 4px 12px;
+    border-radius: 12px; font-size: 12px; color: var(--text-dim);
+  }
+  .phase-pill.A { color: var(--accent); border-color: var(--accent); }
+  .phase-pill.B { color: var(--warn); border-color: var(--warn); }
+  .phase-pill.done { color: var(--success); border-color: var(--success); }
+
+  .chat {
+    flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 14px;
+  }
+  .row { display: flex; gap: 10px; }
+  .row.user { justify-content: flex-start; flex-direction: row-reverse; }
+  .row.agent { justify-content: flex-start; }
+  .avatar {
+    width: 32px; height: 32px; border-radius: 50%; background: var(--bg-elev);
+    display: flex; align-items: center; justify-content: center; font-weight: 700;
+    color: var(--accent); border: 1px solid var(--border); flex-shrink: 0;
+  }
+  .avatar.user { background: var(--bg-bubble-user); color: white; border-color: var(--bg-bubble-user); }
+  .bubble {
+    max-width: 75%; padding: 12px 16px; border-radius: 14px; line-height: 1.55;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .bubble.user { background: var(--bg-bubble-user); color: white; border-bottom-right-radius: 4px; }
+  .bubble.agent { background: var(--bg-bubble-agent); border-bottom-left-radius: 4px; }
+  .bubble.system { background: transparent; color: var(--text-dim); font-style: italic; font-size: 13px;
+                   border: 1px dashed var(--border); }
+  .bubble table { border-collapse: collapse; margin: 8px 0; width: 100%; font-size: 13px; }
+  .bubble th, .bubble td { border: 1px solid var(--border); padding: 6px 10px; text-align: right; }
+  .bubble th { background: rgba(88,166,255,0.1); }
+
+  .typing { display: inline-flex; gap: 4px; align-items: center; height: 18px; }
+  .typing span { width: 6px; height: 6px; background: var(--text-dim); border-radius: 50%;
+                 animation: typing 1.2s infinite ease-in-out; }
+  .typing span:nth-child(2) { animation-delay: 0.2s; }
+  .typing span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes typing {
+    0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+    30% { opacity: 1; transform: translateY(-3px); }
+  }
+
+  .approval { display: flex; gap: 10px; margin-top: 10px; }
+  .approval button {
+    border: 1px solid var(--border); background: var(--bg); color: var(--text);
+    padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 14px;
+  }
+  .approval button.yes { border-color: var(--success); color: var(--success); }
+  .approval button.no { border-color: var(--danger); color: var(--danger); }
+  .approval button:hover { background: var(--bg-elev); }
+
+  footer {
+    padding: 16px 24px; background: var(--bg-elev); border-top: 1px solid var(--border);
+  }
+  .input-row { display: flex; gap: 10px; align-items: flex-end; }
+  .upload-menu { position: relative; }
+  .upload-menu button {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    width: 40px; height: 40px; border-radius: 8px; cursor: pointer; font-size: 18px;
+  }
+  .upload-menu .dropdown {
+    position: absolute; bottom: 48px; right: 0; background: var(--bg-elev);
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px; display: none;
+    min-width: 180px; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  }
+  .upload-menu .dropdown.open { display: block; }
+  .upload-menu .dropdown div {
+    padding: 8px 12px; cursor: pointer; border-radius: 4px; font-size: 14px;
+  }
+  .upload-menu .dropdown div:hover { background: var(--bg-bubble-agent); }
+  textarea {
+    flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    padding: 10px 14px; border-radius: 8px; font-family: inherit; font-size: 14px;
+    resize: none; min-height: 40px; max-height: 120px;
+  }
+  textarea:focus { outline: none; border-color: var(--accent); }
+  .send-btn {
+    background: var(--bg-bubble-user); color: white; border: none; padding: 0 20px;
+    height: 40px; border-radius: 8px; cursor: pointer; font-weight: 600;
+  }
+  .send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .file-status {
+    font-size: 12px; color: var(--text-dim); padding: 4px 12px;
+  }
+
+  .embed-wrap { flex: 1; display: flex; flex-direction: column; padding: 16px; gap: 12px; }
+  .embed-wrap iframe { flex: 1; width: 100%; border: 1px solid var(--border); border-radius: 8px; background: white; }
+  /* Custom Canvas — WebChat container */
+  .canvas-wrap {
+    flex: 1; display: flex; flex-direction: column;
+    padding: 16px; gap: 12px;
+    min-height: 0;  /* חשוב כדי שה-flex children יוכלו לכווץ ולא לדחוף את ההורה */
+  }
+  .canvas-wrap #webchat {
+    flex: 1 1 0; width: 100%;
+    min-height: 0;          /* מאפשר ל-WebChat להחיל scroll פנימי במקום לדחוף החוצה */
+    border: 1px solid var(--border); border-radius: 8px; background: white;
+    overflow: hidden;       /* WebChat מנהל transcript scroll פנימי */
+  }
+  .canvas-controls {
+    background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 16px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+  }
+  .canvas-controls .label { color: var(--text-dim); font-size: 13px; }
+  .canvas-controls button {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    padding: 8px 16px; border-radius: 6px; cursor: pointer;
+  }
+  .canvas-controls button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .canvas-controls .pulse {
+    color: var(--success); font-weight: 600; animation: pulse 1.5s infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+  .embed-controls {
+    background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 16px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+  }
+  .embed-controls .label { color: var(--text-dim); font-size: 13px; }
+  .embed-controls input {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    padding: 8px 12px; border-radius: 6px; font-family: inherit; font-size: 14px; width: 100px;
+  }
+  .embed-controls button {
+    background: var(--success); color: black; border: none; padding: 8px 16px;
+    border-radius: 6px; cursor: pointer; font-weight: 600;
+  }
+  .embed-controls button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .embed-controls .upload-pm {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  }
+  .json-paste-row {
+    background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 16px; margin-top: 8px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .json-paste-row .row-top {
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+  }
+  .json-paste-row textarea {
+    width: 100%; min-height: 80px; max-height: 200px;
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    padding: 10px 12px; border-radius: 6px; font-family: 'Courier New', monospace;
+    font-size: 12px; resize: vertical; direction: ltr; text-align: left;
+  }
+  .json-paste-row textarea:focus { outline: none; border-color: var(--accent); }
+  .json-paste-row button.use-json {
+    background: var(--success); color: black; border: none; padding: 8px 16px;
+    border-radius: 6px; cursor: pointer; font-weight: 600;
+  }
+  .json-paste-row button.use-json:disabled { opacity: 0.5; cursor: not-allowed; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>QA-AI-Hero — מכבי / ESB</h1>
+    <span id="phasePill" class="phase-pill A">Phase A: שיחה עם הסוכן</span>
+  </header>
+
+  <div class="canvas-wrap hidden" id="canvasWrap">
+    <div id="webchat" role="main"></div>
+    <div class="canvas-controls">
+      <span class="label">💬 WebChat ישיר עם הסוכן — תומך 📎 קבצים. JSON של test cases יזוהה אוטומטית ויפעיל Phase B</span>
+      <button id="canvasUploadPm">📎 Postman Collection</button>
+      <span class="label" id="canvasPmStatus"></span>
+      <span class="label" id="canvasJsonWatch" style="margin-right:auto;"></span>
+    </div>
+  </div>
+
+  <div class="embed-wrap hidden" id="embedWrap">
+    <iframe id="embedFrame" src="about:blank"></iframe>
+    <div class="embed-controls">
+      <span class="label">בסיום השיחה עם הסוכן, הסוכן יחזיר הודעה עם <b>ADO suite ID</b>. הזן אותו כאן:</span>
+      <input id="manualSuiteId" type="number" placeholder="suite #" min="1" />
+      <button id="startPhaseBBtn">התחל Phase B</button>
+      <button class="upload-pm" id="embedUploadPm">📎 Postman Collection</button>
+      <button class="upload-pm" id="switchToFoundryBtn" title="עוקף את Copilot Studio">⚡ עבור ל-Foundry</button>
+      <span class="label" id="embedFileStatus"></span>
+    </div>
+    <div class="json-paste-row">
+      <div class="row-top">
+        <span class="label"><b>1.</b> אין לסוכן גישה למסמכים? העלה כאן ספק, העתק את הטקסט והדבק בצ'אט של הסוכן:</span>
+        <button class="upload-pm" id="extractSpecBtn">📄 העלה מסמך אפיון</button>
+        <button class="use-json" id="copySpecBtn" disabled style="background: var(--accent);">📋 העתק טקסט</button>
+        <span class="label" id="specExtractStatus"></span>
+      </div>
+      <textarea id="specText" placeholder="(טקסט מהמסמך יופיע כאן אחרי העלאה)" readonly></textarea>
+    </div>
+    <div class="json-paste-row">
+      <div class="row-top">
+        <span class="label"><b>2.</b> הסוכן החזיר JSON של test cases? העתק מה-iframe והדבק כאן:</span>
+        <button class="use-json" id="useJsonBtn">▶ הרץ Phase B מ-JSON זה</button>
+        <span class="label" id="jsonStatus"></span>
+      </div>
+      <textarea id="jsonPaste" placeholder='הדבק כאן JSON, למשל:&#10;[&#10;  {"test_case_id": "TC-001 ...", "steps": [{"step": "...", "expected_result": "..."}]},&#10;  ...&#10;]'></textarea>
+    </div>
+  </div>
+
+  <div class="embed-wrap hidden" id="foundryWrap">
+    <div style="padding: 24px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; flex: 1; overflow-y: auto;">
+      <h2 style="margin-top: 0; color: var(--accent);">⚡ Foundry Mode</h2>
+      <p>מסלול חלופי לעקיפת Copilot Studio. ה-Foundry agent יקבל את מסמך האפיון, ייצור test cases, ו-Phase B יתחיל אוטומטית.</p>
+      <p class="label" style="font-size: 13px;">⚠ ב-Foundry mode אין שלב אישור / עריכה — ה-agent מייצר test cases פעם אחת והם רצים מיד.</p>
+
+      <div style="margin: 24px 0;">
+        <label style="display: block; margin-bottom: 8px;">מספר US (6 ספרות):</label>
+        <input id="foundryUs" type="text" maxlength="6" placeholder="000000" style="background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: 6px; font-family: inherit; font-size: 14px; width: 120px;" />
+      </div>
+
+      <div style="margin: 24px 0;">
+        <button id="foundryUploadSpec" style="background: var(--accent); color: black; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-weight: 600;">📄 העלה מסמך אפיון (Word/PDF)</button>
+        <span class="label" id="foundryFileStatus" style="margin-right: 12px;"></span>
+      </div>
+
+      <div style="margin: 24px 0;">
+        <button class="upload-pm" id="foundryUploadPm" style="background: var(--bg); color: var(--text); border: 1px solid var(--border); padding: 10px 20px; border-radius: 6px; cursor: pointer;">📎 Postman Collection</button>
+        <span class="label" id="foundryPmStatus" style="margin-right: 12px;"></span>
+      </div>
+
+      <div style="margin: 24px 0;">
+        <button id="switchBackToEmbedBtn" style="background: transparent; color: var(--text-dim); border: 1px solid var(--border); padding: 8px 16px; border-radius: 6px; cursor: pointer;">← חזור ל-Copilot Studio</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="chat" id="chat"></div>
+
+  <div class="file-status" id="fileStatus"></div>
+  <footer>
+    <div class="input-row">
+      <div class="upload-menu">
+        <button id="paperclip" title="העלאת קובץ">📎</button>
+        <div class="dropdown" id="uploadDropdown">
+          <div data-action="spec">📄 מסמך אפיון (Word/PDF)</div>
+          <div data-action="postman">🔧 Postman Collection (JSON)</div>
+        </div>
+      </div>
+      <input type="file" id="fileInput" hidden />
+      <textarea id="msgInput" placeholder="כתוב הודעה לסוכן..." rows="1"></textarea>
+      <button id="sendBtn" class="send-btn">שלח</button>
+    </div>
+  </footer>
+</div>
+
+<script>
+const chatEl = document.getElementById('chat');
+const msgInput = document.getElementById('msgInput');
+const sendBtn = document.getElementById('sendBtn');
+const paperclip = document.getElementById('paperclip');
+const uploadDropdown = document.getElementById('uploadDropdown');
+const fileInput = document.getElementById('fileInput');
+const fileStatus = document.getElementById('fileStatus');
+const phasePill = document.getElementById('phasePill');
+const embedWrap = document.getElementById('embedWrap');
+const embedFrame = document.getElementById('embedFrame');
+const manualSuiteId = document.getElementById('manualSuiteId');
+const startPhaseBBtn = document.getElementById('startPhaseBBtn');
+const embedUploadPm = document.getElementById('embedUploadPm');
+const embedFileStatus = document.getElementById('embedFileStatus');
+const switchToFoundryBtn = document.getElementById('switchToFoundryBtn');
+const useJsonBtn = document.getElementById('useJsonBtn');
+const jsonPaste = document.getElementById('jsonPaste');
+const jsonStatus = document.getElementById('jsonStatus');
+const extractSpecBtn = document.getElementById('extractSpecBtn');
+const copySpecBtn = document.getElementById('copySpecBtn');
+const specText = document.getElementById('specText');
+const specExtractStatus = document.getElementById('specExtractStatus');
+const switchBackToEmbedBtn = document.getElementById('switchBackToEmbedBtn');
+const foundryWrap = document.getElementById('foundryWrap');
+const foundryUs = document.getElementById('foundryUs');
+const foundryUploadSpec = document.getElementById('foundryUploadSpec');
+const foundryUploadPm = document.getElementById('foundryUploadPm');
+const foundryFileStatus = document.getElementById('foundryFileStatus');
+const foundryPmStatus = document.getElementById('foundryPmStatus');
+const chatEl_root = document.getElementById('chat');
+const footerEl = document.querySelector('footer');
+
+const canvasWrap = document.getElementById('canvasWrap');
+const webchatDiv = document.getElementById('webchat');
+const canvasUploadPm = document.getElementById('canvasUploadPm');
+const canvasPmStatus = document.getElementById('canvasPmStatus');
+const canvasJsonWatch = document.getElementById('canvasJsonWatch');
+
+let sessionId = null;
+let pendingUploadAction = null;
+let sse = null;
+let embedMode = false;
+let canvasMode = false;
+let foundryEnabled = false;
+let canvasTriggered = false;  // flag כדי לא לטריג Phase B פעמיים
+
+function setPhase(phase) {
+  phasePill.classList.remove('A', 'B', 'done');
+  if (phase === 'A_copilot') {
+    phasePill.classList.add('A');
+    phasePill.textContent = 'Phase A: שיחה עם הסוכן';
+  } else if (phase === 'B_pipeline') {
+    phasePill.classList.add('B');
+    phasePill.textContent = 'Phase B: בדיקות אוטומטיות';
+  } else if (phase === 'done') {
+    phasePill.classList.add('done');
+    phasePill.textContent = 'הסתיים';
+  }
+}
+
+function addBubble(text, who, opts = {}) {
+  const row = document.createElement('div');
+  row.className = 'row ' + who;
+  const avatar = document.createElement('div');
+  avatar.className = 'avatar ' + (who === 'user' ? 'user' : '');
+  avatar.textContent = who === 'user' ? 'U' : 'QA';
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble ' + who;
+  if (opts.html) {
+    bubble.innerHTML = renderMarkdownLite(text);
+  } else {
+    bubble.textContent = text;
+  }
+  if (opts.approval) {
+    const approval = document.createElement('div');
+    approval.className = 'approval';
+    approval.innerHTML = `
+      <button class="yes" onclick="approveBugs(true)">✓ כן, פתח באגים</button>
+      <button class="no" onclick="approveBugs(false)">✗ לא, סיים</button>`;
+    bubble.appendChild(approval);
+  }
+  row.appendChild(avatar);
+  row.appendChild(bubble);
+  chatEl.appendChild(row);
+  chatEl.scrollTop = chatEl.scrollHeight;
+  return bubble;
+}
+
+function addSystem(text) {
+  const row = document.createElement('div');
+  row.className = 'row agent';
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble system';
+  bubble.textContent = text;
+  row.appendChild(bubble);
+  chatEl.appendChild(row);
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+function renderMarkdownLite(text) {
+  // המרה בסיסית של טבלאות markdown + bold + line breaks
+  const lines = text.split('\n');
+  let html = '';
+  let inTable = false;
+  let tableRows = [];
+
+  function flushTable() {
+    if (!tableRows.length) return;
+    let table = '<table>';
+    tableRows.forEach((row, idx) => {
+      if (idx === 1 && /^\|?\s*[-:|\s]+\|?$/.test(row)) return; // separator row
+      const tag = idx === 0 ? 'th' : 'td';
+      const cells = row.split('|').map(c => c.trim()).filter(c => c.length > 0);
+      table += '<tr>' + cells.map(c => `<${tag}>${escapeHtml(c)}</${tag}>`).join('') + '</tr>';
+    });
+    table += '</table>';
+    html += table;
+    tableRows = [];
+    inTable = false;
+  }
+
+  lines.forEach(line => {
+    if (line.trim().startsWith('|')) {
+      inTable = true;
+      tableRows.push(line.trim());
+    } else {
+      if (inTable) flushTable();
+      html += escapeHtml(line) + '<br>';
+    }
+  });
+  if (inTable) flushTable();
+  return html;
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function showTyping() {
+  const row = document.createElement('div');
+  row.className = 'row agent';
+  row.id = 'typingRow';
+  row.innerHTML = `
+    <div class="avatar">QA</div>
+    <div class="bubble agent"><div class="typing"><span></span><span></span><span></span></div></div>`;
+  chatEl.appendChild(row);
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+function hideTyping() {
+  document.getElementById('typingRow')?.remove();
+}
+
+async function startSession() {
+  const r = await fetch('/session/start', { method: 'POST' });
+  const data = await r.json();
+  sessionId = data.session_id;
+  setPhase(data.phase);
+  embedMode = !!data.embed_mode;
+  canvasMode = !!data.canvas_mode;
+  foundryEnabled = !!data.foundry_enabled;
+  if (!foundryEnabled) {
+    switchToFoundryBtn.style.display = 'none';
+  }
+
+  if (canvasMode && data.token_endpoint) {
+    // ★ Custom Canvas mode — מטמיע WebChat עם file upload + auto JSON detection
+    canvasWrap.classList.remove('hidden');
+    embedWrap.classList.add('hidden');
+    chatEl_root.classList.add('hidden');
+    footerEl.classList.add('hidden');
+    await initWebChat(data.token_endpoint);
+  } else if (embedMode && data.webchat_url) {
+    // Embed mode (fallback): iframe חיצוני
+    embedFrame.src = data.webchat_url;
+    embedWrap.classList.remove('hidden');
+    canvasWrap.classList.add('hidden');
+    chatEl_root.classList.add('hidden');
+    footerEl.classList.add('hidden');
+  } else {
+    // Standard chat mode (mock / SDK)
+    embedWrap.classList.add('hidden');
+    canvasWrap.classList.add('hidden');
+    chatEl_root.classList.remove('hidden');
+    footerEl.classList.remove('hidden');
+    if (data.agent_message) {
+      addBubble(data.agent_message, 'agent', { html: true });
+    }
+  }
+}
+
+// ============================================================
+// Custom Canvas — Bot Framework WebChat initialization
+// ============================================================
+
+async function initWebChat(tokenEndpoint) {
+  if (typeof window.WebChat === 'undefined') {
+    addSystem('❌ webchat.js לא נטען מה-CDN. בדוק חיבור אינטרנט.');
+    return;
+  }
+  canvasJsonWatch.textContent = '⏳ מאתחל WebChat...';
+  try {
+    // 1. Get regional channel settings to find DirectLine URL
+    const environmentEndPoint = tokenEndpoint.slice(0, tokenEndpoint.indexOf('/powervirtualagents'));
+    const apiVersionMatch = tokenEndpoint.match(/api-version=([^&]+)/);
+    const apiVersion = apiVersionMatch ? apiVersionMatch[1] : '2022-03-01-preview';
+    const regionalURL = `${environmentEndPoint}/powervirtualagents/regionalchannelsettings?api-version=${apiVersion}`;
+    const regSettings = await (await fetch(regionalURL)).json();
+    const directLineUrl = regSettings.channelUrlsById && regSettings.channelUrlsById.directline;
+    if (!directLineUrl) throw new Error('לא נמצא DirectLine URL ב-regional settings');
+
+    // 2. Fetch token from token endpoint
+    const convInfo = await (await fetch(tokenEndpoint)).json();
+    if (!convInfo.token) throw new Error('לא התקבל token מה-endpoint');
+
+    // 3. Create DirectLine + render WebChat
+    const directLine = window.WebChat.createDirectLine({
+      domain: `${directLineUrl}v3/directline`,
+      token: convInfo.token,
+    });
+
+    const styleOptions = {
+      hideUploadButton: false,  // ★ כפתור 📎 לקבצים
+      accent: '#58a6ff',
+      bubbleBackground: '#21262d',
+      bubbleTextColor: '#c9d1d9',
+      bubbleFromUserBackground: '#1f6feb',
+      bubbleFromUserTextColor: '#ffffff',
+      backgroundColor: '#0d1117',
+      sendBoxBackground: '#161b22',
+      sendBoxTextColor: '#c9d1d9',
+      sendBoxButtonColor: '#58a6ff',
+      sendBoxBorderTop: 'solid 1px #30363d',
+      primaryFont: "'Segoe UI', Tahoma, Arial, sans-serif",
+    };
+
+    // 4. Store middleware — שני תפקידים:
+    //    (א) DIRECT_LINE/CONNECT_FULFILLED → שולח startConversation event כדי לטריג את ה-greeting של הסוכן
+    //    (ב) DIRECT_LINE/INCOMING_ACTIVITY → מאזין לכל הודעת agent ובודק JSON
+    const store = window.WebChat.createStore({}, ({ dispatch }) => next => action => {
+      if (action.type === 'DIRECT_LINE/CONNECT_FULFILLED') {
+        dispatch({
+          type: 'DIRECT_LINE/POST_ACTIVITY',
+          meta: { method: 'keyboard' },
+          payload: {
+            activity: {
+              channelData: { postBack: true },
+              name: 'startConversation',
+              type: 'event',
+            },
+          },
+        });
+      }
+      if (action.type === 'DIRECT_LINE/INCOMING_ACTIVITY') {
+        const activity = action.payload.activity;
+        if (activity && activity.type === 'message' && activity.from && activity.from.role === 'bot') {
+          handleAgentMessage(activity.text || '');
+        }
+      }
+      return next(action);
+    });
+
+    window.WebChat.renderWebChat({ directLine, styleOptions, store }, webchatDiv);
+    canvasJsonWatch.textContent = '🟢 מחובר — עוקב אחר JSON';
+  } catch (e) {
+    canvasJsonWatch.textContent = '❌ ' + e.message;
+    addSystem('❌ WebChat init failed: ' + e.message);
+  }
+}
+
+// ============================================================
+// Auto JSON detection — שולח ל-/direct-json ומעביר ל-Phase B
+// ============================================================
+
+function handleAgentMessage(text) {
+  if (canvasTriggered || !text) return;
+  const jsonArray = tryExtractJsonArray(text);
+  if (!jsonArray || jsonArray.length === 0) return;
+  // ולידציה בסיסית — חייב להיות test_case_id בפריט הראשון לפחות
+  if (typeof jsonArray[0] !== 'object' || !jsonArray[0].test_case_id) return;
+
+  canvasTriggered = true;
+  canvasJsonWatch.innerHTML = `<span class="pulse">✓ זוהה JSON עם ${jsonArray.length} test cases — שולח ל-Phase B...</span>`;
+  triggerPhaseBFromJson(jsonArray);
+}
+
+function tryExtractJsonArray(text) {
+  // 1. fenced ```json [...] ```
+  const fenced = text.match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```/);
+  if (fenced) {
+    try {
+      const p = JSON.parse(fenced[1]);
+      if (Array.isArray(p)) return p;
+    } catch {}
+  }
+  // 2. raw — find first [ and last ]
+  const start = text.indexOf('[');
+  const end = text.lastIndexOf(']');
+  if (start >= 0 && end > start) {
+    try {
+      const p = JSON.parse(text.slice(start, end + 1));
+      if (Array.isArray(p)) return p;
+    } catch {}
+  }
+  return null;
+}
+
+async function triggerPhaseBFromJson(testCases) {
+  try {
+    const r = await fetch('/direct-json', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Session-ID': sessionId },
+      body: JSON.stringify({ session_id: sessionId, test_cases: testCases }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      canvasJsonWatch.textContent = '❌ ' + (data.detail || r.statusText);
+      canvasTriggered = false;
+      return;
+    }
+    // החלף ל-chat mode כדי להציג progress
+    canvasWrap.classList.add('hidden');
+    chatEl_root.classList.remove('hidden');
+    footerEl.classList.remove('hidden');
+    setPhase('B_pipeline');
+    addSystem(`✓ נטענו ${data.test_cases_loaded} test cases מהסוכן. Phase B התחיל...`);
+    (data.test_case_ids || []).forEach(id => addSystem(`  • ${id}`));
+    openSSE();
+  } catch (e) {
+    canvasJsonWatch.textContent = '❌ ' + e.message;
+    canvasTriggered = false;
+  }
+}
+
+// Canvas: העלאת Postman Collection (אופציונלית — לפני שהסוכן מסיים)
+canvasUploadPm && canvasUploadPm.addEventListener('click', () => {
+  pendingUploadAction = 'canvas-postman';
+  fileInput.accept = '.json';
+  fileInput.click();
+});
+
+// Embed mode: לחיצה על "התחל Phase B" עם suite_id ידני
+startPhaseBBtn.addEventListener('click', async () => {
+  const suiteId = parseInt(manualSuiteId.value, 10);
+  if (!suiteId || suiteId <= 0) {
+    alert('הזן suite ID תקין (מספר חיובי)');
+    return;
+  }
+  startPhaseBBtn.disabled = true;
+  try {
+    const r = await fetch('/complete-phase-a', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Session-ID': sessionId },
+      body: JSON.stringify({ session_id: sessionId, suite_id: suiteId }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      alert('שגיאה: ' + (data.detail || r.statusText));
+      startPhaseBBtn.disabled = false;
+      return;
+    }
+    // החלף ל-chat mode כדי לראות progress ותוצאות
+    embedWrap.classList.add('hidden');
+    chatEl_root.classList.remove('hidden');
+    footerEl.classList.remove('hidden');
+    setPhase('B_pipeline');
+    addSystem(`Phase B התחיל עם suite #${suiteId}. עוקב אחר התקדמות...`);
+    openSSE();
+  } catch (e) {
+    alert('שגיאת רשת: ' + e.message);
+    startPhaseBBtn.disabled = false;
+  }
+});
+
+// Embed mode: העלאת Postman Collection
+embedUploadPm.addEventListener('click', () => {
+  pendingUploadAction = 'postman';
+  fileInput.accept = '.json';
+  fileInput.click();
+});
+
+// Embed mode: העלאת מסמך אפיון - חילוץ טקסט להעתקה לתוך הצ'אט של הסוכן
+extractSpecBtn.addEventListener('click', () => {
+  pendingUploadAction = 'extract-spec';
+  fileInput.accept = '.docx,.pdf,.txt';
+  fileInput.click();
+});
+
+copySpecBtn.addEventListener('click', async () => {
+  const text = specText.value || '';
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    specExtractStatus.textContent = '✓ הועתק! הדבק (Ctrl+V) בצ\'אט של הסוכן למעלה';
+    setTimeout(() => { specExtractStatus.textContent = `${text.length} תווים מוכנים`; }, 4000);
+  } catch (e) {
+    specText.focus();
+    specText.select();
+    specExtractStatus.textContent = 'לא הצליח אוטומטית — סמן ולחץ Ctrl+C';
+  }
+});
+
+// Embed mode: הדבקת JSON ידנית והפעלת Phase B (workaround ל-cross-origin)
+useJsonBtn.addEventListener('click', async () => {
+  const text = (jsonPaste.value || '').trim();
+  if (!text) {
+    jsonStatus.textContent = 'ה-textarea ריק';
+    return;
+  }
+  useJsonBtn.disabled = true;
+  jsonStatus.textContent = 'שולח...';
+  try {
+    const r = await fetch('/direct-json', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Session-ID': sessionId },
+      body: JSON.stringify({ session_id: sessionId, json_text: text }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      jsonStatus.textContent = '';
+      alert('שגיאה: ' + (data.detail || r.statusText));
+      useJsonBtn.disabled = false;
+      return;
+    }
+    jsonStatus.textContent = `✓ נטענו ${data.test_cases_loaded} תסריטים`;
+    embedWrap.classList.add('hidden');
+    chatEl_root.classList.remove('hidden');
+    footerEl.classList.remove('hidden');
+    setPhase('B_pipeline');
+    addSystem(`נטענו ${data.test_cases_loaded} test cases מ-JSON. Phase B התחיל...`);
+    (data.test_case_ids || []).forEach(id => addSystem(`  • ${id}`));
+    openSSE();
+  } catch (e) {
+    jsonStatus.textContent = '';
+    alert('שגיאת רשת: ' + e.message);
+    useJsonBtn.disabled = false;
+  }
+});
+
+// Foundry mode: switch from embed
+switchToFoundryBtn.addEventListener('click', () => {
+  embedWrap.classList.add('hidden');
+  foundryWrap.classList.remove('hidden');
+});
+
+switchBackToEmbedBtn.addEventListener('click', () => {
+  foundryWrap.classList.add('hidden');
+  embedWrap.classList.remove('hidden');
+});
+
+// Foundry: העלאת spec (טריגר ל-/foundry/generate-and-run + Phase B)
+foundryUploadSpec.addEventListener('click', () => {
+  const us = (foundryUs.value || '').trim();
+  if (!/^\d{6}$/.test(us)) {
+    alert('הזן מספר US תקני בן 6 ספרות');
+    return;
+  }
+  pendingUploadAction = 'foundry-spec';
+  fileInput.accept = '.docx,.pdf,.txt';
+  fileInput.click();
+});
+
+// Foundry: העלאת Postman Collection
+foundryUploadPm.addEventListener('click', () => {
+  pendingUploadAction = 'foundry-postman';
+  fileInput.accept = '.json';
+  fileInput.click();
+});
+
+async function sendMessage() {
+  const text = msgInput.value.trim();
+  if (!text || !sessionId) return;
+  addBubble(text, 'user');
+  msgInput.value = '';
+  sendBtn.disabled = true;
+  showTyping();
+  try {
+    const r = await fetch('/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Session-ID': sessionId },
+      body: JSON.stringify({ session_id: sessionId, message: text }),
+    });
+    const data = await r.json();
+    hideTyping();
+    addBubble(data.agent_message, 'agent', { html: true });
+    setPhase(data.phase);
+    if (data.completion) {
+      addSystem(`זוהתה הצלחה — מעבר ל-Phase B (suite ${data.completion.suite_id})`);
+      openSSE();
+    }
+  } catch (e) {
+    hideTyping();
+    addSystem('שגיאת רשת: ' + e.message);
+  } finally {
+    sendBtn.disabled = false;
+  }
+}
+
+paperclip.addEventListener('click', () => uploadDropdown.classList.toggle('open'));
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.upload-menu')) uploadDropdown.classList.remove('open');
+});
+
+uploadDropdown.querySelectorAll('div').forEach(item => {
+  item.addEventListener('click', () => {
+    pendingUploadAction = item.dataset.action;
+    uploadDropdown.classList.remove('open');
+    if (pendingUploadAction === 'spec') {
+      fileInput.accept = '.docx,.pdf,.txt';
+    } else if (pendingUploadAction === 'postman') {
+      fileInput.accept = '.json';
+    }
+    fileInput.click();
+  });
+});
+
+fileInput.addEventListener('change', async () => {
+  const file = fileInput.files[0];
+  if (!file || !sessionId) return;
+  const action = pendingUploadAction;
+  fileStatus.textContent = `מעלה ${file.name}...`;
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('session_id', sessionId);
+
+  let url;
+  if (action === 'foundry-spec') {
+    fd.append('us_number', foundryUs.value.trim());
+    url = '/foundry/generate-and-run';
+  } else if (action === 'foundry-postman' || action === 'postman' || action === 'canvas-postman') {
+    url = '/upload-postman';
+  } else if (action === 'extract-spec') {
+    url = '/extract-spec';
+  } else {
+    url = '/upload-document';
+  }
+  showTyping();
+  try {
+    const r = await fetch(url, { method: 'POST', body: fd, headers: { 'X-Session-ID': sessionId } });
+    const data = await r.json();
+    hideTyping();
+    if (!r.ok) {
+      const errMsg = data.detail || data.message || JSON.stringify(data);
+      addSystem(`❌ שגיאה (${r.status}): ${errMsg}`);
+      fileStatus.textContent = '';
+      fileInput.value = '';
+      pendingUploadAction = null;
+      return;
+    }
+    if (action === 'spec') {
+      addBubble(`📄 ${file.name} (${data.doc_chars || 0} תווים)`, 'user');
+      addBubble(data.agent_message, 'agent', { html: true });
+      setPhase(data.phase);
+      if (data.completion) {
+        addSystem(`זוהתה הצלחה — מעבר ל-Phase B (suite ${data.completion.suite_id})`);
+        openSSE();
+      }
+    } else if (action === 'foundry-spec') {
+      // Foundry mode: עברנו ישירות ל-Phase B
+      foundryFileStatus.textContent = `✓ ${data.test_cases_generated} test cases — Phase B התחיל`;
+      foundryWrap.classList.add('hidden');
+      chatEl_root.classList.remove('hidden');
+      footerEl.classList.remove('hidden');
+      setPhase('B_pipeline');
+      addSystem(`Foundry יצר ${data.test_cases_generated} test cases. עוקב אחר Phase B...`);
+      (data.test_case_ids || []).forEach(id => addSystem(`  • ${id}`));
+      openSSE();
+    } else if (action === 'foundry-postman') {
+      foundryPmStatus.textContent = `✓ ${data.collection_name} (${data.request_count} requests)`;
+    } else if (action === 'canvas-postman') {
+      canvasPmStatus.textContent = `✓ ${data.collection_name} (${data.request_count} requests)`;
+    } else if (action === 'extract-spec') {
+      specText.value = data.text || '';
+      specExtractStatus.textContent = `✓ ${data.filename} — ${data.chars} תווים מוכנים`;
+      copySpecBtn.disabled = false;
+    } else {
+      const summary = `🔧 ${data.collection_name} (${data.request_count} requests)`;
+      if (embedMode) {
+        embedFileStatus.textContent = summary + ' ✓';
+      } else {
+        addBubble(`🔧 הועלתה Collection: ${data.collection_name} (${data.request_count} requests)`, 'user');
+        addSystem('Collection נטען בהצלחה: ' + (data.request_names || []).join(', '));
+      }
+    }
+    fileStatus.textContent = '';
+  } catch (e) {
+    hideTyping();
+    fileStatus.textContent = '';
+    addSystem('שגיאת העלאה: ' + e.message);
+  } finally {
+    fileInput.value = '';
+    pendingUploadAction = null;
+  }
+});
+
+function openSSE() {
+  if (sse) sse.close();
+  sse = new EventSource(`/events/${sessionId}`);
+  sse.addEventListener('message', (e) => addSystem(safeJson(e.data, 'text')));
+  sse.addEventListener('progress', (e) => addBubble(safeJson(e.data, 'text'), 'agent'));
+  sse.addEventListener('warning', (e) => addSystem('⚠ ' + safeJson(e.data, 'text')));
+  sse.addEventListener('error', (e) => addSystem('❌ ' + safeJson(e.data, 'text')));
+  sse.addEventListener('bugs_for_approval', (e) => {
+    const data = JSON.parse(e.data);
+    const summary = data.bugs.map((b, i) => `${i+1}. ${b.title}`).join('\n');
+    addBubble(`זוהו ${data.bugs.length} באגים פוטנציאליים:\n\n${summary}`, 'agent', { approval: true });
+  });
+  sse.addEventListener('pipeline_done', (e) => {
+    const data = JSON.parse(e.data);
+    addBubble(formatPipelineSummary(data), 'agent', { html: true });
+    setPhase('done');
+    sse.close();
+  });
+  sse.addEventListener('ping', () => {});
+}
+
+function safeJson(data, key) {
+  try {
+    const j = JSON.parse(data);
+    return typeof j === 'object' ? (j[key] || JSON.stringify(j)) : String(j);
+  } catch {
+    return String(data);
+  }
+}
+
+function formatPipelineSummary(data) {
+  if (data.error) return `❌ שגיאה: ${data.error}`;
+  return [
+    '✅ הריצה הסתיימה',
+    `סה"כ: ${data.total || 0}, עברו: ${data.passed || 0}, נכשלו: ${data.failed || 0}, חסומים: ${data.blocked || 0}`,
+    '',
+    data.summary_hebrew || '',
+    data.bugs_opened?.length ? `\nbugs ב-ADO: ${data.bugs_opened.join(', ')}` : '',
+  ].join('\n');
+}
+
+async function approveBugs(approved) {
+  await fetch('/approve-bugs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Session-ID': sessionId },
+    body: JSON.stringify({ session_id: sessionId, approved }),
+  });
+  addSystem(approved ? 'אושר — פותח באגים ב-ADO...' : 'נדחה — מסיים ללא פתיחת באגים');
+}
+
+window.approveBugs = approveBugs;
+
+sendBtn.addEventListener('click', sendMessage);
+msgInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+startSession();
+</script>
+</body>
+</html>
