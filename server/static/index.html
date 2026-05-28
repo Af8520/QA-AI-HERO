@@ -494,9 +494,12 @@ async function initWebChat(tokenEndpoint) {
     if (!convInfo.token) throw new Error('לא התקבל token מה-endpoint');
 
     // 3. Create DirectLine + render WebChat
+    // webSocket: false — חיוני! ארגונים רבים חוסמים WebSocket אאוטגוינג ל-Microsoft.
+    // HTTP polling יותר איטי אבל עובד דרך firewall corporate.
     const directLine = window.WebChat.createDirectLine({
       domain: `${directLineUrl}v3/directline`,
       token: convInfo.token,
+      webSocket: false,
     });
 
     const styleOptions = {
