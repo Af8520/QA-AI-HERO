@@ -20,7 +20,7 @@
 
 ## דרישות
 
-- **Python 3.12+** (בעבודה: `py` במקום `python`)
+- **Python 3.9+** (בעבודה: `py` במקום `python`. בדוק עם `py --version`)
 - **גישה לרשת מכבי** (לקריאות ESB אמיתיות) — מהבית אפשר רק במצב mock
 - **Azure AI Foundry** עם מודל `gpt-4.1-mini` פרוס
 - **Copilot Studio agent** (`crbf3_ESBTestscripter`, No-auth, ללא Tools)
@@ -41,6 +41,10 @@ py -m venv .venv
 py -m pip install --upgrade pip
 py -m pip install -r requirements.txt
 py -m playwright install chromium
+
+# אם requirements.txt נכשל על חבילה כלשהי (במיוחד azure-ai-agents או
+# microsoft-agents-copilotstudio-client על Python 3.9) — תשתמש בגרסת ה-core:
+# py -m pip install -r requirements-core.txt
 
 # קונפיגורציה
 copy .env.example .env

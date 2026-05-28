@@ -1,15 +1,7 @@
-# Copilot Studio Agent SDK (Phase A - multi-turn proxy)
-microsoft-agents-copilotstudio-client>=0.9.0
-msal>=1.36.0
-
-# Azure AI Foundry (alternative test case writer path)
-# azure-ai-agents = the dedicated Foundry agents SDK (split from azure-ai-projects in 2.0)
-azure-ai-agents>=1.1.0
-azure-ai-projects>=2.0.0
-azure-identity>=1.25.0
-
-# Azure OpenAI (Phase B - parser/validator/bug analysis)
-openai>=1.55.0
+# ============================================================
+# CORE — required for the main flow (Custom Canvas + Phase B)
+# Works on Python 3.9+
+# ============================================================
 
 # FastAPI Server
 fastapi>=0.110.0
@@ -17,7 +9,10 @@ uvicorn>=0.27.0
 python-multipart>=0.0.9
 sse-starlette>=2.0.0
 
-# Document Processing
+# Azure OpenAI (Phase B Smart Compiler + Bug Agent)
+openai>=1.55.0
+
+# Document Processing (Word/PDF extraction)
 python-docx>=1.0.0
 PyPDF2>=3.0.0
 
@@ -28,7 +23,7 @@ playwright>=1.40.0
 pydantic>=2.6.0
 pydantic-settings>=2.2.0
 
-# JSONPath assertions
+# JSONPath assertions (Phase B Validator)
 jsonpath-ng>=1.6.0
 
 # Logging
@@ -39,9 +34,26 @@ python-dotenv>=1.0.0
 httpx>=0.27.0
 aiohttp>=3.9.0
 
-# Azure DevOps
+# Azure DevOps (bug creation)
 azure-devops==7.1.0b4
 
 # Testing
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
+
+# ============================================================
+# OPTIONAL — only needed for alternative paths (not the main flow)
+# If install fails on older Python — comment these out, the app
+# will still work with Custom Canvas + Foundry chat completions.
+# ============================================================
+
+# Microsoft 365 Agents SDK — only needed for CopilotBridgeReal (SDK path)
+# Currently bypassed by Custom Canvas — safe to skip if install fails
+microsoft-agents-copilotstudio-client>=0.9.0
+msal>=1.36.0
+
+# Azure AI Foundry agents SDK — only needed for Foundry agent (asst_xxx) mode
+# We use Foundry chat completions directly via openai SDK, so this is NOT critical
+azure-ai-agents>=1.1.0
+azure-ai-projects>=2.0.0
+azure-identity>=1.25.0
