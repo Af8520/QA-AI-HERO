@@ -72,10 +72,13 @@ async def parse_test_case_from_text(
         log.warning("parser_openai_sdk_missing")
         return fallback
 
+    import httpx
+    http_client = httpx.AsyncClient(verify=settings.VERIFY_SSL, timeout=60.0)
     client = AsyncAzureOpenAI(
         api_key=settings.AZURE_OPENAI_KEY,
         api_version=settings.AZURE_OPENAI_API_VERSION,
         azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
+        http_client=http_client,
     )
 
     user_payload = {

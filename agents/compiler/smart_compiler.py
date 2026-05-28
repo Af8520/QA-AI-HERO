@@ -34,6 +34,23 @@ from models.test_case import (
 log = get_logger(__name__)
 
 
+def _make_openai_client():
+    """בונה AsyncAzureOpenAI עם httpx client שמכבד את settings.VERIFY_SSL.
+
+    אם יש SSL inspection ארגוני (כמו במכבי) — הגדר VERIFY_SSL=false ב-.env.
+    """
+    from openai import AsyncAzureOpenAI  # type: ignore[import-not-found]
+    import httpx
+
+    http_client = httpx.AsyncClient(verify=settings.VERIFY_SSL, timeout=60.0)
+    return AsyncAzureOpenAI(
+        api_key=settings.AZURE_OPENAI_KEY,
+        api_version=settings.AZURE_OPENAI_API_VERSION,
+        azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
+        http_client=http_client,
+    )
+
+
 def _coerce_to_string(value: Any) -> Optional[str]:
     """ממיר ערך ל-string. אם זה dict/list — serialize ל-JSON.
 
@@ -239,16 +256,10 @@ class SmartCompiler:
         template: PostmanRequest,
     ) -> Optional[ExecutableTestCase]:
         try:
-            from openai import AsyncAzureOpenAI  # type: ignore[import-not-found]
+            client = _make_openai_client()
         except ImportError:
             log.warning("compiler_openai_sdk_missing")
             return None
-
-        client = AsyncAzureOpenAI(
-            api_key=settings.AZURE_OPENAI_KEY,
-            api_version=settings.AZURE_OPENAI_API_VERSION,
-            azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
-        )
 
         # rendered template — אנחנו מסיבים {{vars}} כבר עכשיו, ה-LLM יראה ערכים אמיתיים
         rendered_template = self._render_template(template)
@@ -294,16 +305,10 @@ class SmartCompiler:
         מתאים כש-Postman לא הועלה והסוכן כלל URL+method במפורש ב-steps.
         """
         try:
-            from openai import AsyncAzureOpenAI  # type: ignore[import-not-found]
+            client = _make_openai_client()
         except ImportError:
             log.warning("compiler_llm_only_sdk_missing")
             return None
-
-        client = AsyncAzureOpenAI(
-            api_key=settings.AZURE_OPENAI_KEY,
-            api_version=settings.AZURE_OPENAI_API_VERSION,
-            azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
-        )
 
         user_payload = {
             "TEST_CASE": {"id": test_case_id, "ado_id": ado_id, "text": text},

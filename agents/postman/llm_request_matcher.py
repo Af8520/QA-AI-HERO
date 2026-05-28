@@ -60,10 +60,13 @@ async def _llm_pick(tc_id: str, description: str, candidates: List[str]) -> Opti
         log.warning("openai_sdk_missing")
         return candidates[0] if candidates else None
 
+    import httpx
+    http_client = httpx.AsyncClient(verify=settings.VERIFY_SSL, timeout=60.0)
     client = AsyncAzureOpenAI(
         api_key=settings.AZURE_OPENAI_KEY,
         api_version=settings.AZURE_OPENAI_API_VERSION,
         azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
+        http_client=http_client,
     )
     system = (
         "אתה QA assistant. בחר את שם ה-Postman request שהכי מתאים לתסריט הבדיקה. "

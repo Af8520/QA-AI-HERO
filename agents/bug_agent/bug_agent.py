@@ -56,13 +56,16 @@ class BugAgent:
             return self._fallback_bug(tc, val)
         try:
             from openai import AsyncAzureOpenAI  # type: ignore[import-not-found]
+            import httpx
         except ImportError:
             return self._fallback_bug(tc, val)
 
+        http_client = httpx.AsyncClient(verify=settings.VERIFY_SSL, timeout=60.0)
         client = AsyncAzureOpenAI(
             api_key=settings.AZURE_OPENAI_KEY,
             api_version=settings.AZURE_OPENAI_API_VERSION,
             azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
+            http_client=http_client,
         )
         payload = {
             "test_case_id": tc.test_case_id,
