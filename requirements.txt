@@ -33,6 +33,7 @@ structlog>=24.1.0
 python-dotenv>=1.0.0
 httpx>=0.27.0
 aiohttp>=3.9.0
+truststore>=0.9.0  # Use OS cert store (handles corporate SSL inspection — Maccabi, etc.)
 
 # Azure DevOps (bug creation)
 azure-devops==7.1.0b4

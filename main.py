@@ -2,6 +2,20 @@
 
 from __future__ import annotations
 
+# ============================================================
+# Corporate SSL inspection workaround
+# מערכות ארגוניות (כמו מכבי) עושות SSL inspection עם CA cert משלהן.
+# certifi (ברירת המחדל של Python) לא יודע על ה-CA הזה ולכן SSL נכשל.
+# truststore מפנה את Python ל-Windows Certificate Store, שכבר מכיל את ה-CA
+# שה-IT התקין (אחרת הדפדפן לא היה עובד).
+# חייב להיות לפני כל import שעושה SSL (httpx, requests, openai וכו').
+# ============================================================
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except ImportError:
+    pass  # truststore אופציונלי. לא ייכשל אם לא מותקן (e.g., בבית בלי SSL inspection)
+
 import argparse
 import asyncio
 import json
