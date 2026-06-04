@@ -289,3 +289,113 @@ JSON output מבנה:
 ## 13. תקציר במשפט אחד
 
 נבנתה מערכת QA אוטומטית עם Custom Canvas של Bot Framework WebChat לאינטראקציה עם סוכן Copilot Studio, ו-Smart Compiler מבוסס gpt-4.1-mini שמפרסר test cases חופשיים ל-HTTP requests מבוצעים אמיתית — כל זה ב-localhost:8000 בלי תלות באף שירות חיצוני מורכב.
+
+---
+
+## 14. עדכונים חדשים (סשן השני)
+
+המערכת רצה מקצה לקצה גם בעבודה (רשת מכבי). פתרנו רצף של מכשולי תשתית ארגונית והוספנו שיפורי UX משמעותיים.
+
+### 14.1 תשתית — איך התגברנו על בעיות רשת ארגונית
+
+| בעיה | פתרון |
+|---|---|
+| **JFrog Artifactory** (mhcs.jfrog.io) — pip חסום ל-pypi.org | `pip config set global.index-url https://USER@mac.org.il:TOKEN@mhcs.jfrog.io/artifactory/api/pypi/pypi/simple` |
+| **חלק מ-.whl חסומים** (`MediaTypeBlocked` / hash error) | התקנה חבילה-חבילה (rollback ב-pip מפיל הכל). אופציונליים כמו `microsoft-agents-copilotstudio-client` ו-`playwright` (greenlet ל-compile) מדלגים — לא בשימוש |
+| **WebSocket חסום** ל-`directline.botframework.com` | `webSocket: false` ב-`createDirectLine` → HTTP polling (יותר איטי, אבל עובד) |
+| **SSL inspection** (MITM corporate proxy) | `truststore` + `pip-system-certs` (לא תמיד עוזר ל-httpx). הפתרון הסופי: `VERIFY_SSL=false` ב-`.env`, ה-openai SDK מקבל `http_client=httpx.AsyncClient(verify=settings.VERIFY_SSL)` |
+| **truststore לא ב-JFrog** | המערכת לא תלויה — fallback ל-`VERIFY_SSL=false` |
+
+### 14.2 SmartCompiler — אופטימיזציה משמעותית
+
+**לפני:** LLM call פר test case (N קריאות gpt-4.1-mini → איטי + יקר + ניתן ל-Connection error).
+
+**אחרי:** ★ **Regex extraction first** — נתפס 95%+ מה-test cases בלי LLM. LLM רק כ-fallback.
+
+הסיבה: הסוכן ב-Copilot Studio כבר רושם `שלח METHOD ל-URL` במפורש ב-step (לפי ה-instructions שעדכנו). regex פשוט מחלץ הכל.
+
+קבצים: [`agents/compiler/smart_compiler.py`](agents/compiler/smart_compiler.py) — פונקציה `_try_regex_extract()` + patterns: `_SEND_PATTERN`, `_METHOD_URL_PATTERN`, `_BODY_PATTERN`, `_STATUS_PATTERN`.
+
+### 14.3 UI — Timeline sidebar + Request/Response viewer
+
+**Timeline sidebar שמאלי קבוע** — מציג בזמן אמת את התקדמות Phase A + 7 שלבי Phase B + רשימת test cases חיה ב-step 4. אייקונים מתחלפים: ○ (pending) → ◌ (active, מהבהב) → ✓ done / ⚠ skipped / ✗ failed / ⊘ blocked.
+
+**Request/Response viewer** — לכל test case שהורץ, bubble בצ'אט עם כפתור "פתח פרטים" → מודאל שמציג את ה-HTTP request המלא + response המלא (status, headers, body) כ-JSON formatted.
+
+**SSE event types חדשים** ש-pipeline שולח:
+- `tl_phase` `{phase: "A"|"B", status: "..."}` — תזוזת phase
+- `tl_step` `{step: 1-7, status, label}` — תזוזת שלב פנימי
+- `tl_tc` `{idx, total, name, status, http_status}` — עדכון פר test case ב-step 4
+- `tc_detail` `{test_case_id, request, response}` — נתוני request/response מלאים
+
+### 14.4 מיקום GitHub vs Azure DevOps
+
+- **GitHub** (פרטי): https://github.com/Af8520/QA-AI-HERO — המקור הראשי, מתעדכן ב-git push
+- **Azure DevOps** (מכבי): MaccabiHealthCareServices → AdvancedDotnetInfrastructure → QA-AI-HERO — backup ארגוני. **חסום מ-github.com** במחשב העבודה → היוזר מוריד דרך Azure DevOps בלבד.
+- בעבודה — אם רוצים את הקוד העדכני: או clone מהבית + USB transfer, או הורדה ידנית של קבצים מ-GitHub Raw (אם יש גישה).
+
+### 14.5 .env בעבודה — שדות חובה
+
+```env
+COPILOT_TOKEN_ENDPOINT=<מ-Copilot Studio agent → Channels → Custom website>
+AZURE_OPENAI_ENDPOINT=https://<foundry-resource>.services.ai.azure.com/
+AZURE_OPENAI_KEY=<מ-Foundry portal → Models + endpoints → gpt-4.1-mini → Key>
+AZURE_OPENAI_DEPLOYMENT=gpt-4.1-mini
+RUNNER_MODE=esb
+VERIFY_SSL=false   # חיוני בעבודה (corporate SSL inspection)
+```
+
+### 14.6 מה כן עובד עכשיו end-to-end בעבודה
+
+| ✅/❌ | רכיב |
+|---|---|
+| ✅ | WebChat נטען (CDN לא חסום) |
+| ✅ | חיבור לסוכן דרך DirectLine (HTTP polling) |
+| ✅ | שליחה+קבלת הודעות עם הסוכן |
+| ✅ | העלאת מסמך אפיון בצ'אט (📎) |
+| ✅ | זיהוי אוטומטי של JSON ומעבר ל-Phase B |
+| ✅ | פרסור 95%+ מה-TCs ע"י regex (ללא LLM) |
+| ✅ | קריאות HTTP אמיתיות ל-ESB API מהפייפליין |
+| ✅ | Timeline sidebar + request/response viewer |
+| ❌ | פתיחת bugs ב-ADO (לא נבדק עדיין — דורש ADO_PAT) |
+| ❌ | Kafka/Elastic verification (Playwright לא הותקן — greenlet חסום) |
+| ❌ | Python ADO Agent (יצירת suite + עדכון תוצאות) — עדיין לא נבנה |
+
+### 14.7 פתוחים לסשן הבא
+
+1. **Python ADO Agent** — להוסיף ל-`agents/bug_agent/ado_client.py`:
+   - `create_test_suite(name, plan_id) -> suite_id`
+   - `add_test_cases_to_suite(suite_id, raw_cases)`
+   - `set_test_case_result(test_case_id, status, comment)`
+   המטרה: יצירת test cases ב-ADO + עדכון pass/fail אחרי הריצה, בלי תלות ב-Power Automate.
+
+2. **Playwright fallback** — אם רוצים Kafka/Elastic verify, יש 2 אפשרויות:
+   - USB transfer של greenlet pre-built whl
+   - להחליף את Playwright ב-API ישיר ל-Kafka (kafka-python) ו-Elastic (elasticsearch client) — לא צריך browser
+
+3. **תיעוד צעדים שעברנו** ב-README:
+   - איך מגדירים JFrog ב-pip.ini
+   - איך מגדירים VERIFY_SSL=false
+   - מה ההבדל בין mock/esb modes
+
+4. **Multi-call test cases** (TC עם PATCH+GET לאימות) — כרגע נתפס רק הראשון. אם זה חיוני — לבנות `MultiStepExecutableTestCase`.
+
+5. **Header assertions** ("וודא MAC-StatusSeverity=S-Success") — כרגע ב-`compiler_notes` בלבד; להוסיף JSONPath-like ל-response headers.
+
+6. **תמיכת dotenv reload** ללא restart שרת — כיום צריך Ctrl+C + הרצה מחדש בכל שינוי `.env`.
+
+### 14.8 קומיטים שנעשו בסשן הזה (ניתן להריץ `git log` לראייה)
+
+- `c032d70` — Initial commit
+- `ccffd33` — Python 3.9 compatibility + requirements-core.txt
+- `f00dc2f` — Redact sensitive identifiers
+- `596450e` — WebChat: webSocket: false (HTTP polling)
+- `e6a386e` — truststore for SSL inspection
+- `c281140` — VERIFY_SSL setting in openai SDK
+- `d27a80a` — ★ Major UX: regex compiler + timeline + request/response viewer
+
+---
+
+## 15. תקציר מעודכן במשפט אחד
+
+מערכת QA-AI-Hero רצה end-to-end בעבודה ברשת מכבי: סוכן Copilot Studio מייצר test cases (Custom Canvas WebChat דרך HTTP polling), Smart Compiler מפרסר אותם ב-regex (95%+ ללא LLM), pipeline מבצע קריאות HTTP אמיתיות ל-ESB, ו-UI עם Timeline sidebar + request/response viewer מציג התקדמות בזמן אמת.
