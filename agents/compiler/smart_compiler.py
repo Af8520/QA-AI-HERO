@@ -252,7 +252,20 @@ SYSTEM_PROMPT_NO_TEMPLATE = """אתה QA Test Compiler עבור מחלקת ESB �
 
 5. **body** — בדרך כלל JSON שמופיע ב-step אחרי "עם body:". פרסר אותו כ-object. אם הוא לא valid JSON, השאר כ-string.
 
-6. **headers** — אם יש "MAC-UserID: X" או "Content-Type: ..." ב-step → הוסף ל-headers. אם POST/PATCH עם JSON body וב-spec לא מצוין אחרת → הוסף Content-Type: application/json.
+6. **headers** ★ קריטי — חייב לחלץ את **כל** ה-headers שמופיעים בטקסט. ESB דורש headers ספציפיים (כמו MAC_consumerSysId, MAC_UserID); בלעדיהם הקריאה תיכשל 400.
+   תבניות נפוצות שצריך לזהות (חלקן בעברית, חלקן באנגלית, כולן בעברית RTL בטקסט מקור):
+   - "שלח POST ל-URL עם header X: Y" → headers["X"] = "Y"
+   - "headers: X=Y, A=B" → headers["X"]="Y", headers["A"]="B"
+   - "header X = Y" → headers["X"] = "Y"
+   - "X: Y" כששורה זו בולטת בנפרד אחרי הקטע של ה-step
+   - "כותרות: ..." או "כותרת ..." (Hebrew for "headers")
+   שמות headers נפוצים ב-ESB מכבי: MAC_consumerSysId, MAC_UserID, MAC_UserName,
+   MAC-Channel, MAC-Source, Authorization, Content-Type. שמור על האותיות הגדולות/קטנות
+   בדיוק כפי שהן בטקסט (case-sensitive).
+   אם POST/PUT/PATCH עם JSON body והסוכן לא הזכיר Content-Type — הוסף אוטומטית
+   "Content-Type": "application/json".
+   **אם אתה רואה אזכור כלשהו של header בטקסט — חלץ אותו. עדיף לכלול header מיותר
+   מאשר לחסר header חובה.**
 
 7. אם **לא ניתן** לחלץ URL מהטקסט — החזר request.url=null + compiler_notes "Agent did not provide URL in steps — update agent instructions".
 
@@ -286,19 +299,20 @@ class SmartCompiler:
         text = raw_ado_test_case.get("text") or title
 
         # 0) ★ FAST PATH: regex extraction
-        # Hybrid policy:
-        #   GET → regex סוגר הכל (no LLM)
-        #   POST/PUT/PATCH/DELETE שבו regex כן תפס body → regex סוגר הכל
-        #   POST/PUT/PATCH/DELETE שבו regex לא תפס body → LLM ממלא body/headers/status
-        # הסיבה: הסוכן בעברית לא תמיד כותב "body:" כפי שה-regex מצפה ("עם גוף הבקשה:" וכד׳),
-        # ובלי body הקריאה ל-ESB יוצאת ריקה ומחזירה 400. ה-LLM יודע לחלץ JSON מהטקסט בעברית.
+        # Hybrid policy (corrected 2026-06):
+        #   GET → regex סוגר הכל (no LLM) — אין body/headers משמעותיים
+        #   POST/PUT/PATCH/DELETE → LLM ★ תמיד ★ רץ (כשזמין). הסיבה:
+        #     ה-regex תופס method+url (תבנית "שלח METHOD ל-URL") ולפעמים body
+        #     ("body: {...}"), אבל ה-regex לא מחפש HEADERS בכלל. אם נדלג ל-LLM
+        #     רק כש-body חסר — נפספס headers שהסוכן רושם בטקסט (כמו
+        #     MAC_consumerSysId), והקריאות יחזרו 400.
+        #   אם LLM לא זמין/נכשל — חוזרים ל-regex-only (פחות גרוע מ-blocked).
         regex_data = _try_regex_extract(text)
         if regex_data and regex_data.get("url"):
             method = regex_data["method"]
             needs_body = method in ("POST", "PUT", "PATCH", "DELETE")
-            body_missing = regex_data["body"] is None
 
-            if needs_body and body_missing and settings.azure_openai_enabled:
+            if needs_body and settings.azure_openai_enabled:
                 llm_result = await self._compile_llm_only(
                     test_case_id=title, ado_id=ado_id, text=text,
                 )
@@ -308,17 +322,19 @@ class SmartCompiler:
                     and llm_result.request.url
                     and llm_result.request.url != "about:blank"
                 ):
-                    # ה-regex אמין יותר עבור method+url — נכפה אותם מעל מה ש-LLM החזיר
-                    # (לפעמים LLM משנה case של method או URL במידה זניחה אבל מבלבלת)
+                    # method+url מ-regex אמינים יותר — נכפה אותם מעל ה-LLM
                     llm_result.request.method = method
                     llm_result.request.url = _normalize_url(regex_data["url"])
+                    # Defensive: אם ה-LLM החזיר body=None אבל regex כן תפס — שמור את regex
+                    if llm_result.request.body is None and regex_data["body"] is not None:
+                        llm_result.request.body = regex_data["body"]
                     llm_result.compiler_notes = (
-                        "hybrid: regex caught method+url; LLM filled body+status"
+                        "hybrid: regex caught method+url; LLM extracted headers+body+status"
                     )
                     return llm_result
                 log.warning("compiler_hybrid_llm_fill_failed_using_regex_only", tc=title)
 
-            # GET, או method עם body שכן נתפס ב-regex, או LLM לא זמין/נכשל
+            # GET, או LLM לא זמין/נכשל
             return ExecutableTestCase(
                 test_case_id=title,
                 ado_test_case_id=ado_id,
