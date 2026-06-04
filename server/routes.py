@@ -461,14 +461,14 @@ async def debug_log(request: Request):
         data = await request.json()
     except Exception:
         data = {"raw": "<non-json body>"}
-    event = data.get("event", "unknown") if isinstance(data, dict) else "unknown"
+    # NOTE: structlog משתמש ב-'event' כשם השדה של ה-message — לכן אנחנו לא יכולים
+    # להעביר event=... כ-kwarg. אנחנו מקודדים את ה-event אל תוך ה-log message.
+    browser_event = data.get("event", "unknown") if isinstance(data, dict) else "unknown"
     payload = data.get("data") if isinstance(data, dict) else None
     sid = data.get("session_id") if isinstance(data, dict) else None
-    # מדפיס בנפרד את ה-text המלא אם יש — קל יותר לראות בטרמינל
     if isinstance(payload, dict) and "text_full" in payload:
         log.info(
-            "browser_debug",
-            event=event,
+            f"browser_debug.{browser_event}",
             session_id=sid,
             text_len=payload.get("text_len"),
             preview=payload.get("text_preview"),
@@ -476,11 +476,11 @@ async def debug_log(request: Request):
         # ה-text המלא ב-line נפרד כדי שיתפוס שורה שלמה ויהיה קל לקרוא
         full = payload.get("text_full") or ""
         if full:
-            print(f"\n===== AGENT MESSAGE ({event}) — {payload.get('text_len', 0)} chars =====")
+            print(f"\n===== AGENT MESSAGE ({browser_event}) — {payload.get('text_len', 0)} chars =====")
             print(full)
             print("=" * 70 + "\n", flush=True)
     else:
-        log.info("browser_debug", event=event, session_id=sid, data=payload)
+        log.info(f"browser_debug.{browser_event}", session_id=sid, data=payload)
     return {"ok": True}
 
 
