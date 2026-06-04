@@ -51,6 +51,9 @@ async def start_session(request: Request):
             "webchat_url": None,
             "foundry_enabled": settings.foundry_enabled,
             "agent_message": None,
+            # WebSocket / polling — תומך סטרימינג מילה-מילה כש-WebSocket אפשרי
+            "use_websocket": settings.COPILOT_USE_WEBSOCKET,
+            "polling_interval_ms": settings.COPILOT_POLLING_INTERVAL_MS,
         }
     if settings.copilot_embed_mode:
         # Embed mode (fallback) — iframe חיצוני, cross-origin, JSON paste ידני

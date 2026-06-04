@@ -768,6 +768,10 @@ async function startSession() {
     embedWrap.classList.add('hidden');
     chatEl_root.classList.add('hidden');
     footerEl.classList.add('hidden');
+    window._wcConfig = {
+      useWebSocket: data.use_websocket !== false,  // default true
+      pollingIntervalMs: data.polling_interval_ms || 1000,
+    };
     await initWebChat(data.token_endpoint);
   } else if (embedMode && data.webchat_url) {
     // Embed mode (fallback): iframe חיצוני
@@ -791,6 +795,36 @@ async function startSession() {
 // ============================================================
 // Custom Canvas — Bot Framework WebChat initialization
 // ============================================================
+
+// ============================================================
+// Thinking indicator — מד-זמן שהסוכן חושב (נראה למשתמש בזמן שהוא ממתין)
+// ============================================================
+let thinkingStart = null;
+let thinkingTimer = null;
+
+function startThinking() {
+  thinkingStart = Date.now();
+  if (thinkingTimer) clearInterval(thinkingTimer);
+  thinkingTimer = setInterval(updateThinkingDisplay, 500);
+  updateThinkingDisplay();
+}
+
+function stopThinking() {
+  if (thinkingTimer) clearInterval(thinkingTimer);
+  thinkingTimer = null;
+  thinkingStart = null;
+  if (canvasJsonWatch && !canvasTriggered) {
+    canvasJsonWatch.textContent = '🟢 מחובר — עוקב אחר JSON';
+  }
+}
+
+function updateThinkingDisplay() {
+  if (!thinkingStart || !canvasJsonWatch || canvasTriggered) return;
+  const elapsed = Math.floor((Date.now() - thinkingStart) / 1000);
+  const m = Math.floor(elapsed / 60);
+  const s = elapsed % 60;
+  canvasJsonWatch.innerHTML = `<span class="pulse">🤔 הסוכן חושב... ${m}:${s.toString().padStart(2, '0')}</span>`;
+}
 
 // ============================================================
 // Debug logging — Browser console + UI panel + Server terminal
@@ -857,13 +891,23 @@ async function initWebChat(tokenEndpoint) {
     if (!convInfo.token) throw new Error('לא התקבל token מה-endpoint');
 
     // 3. Create DirectLine + render WebChat
-    // webSocket: false — חיוני! ארגונים רבים חוסמים WebSocket אאוטגוינג ל-Microsoft.
-    // HTTP polling יותר איטי אבל עובד דרך firewall corporate.
-    const directLine = window.WebChat.createDirectLine({
+    // webSocket עכשיו מוגדר ב-.env (COPILOT_USE_WEBSOCKET). True = סטרימינג אמיתי מילה-מילה.
+    // False = HTTP polling (אם הרשת הארגונית חוסמת WebSocket — pollingInterval נמוך יתקרב להרגשה).
+    const wcCfg = window._wcConfig || { useWebSocket: false, pollingIntervalMs: 1000 };
+    const directLineOpts = {
       domain: `${directLineUrl}v3/directline`,
       token: convInfo.token,
-      webSocket: false,
+      webSocket: wcCfg.useWebSocket,
+    };
+    if (!wcCfg.useWebSocket) {
+      // pollingInterval השפיע רק במצב polling
+      directLineOpts.pollingInterval = wcCfg.pollingIntervalMs;
+    }
+    debugLog('DIRECTLINE_CONFIG', {
+      useWebSocket: wcCfg.useWebSocket,
+      pollingIntervalMs: wcCfg.pollingIntervalMs,
     });
+    const directLine = window.WebChat.createDirectLine(directLineOpts);
 
     const styleOptions = {
       hideUploadButton: false,  // ★ כפתור 📎 לקבצים
@@ -901,6 +945,13 @@ async function initWebChat(tokenEndpoint) {
       if (action.type === 'DIRECT_LINE/CONNECT_REJECTED') {
         debugLog('CONNECT_REJECTED', action.payload, 'err');
       }
+      // מד-זמן: היוזר שולח הודעה → הסוכן חושב
+      if (action.type === 'WEB_CHAT/SEND_MESSAGE'
+          || action.type === 'WEB_CHAT/SEND_FILES'
+          || (action.type === 'DIRECT_LINE/POST_ACTIVITY' && action.payload && action.payload.activity
+              && action.payload.activity.type === 'message')) {
+        startThinking();
+      }
       if (action.type === 'DIRECT_LINE/INCOMING_ACTIVITY') {
         const activity = action.payload.activity || {};
         const from = activity.from || {};
@@ -914,6 +965,7 @@ async function initWebChat(tokenEndpoint) {
           text_preview: text.slice(0, 100),
         });
         if (activity.type === 'message' && from.role === 'bot') {
+          stopThinking();
           // שלח את הטקסט המלא ל-server כדי שיודפס בטרמינל
           fetch('/debug-log', {
             method: 'POST',

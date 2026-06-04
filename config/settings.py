@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     # Canvas mode (★ מסלול ראשי): Token endpoint מ-Copilot Studio Custom website channel.
     # אם מסופק — ה-UI מטמיע Bot Framework WebChat עם file upload + auto JSON detection.
     COPILOT_TOKEN_ENDPOINT: Optional[str] = None
+    # WebSocket — אם True, WebChat מתחבר ל-DirectLine ב-WebSocket (סטרימינג אמיתי, מילה-מילה).
+    # ברשתות ארגוניות שחוסמות WebSocket — הגדר False וה-WebChat יחזור ל-HTTP polling.
+    COPILOT_USE_WEBSOCKET: bool = True
+    # פערים בין polls (ms) — רלוונטי רק כש-COPILOT_USE_WEBSOCKET=False.
+    # ערך נמוך = יותר תכוף = קרוב יותר לסטרימינג, אבל יותר עומס רשת. ברירת מחדל 1000ms.
+    COPILOT_POLLING_INTERVAL_MS: int = 1000
 
     # Azure AI Foundry — מסלול חלופי לכתיבת test cases (עוקף את Copilot Studio)
     AZURE_FOUNDRY_ENDPOINT: Optional[str] = None
