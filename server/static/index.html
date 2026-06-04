@@ -26,7 +26,75 @@
     height: 100vh; overflow: hidden;
   }
   .app {
-    display: flex; flex-direction: column; height: 100vh; max-width: 920px; margin: 0 auto;
+    display: flex; flex-direction: row; height: 100vh; max-width: 1280px; margin: 0 auto;
+  }
+  .main-col {
+    flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  }
+  /* Timeline sidebar (left in LTR, but our doc is RTL so it appears on the LEFT visually) */
+  .timeline-sidebar {
+    width: 280px; background: var(--bg-elev); border-left: 1px solid var(--border);
+    padding: 16px 14px; overflow-y: auto; flex-shrink: 0;
+    font-size: 13px;
+  }
+  .timeline-sidebar h3 {
+    margin: 0 0 12px 0; color: var(--accent); font-size: 14px; font-weight: 600;
+  }
+  .tl-phase { margin-bottom: 14px; }
+  .tl-phase-head {
+    display: flex; gap: 8px; align-items: center; padding: 6px 0;
+    font-weight: 600; color: var(--text);
+  }
+  .tl-substeps {
+    border-right: 2px solid var(--border); padding-right: 10px; margin-right: 10px;
+    margin-top: 4px;
+  }
+  .tl-step {
+    display: flex; gap: 8px; align-items: center; padding: 4px 0;
+    color: var(--text-dim); font-size: 12px;
+  }
+  .tl-icon {
+    display: inline-flex; width: 18px; height: 18px; align-items: center; justify-content: center;
+    border-radius: 50%; font-size: 11px; font-weight: 700; flex-shrink: 0;
+    background: var(--bg); border: 1px solid var(--border); color: var(--text-dim);
+  }
+  .tl-icon.done { background: var(--success); color: #000; border-color: var(--success); }
+  .tl-icon.active { background: var(--accent); color: #000; border-color: var(--accent); animation: tl-pulse 1.2s infinite; }
+  .tl-icon.skipped { background: var(--warn); color: #000; border-color: var(--warn); }
+  .tl-icon.failed { background: var(--danger); color: #fff; border-color: var(--danger); }
+  .tl-icon.blocked { background: var(--text-dim); color: #000; border-color: var(--text-dim); }
+  @keyframes tl-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+  .tl-tc-list {
+    max-height: 200px; overflow-y: auto; margin-top: 4px;
+    font-size: 11px;
+  }
+  .tl-tc-row { display: flex; gap: 6px; padding: 2px 0; }
+  .tl-tc-row .tc-name {
+    flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .tl-tc-row .tc-status { color: var(--text-dim); }
+  /* Request/response detail modal */
+  .tc-detail-modal {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.7); display: none; align-items: center; justify-content: center;
+    z-index: 100;
+  }
+  .tc-detail-modal.open { display: flex; }
+  .tc-detail-box {
+    background: var(--bg-elev); border: 1px solid var(--border); border-radius: 10px;
+    width: 80%; max-width: 900px; max-height: 80vh; overflow-y: auto;
+    padding: 20px;
+  }
+  .tc-detail-box h3 { margin-top: 0; color: var(--accent); }
+  .tc-detail-box pre {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px; overflow-x: auto; direction: ltr; text-align: left;
+    font-family: 'Courier New', monospace; font-size: 12px;
+    max-height: 250px; overflow-y: auto;
+  }
+  .tc-detail-box .close-btn {
+    float: left; background: var(--danger); color: white; border: none;
+    padding: 6px 14px; border-radius: 6px; cursor: pointer;
   }
   header {
     padding: 16px 24px; background: var(--bg-elev); border-bottom: 1px solid var(--border);
@@ -188,6 +256,26 @@
 </head>
 <body>
 <div class="app">
+  <aside class="timeline-sidebar" id="timelineSidebar">
+    <h3>📊 התקדמות</h3>
+    <div class="tl-phase">
+      <div class="tl-phase-head"><span class="tl-icon active" id="tl-A">▸</span> Phase A — שיחה עם הסוכן</div>
+    </div>
+    <div class="tl-phase">
+      <div class="tl-phase-head"><span class="tl-icon" id="tl-B">○</span> Phase B — בדיקות אוטומטיות</div>
+      <div class="tl-substeps">
+        <div class="tl-step"><span class="tl-icon" id="tl-s1">○</span> <span id="tl-s1-name">1. Pull test cases</span></div>
+        <div class="tl-step"><span class="tl-icon" id="tl-s2">○</span> <span id="tl-s2-name">2. Spec MD</span></div>
+        <div class="tl-step"><span class="tl-icon" id="tl-s3">○</span> <span id="tl-s3-name">3. Compile</span></div>
+        <div class="tl-step"><span class="tl-icon" id="tl-s4">○</span> <span id="tl-s4-name">4. Execute</span></div>
+        <div class="tl-tc-list" id="tl-tc-list"></div>
+        <div class="tl-step"><span class="tl-icon" id="tl-s5">○</span> <span id="tl-s5-name">5. Verify Kafka+Elastic</span></div>
+        <div class="tl-step"><span class="tl-icon" id="tl-s6">○</span> <span id="tl-s6-name">6. Validate+Bugs</span></div>
+        <div class="tl-step"><span class="tl-icon" id="tl-s7">○</span> <span id="tl-s7-name">7. Reporter</span></div>
+      </div>
+    </div>
+  </aside>
+  <div class="main-col">
   <header>
     <h1>QA-AI-Hero — מכבי / ESB</h1>
     <span id="phasePill" class="phase-pill A">Phase A: שיחה עם הסוכן</span>
@@ -276,6 +364,19 @@
       <button id="sendBtn" class="send-btn">שלח</button>
     </div>
   </footer>
+  </div><!-- .main-col -->
+</div>
+
+<!-- Request/Response detail modal -->
+<div class="tc-detail-modal" id="tcDetailModal" onclick="if(event.target===this)closeTcDetail()">
+  <div class="tc-detail-box">
+    <button class="close-btn" onclick="closeTcDetail()">סגור ✕</button>
+    <h3 id="tcDetailTitle">פרטי בקשה ותשובה</h3>
+    <h4>Request</h4>
+    <pre id="tcDetailRequest"></pre>
+    <h4>Response</h4>
+    <pre id="tcDetailResponse"></pre>
+  </div>
 </div>
 
 <script>
@@ -564,6 +665,7 @@ function handleAgentMessage(text) {
 
   canvasTriggered = true;
   canvasJsonWatch.innerHTML = `<span class="pulse">✓ זוהה JSON עם ${jsonArray.length} test cases — שולח ל-Phase B...</span>`;
+  tlSet('tl-A', 'done');
   triggerPhaseBFromJson(jsonArray);
 }
 
@@ -876,6 +978,60 @@ fileInput.addEventListener('change', async () => {
   }
 });
 
+// ============================================================
+// Timeline sidebar — updates from SSE
+// ============================================================
+
+const TL_ICONS = { done: '✓', active: '◌', skipped: '⚠', failed: '✗', blocked: '⊘', pending: '○' };
+
+function tlSet(id, status, label) {
+  const icon = document.getElementById(id);
+  if (!icon) return;
+  icon.className = 'tl-icon ' + status;
+  icon.textContent = TL_ICONS[status] || '○';
+  if (label) {
+    const labelEl = document.getElementById(id + '-name');
+    if (labelEl) labelEl.textContent = label;
+  }
+}
+
+function tlAddTc(idx, total, name, status, httpStatus) {
+  const container = document.getElementById('tl-tc-list');
+  if (!container) return;
+  let row = document.getElementById(`tl-tc-${idx}`);
+  if (!row) {
+    row = document.createElement('div');
+    row.className = 'tl-tc-row';
+    row.id = `tl-tc-${idx}`;
+    row.innerHTML = `<span class="tl-icon"></span><span class="tc-name"></span><span class="tc-status"></span>`;
+    container.appendChild(row);
+  }
+  const icon = row.querySelector('.tl-icon');
+  icon.className = 'tl-icon ' + status;
+  icon.textContent = TL_ICONS[status] || '○';
+  row.querySelector('.tc-name').textContent = name.length > 28 ? name.slice(0, 28) + '…' : name;
+  row.querySelector('.tc-status').textContent = httpStatus ? `${httpStatus}` : '';
+  // scroll to latest
+  container.scrollTop = container.scrollHeight;
+}
+
+// Cache of TC details by test_case_id, opened on click via tl row
+const tcDetails = {};
+
+function showTcDetail(tcId) {
+  const d = tcDetails[tcId];
+  if (!d) { alert('אין פרטים זמינים ל-' + tcId); return; }
+  document.getElementById('tcDetailTitle').textContent = `פרטים — ${tcId}`;
+  document.getElementById('tcDetailRequest').textContent = JSON.stringify(d.request, null, 2);
+  document.getElementById('tcDetailResponse').textContent = JSON.stringify(d.response, null, 2);
+  document.getElementById('tcDetailModal').classList.add('open');
+}
+function closeTcDetail() {
+  document.getElementById('tcDetailModal').classList.remove('open');
+}
+window.showTcDetail = showTcDetail;
+window.closeTcDetail = closeTcDetail;
+
 function openSSE() {
   if (sse) sse.close();
   sse = new EventSource(`/events/${sessionId}`);
@@ -895,6 +1051,26 @@ function openSSE() {
     sse.close();
   });
   sse.addEventListener('ping', () => {});
+  // ★ Timeline events
+  sse.addEventListener('tl_phase', (e) => {
+    const d = JSON.parse(e.data);
+    if (d.phase === 'A') tlSet('tl-A', d.status);
+    if (d.phase === 'B') tlSet('tl-B', d.status);
+  });
+  sse.addEventListener('tl_step', (e) => {
+    const d = JSON.parse(e.data);
+    tlSet(`tl-s${d.step}`, d.status, `${d.step}. ${d.label || ''}`);
+  });
+  sse.addEventListener('tl_tc', (e) => {
+    const d = JSON.parse(e.data);
+    tlAddTc(d.idx, d.total, d.name, d.status, d.http_status);
+  });
+  sse.addEventListener('tc_detail', (e) => {
+    const d = JSON.parse(e.data);
+    tcDetails[d.test_case_id] = { request: d.request, response: d.response };
+    // הוסף bubble קליק שיפתח את הפרטים
+    addBubble(`📋 ${d.test_case_id} → HTTP ${d.response.status || 'err'} <a href="#" onclick="event.preventDefault();showTcDetail('${d.test_case_id.replace(/'/g,"\\'")}')">[פתח פרטים]</a>`, 'agent', { html: true });
+  });
 }
 
 function safeJson(data, key) {
