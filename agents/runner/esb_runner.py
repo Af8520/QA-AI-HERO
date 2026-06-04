@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, Dict
 
@@ -17,6 +18,36 @@ from models.test_case import (
 )
 
 log = get_logger(__name__)
+
+# ============================================================
+# Constant headers שמוזרקים לכל קריאת ESB.
+# מטרה: לזהות בלוגים של Elastic איזה תסריט הריץ איזה API call.
+# ============================================================
+_CONST_USER_NAME = "qa-ai-hero"
+
+_TC_ID_PATTERN = re.compile(r"(TC[\s\-_]*\d+)", re.IGNORECASE)
+
+
+def _extract_tc_short_id(title: str) -> str:
+    """מחלץ 'TC-XX' מ-title שעשוי להיות ארוך כמו 'TC-01: הקמת אורח...'.
+    אם אין pattern מזוהה — מחזיר את ה-title חתוך ל-32 תווים.
+    """
+    if not title:
+        return "unknown"
+    m = _TC_ID_PATTERN.search(title)
+    if m:
+        return re.sub(r"[\s_]", "-", m.group(1))
+    return title[:32]
+
+
+def _inject_constant_headers(headers: Dict[str, str], test_case_id: str) -> Dict[str, str]:
+    """מחזיר עותק של headers עם mac_user_name + mac_user_id מוזרקים.
+    אנחנו מזריקים תמיד — גם אם ה-LLM/regex הוסיף מה-spec.
+    """
+    merged: Dict[str, str] = dict(headers or {})
+    merged["mac_user_name"] = _CONST_USER_NAME
+    merged["mac_user_id"] = _extract_tc_short_id(test_case_id)
+    return merged
 
 
 class ESBRunner:
@@ -34,6 +65,9 @@ class ESBRunner:
                 duration_seconds=0.0,
                 api_response={"error": executable.compiler_notes or "no executable request"},
             )
+
+        # ★ הזרקת constant headers — נשמרת לכל הקריאות
+        req.headers = _inject_constant_headers(req.headers or {}, executable.test_case_id)
 
         started = time.perf_counter()
         api_response = await _execute_http(req, settings.HTTP_TIMEOUT_SECONDS, settings.VERIFY_SSL)
@@ -106,7 +140,13 @@ async def _execute_http(
     headers = req.headers or {}
     body = req.body
 
-    log.info("esb_request_start", method=method, url=url)
+    log.info(
+        "esb_request_start",
+        method=method,
+        url=url,
+        header_keys=list(headers.keys()),
+        has_body=body is not None,
+    )
     started = time.perf_counter()
 
     async with httpx.AsyncClient(timeout=timeout_seconds, verify=verify_ssl) as client:

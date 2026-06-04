@@ -24,6 +24,9 @@ class ChatSession:
     suite_id: Optional[int] = None
     # Foundry mode: test_cases מועברים ישירות (ללא ADO)
     direct_test_cases: Optional[List[Dict[str, Any]]] = None
+    # Phase A raw JSON (כפי שהגיע מהסוכן / הודבק) — לדיבוג; שמור גם לדיסק ב-logs/phase_a/
+    phase_a_raw_json: Optional[List[Dict[str, Any]]] = None
+    phase_a_json_file: Optional[str] = None
     pending_bugs: List[BugReport] = field(default_factory=list)
     pipeline_task: Optional[asyncio.Task] = None
     event_queue: "asyncio.Queue[Dict[str, Any]]" = field(default_factory=asyncio.Queue)

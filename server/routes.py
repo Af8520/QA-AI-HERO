@@ -204,9 +204,24 @@ async def direct_json(request: Request, payload: dict):
     from agents.foundry.foundry_writer import foundry_to_raw_cases
     raw_cases = foundry_to_raw_cases(test_cases)
     session.direct_test_cases = raw_cases
+    session.phase_a_raw_json = test_cases
     session.suite_id = 0
+
+    # ★ שמירה לדיסק לדיבוג — היוזר ביקש לראות מה הסוכן באמת החזיר
+    json_file = _persist_phase_a_json(sid or session.session_id, test_cases)
+    session.phase_a_json_file = json_file
     session.touch()
-    log.info("direct_json_loaded", session_id=sid, count=len(raw_cases))
+
+    # הדפסה לטרמינל — הסוכן הוא JSON של 20-35 cases ולכן זה ראדבל
+    print(f"\n========== PHASE A JSON SAVED — {len(test_cases)} test cases ==========")
+    print(f"File: {json_file}")
+    try:
+        print(json.dumps(test_cases, ensure_ascii=False, indent=2))
+    except Exception:
+        print(repr(test_cases))
+    print("=" * 70 + "\n", flush=True)
+
+    log.info("direct_json_loaded", session_id=sid, count=len(raw_cases), saved_to=json_file)
 
     await _trigger_phase_b(session, suite_id=0)
     return {
@@ -214,6 +229,40 @@ async def direct_json(request: Request, payload: dict):
         "phase": session.phase,
         "test_cases_loaded": len(raw_cases),
         "test_case_ids": [r["title"] for r in raw_cases],
+        "phase_a_json_file": json_file,
+    }
+
+
+def _persist_phase_a_json(session_id: str, test_cases: list) -> str:
+    """שומר את ה-JSON שהגיע מהסוכן ל-logs/phase_a/<timestamp>_<session>.json.
+    מחזיר נתיב מלא — נשלח גם ל-UI כדי שייצור קישור.
+    """
+    import datetime
+    from pathlib import Path
+
+    logs_dir = Path("logs") / "phase_a"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_sid = (session_id or "anon")[:12]
+    fpath = logs_dir / f"{ts}_{safe_sid}.json"
+    try:
+        fpath.write_text(json.dumps(test_cases, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        log.warning("phase_a_persist_failed", error=str(e), path=str(fpath))
+    return str(fpath)
+
+
+@router.get("/session/{session_id}/phase-a-json")
+async def get_phase_a_json(session_id: str):
+    """מחזיר את ה-JSON שהתקבל מהסוכן ב-Phase A (אם זמין)."""
+    session = await store.get(session_id)
+    if not session or not session.phase_a_raw_json:
+        raise HTTPException(404, "אין JSON של Phase A ל-session זה")
+    return {
+        "session_id": session_id,
+        "count": len(session.phase_a_raw_json),
+        "test_cases": session.phase_a_raw_json,
+        "file": session.phase_a_json_file,
     }
 
 
