@@ -252,10 +252,139 @@
   }
   .json-paste-row button.use-json:disabled { opacity: 0.5; cursor: not-allowed; }
   .hidden { display: none !important; }
+
+  /* ============================================================
+     Landing / Sub-department screens (hash-based routing)
+     ============================================================ */
+  .landing-screen, .subdept-screen {
+    height: 100vh;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    padding: 40px 24px;
+    text-align: center;
+  }
+  .landing-screen h1, .subdept-screen h1 {
+    font-size: 48px; font-weight: 700; margin: 0 0 12px 0;
+    color: var(--accent);
+    letter-spacing: 1px;
+  }
+  .landing-screen h2, .subdept-screen h2 {
+    font-size: 20px; font-weight: 400; margin: 0 0 40px 0;
+    color: var(--text-dim);
+  }
+  .tile-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 220px);
+    gap: 20px;
+    max-width: 720px;
+  }
+  .tile-grid.subdept {
+    grid-template-columns: repeat(3, 220px);
+  }
+  .tile {
+    position: relative;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 36px 16px;
+    min-height: 130px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--text);
+    text-decoration: none;
+    font-size: 20px; font-weight: 600;
+    transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+    cursor: pointer;
+  }
+  .tile:not(.disabled):hover {
+    transform: translateY(-3px);
+    border-color: var(--accent);
+    background: #1c2230;
+  }
+  .tile.disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    pointer-events: auto; /* keep tooltip on hover */
+  }
+  .tile.disabled:hover {
+    transform: none;
+    border-color: var(--border);
+    background: var(--bg-elev);
+  }
+  .tile .badge {
+    position: absolute;
+    top: 8px; left: 8px;
+    background: var(--warn);
+    color: #000;
+    font-size: 10px; font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 10px;
+    letter-spacing: 0.3px;
+  }
+  .back-link {
+    position: absolute;
+    top: 24px; right: 24px;
+    color: var(--text-dim);
+    text-decoration: none;
+    font-size: 14px;
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-elev);
+  }
+  .back-link:hover { color: var(--accent); border-color: var(--accent); }
+
+  .header-back-btn {
+    background: transparent; color: var(--text-dim);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 4px 10px; cursor: pointer; font-size: 13px;
+    margin-left: 12px;
+  }
+  .header-back-btn:hover { color: var(--accent); border-color: var(--accent); }
+
+  /* TC detail trigger button (inside chat bubble) */
+  .tc-detail-link-btn {
+    background: transparent;
+    border: none;
+    color: var(--accent);
+    padding: 0 0 0 8px;
+    margin-right: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    font-family: inherit;
+    text-decoration: underline;
+  }
+  .tc-detail-link-btn:hover { color: #79b8ff; }
 </style>
 </head>
 <body>
-<div class="app">
+
+<!-- Landing Screen — בחירת מחלקה -->
+<section class="landing-screen hidden" id="landingScreen">
+  <h1>QA.AI.hero</h1>
+  <h2>אנא בחר/י מחלקה</h2>
+  <div class="tile-grid">
+    <a class="tile" href="#/integration">אינטגרציה</a>
+    <div class="tile disabled" title="בבנייה — צפוי בקרוב"><span class="badge">בבנייה</span>קליקס</div>
+    <div class="tile disabled" title="בבנייה — צפוי בקרוב"><span class="badge">בבנייה</span>AS400</div>
+    <div class="tile disabled" title="בבנייה — צפוי בקרוב"><span class="badge">בבנייה</span>CRM</div>
+    <div class="tile disabled" title="בבנייה — צפוי בקרוב"><span class="badge">בבנייה</span>דיגיטל</div>
+    <div class="tile disabled" title="בבנייה — צפוי בקרוב"><span class="badge">בבנייה</span>E2E</div>
+  </div>
+</section>
+
+<!-- Sub-department Screen — אינטגרציה → ESB/dotNet/DTM -->
+<section class="subdept-screen hidden" id="subdeptScreen">
+  <a href="#/" class="back-link">← חזרה למחלקות</a>
+  <h1>אינטגרציה</h1>
+  <h2>אנא בחר/י תת-מחלקה</h2>
+  <div class="tile-grid subdept">
+    <a class="tile" href="#/integration/esb">ESB</a>
+    <div class="tile disabled" title="בבנייה — צפוי בקרוב"><span class="badge">בבנייה</span>dotNet</div>
+    <div class="tile disabled" title="בבנייה — צפוי בקרוב"><span class="badge">בבנייה</span>DTM</div>
+  </div>
+</section>
+
+<div class="app hidden" id="appScreen">
   <aside class="timeline-sidebar" id="timelineSidebar">
     <h3>📊 התקדמות</h3>
     <div class="tl-phase">
@@ -277,7 +406,10 @@
   </aside>
   <div class="main-col">
   <header>
-    <h1>QA-AI-Hero — מכבי / ESB</h1>
+    <div style="display: flex; align-items: center;">
+      <h1>QA-AI-Hero — מכבי / ESB</h1>
+      <a href="#/integration" class="header-back-btn" title="חזרה לבחירת תת-מחלקה">← חזרה</a>
+    </div>
     <span id="phasePill" class="phase-pill A">Phase A: שיחה עם הסוכן</span>
   </header>
 
@@ -425,6 +557,36 @@ let embedMode = false;
 let canvasMode = false;
 let foundryEnabled = false;
 let canvasTriggered = false;  // flag כדי לא לטריג Phase B פעמיים
+
+// ============================================================
+// Hash-based routing — Landing → Sub-department → App
+// ============================================================
+const landingScreen = document.getElementById('landingScreen');
+const subdeptScreen = document.getElementById('subdeptScreen');
+const appScreen = document.getElementById('appScreen');
+
+function navigate() {
+  const hash = (window.location.hash || '').replace(/^#/, '');
+  // ה-routes התקפים — כל אחד שלא ברשימה נופל ל-landing
+  const route = hash || '/';
+  landingScreen.classList.add('hidden');
+  subdeptScreen.classList.add('hidden');
+  appScreen.classList.add('hidden');
+
+  if (route === '/' || route === '') {
+    landingScreen.classList.remove('hidden');
+  } else if (route === '/integration') {
+    subdeptScreen.classList.remove('hidden');
+  } else if (route === '/integration/esb') {
+    appScreen.classList.remove('hidden');
+  } else {
+    // route לא מוכר — נחזיר ל-landing
+    window.location.hash = '#/';
+    landingScreen.classList.remove('hidden');
+  }
+}
+
+window.addEventListener('hashchange', navigate);
 
 function setPhase(phase) {
   phasePill.classList.remove('A', 'B', 'done');
@@ -1026,6 +1188,34 @@ function showTcDetail(tcId) {
   document.getElementById('tcDetailResponse').textContent = JSON.stringify(d.response, null, 2);
   document.getElementById('tcDetailModal').classList.add('open');
 }
+
+// ייעודי ל-bubble של TC detail — בונה DOM ישיר עם <button> אמיתי
+// (ולא innerHTML עם user data, שגרם לבאג של escaping ה-<a>)
+function addTcDetailBubble(tcId, httpStatus) {
+  const row = document.createElement('div');
+  row.className = 'row agent';
+  const avatar = document.createElement('div');
+  avatar.className = 'avatar';
+  avatar.textContent = 'QA';
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble agent';
+
+  const label = document.createElement('span');
+  label.textContent = `📋 ${tcId} → HTTP ${httpStatus != null ? httpStatus : 'err'}`;
+  bubble.appendChild(label);
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'tc-detail-link-btn';
+  btn.textContent = '[פתח פרטים]';
+  btn.addEventListener('click', () => showTcDetail(tcId));
+  bubble.appendChild(btn);
+
+  row.appendChild(avatar);
+  row.appendChild(bubble);
+  chatEl.appendChild(row);
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
 function closeTcDetail() {
   document.getElementById('tcDetailModal').classList.remove('open');
 }
@@ -1068,8 +1258,8 @@ function openSSE() {
   sse.addEventListener('tc_detail', (e) => {
     const d = JSON.parse(e.data);
     tcDetails[d.test_case_id] = { request: d.request, response: d.response };
-    // הוסף bubble קליק שיפתח את הפרטים
-    addBubble(`📋 ${d.test_case_id} → HTTP ${d.response.status || 'err'} <a href="#" onclick="event.preventDefault();showTcDetail('${d.test_case_id.replace(/'/g,"\\'")}')">[פתח פרטים]</a>`, 'agent', { html: true });
+    // bubble קליק שיפתח את הפרטים — DOM ישיר (לא innerHTML — בטוח מ-XSS / escaping)
+    addTcDetailBubble(d.test_case_id, d.response && d.response.status);
   });
 }
 
@@ -1112,6 +1302,8 @@ msgInput.addEventListener('keydown', (e) => {
   }
 });
 
+// boot — navigation מציג את ה-screen הראשון, startSession טוען את המצב לרקע
+navigate();
 startSession();
 </script>
 </body>
