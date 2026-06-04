@@ -400,6 +400,41 @@ def _extract_text(filename: str, content: bytes) -> str:
         return content.decode("latin-1", errors="replace")
 
 
+@router.post("/debug-log")
+async def debug_log(request: Request):
+    """לוג ניפוי שגיאות מהדפדפן → terminal של ה-server.
+
+    ה-WebChat רץ ב-browser, אז הודעות מ-Copilot Studio לא עוברות דרך Python.
+    ה-endpoint הזה מאפשר ל-UI לשלוח כל אירוע ל-server log כדי שניתן יהיה
+    לראות בטרמינל מה הסוכן באמת החזיר (במיוחד כאשר JSON לא זוהה).
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        data = {"raw": "<non-json body>"}
+    event = data.get("event", "unknown") if isinstance(data, dict) else "unknown"
+    payload = data.get("data") if isinstance(data, dict) else None
+    sid = data.get("session_id") if isinstance(data, dict) else None
+    # מדפיס בנפרד את ה-text המלא אם יש — קל יותר לראות בטרמינל
+    if isinstance(payload, dict) and "text_full" in payload:
+        log.info(
+            "browser_debug",
+            event=event,
+            session_id=sid,
+            text_len=payload.get("text_len"),
+            preview=payload.get("text_preview"),
+        )
+        # ה-text המלא ב-line נפרד כדי שיתפוס שורה שלמה ויהיה קל לקרוא
+        full = payload.get("text_full") or ""
+        if full:
+            print(f"\n===== AGENT MESSAGE ({event}) — {payload.get('text_len', 0)} chars =====")
+            print(full)
+            print("=" * 70 + "\n", flush=True)
+    else:
+        log.info("browser_debug", event=event, session_id=sid, data=payload)
+    return {"ok": True}
+
+
 @router.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:
     from pathlib import Path

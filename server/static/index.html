@@ -354,6 +354,23 @@
     text-decoration: underline;
   }
   .tc-detail-link-btn:hover { color: #79b8ff; }
+
+  /* Debug log panel (Phase A — מציג הודעות מ-Copilot Studio בזמן אמת) */
+  .debug-log {
+    max-height: 140px; overflow-y: auto;
+    font-size: 11px; font-family: 'Courier New', monospace;
+    color: var(--text-dim);
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    margin-top: 8px; padding: 8px 10px;
+    direction: ltr; text-align: left;
+    width: 100%;
+  }
+  .debug-log .dbg-line { padding: 1px 0; white-space: pre-wrap; word-break: break-word; }
+  .debug-log .dbg-line.bot { color: var(--accent); }
+  .debug-log .dbg-line.json-yes { color: var(--success); font-weight: 700; }
+  .debug-log .dbg-line.json-no { color: var(--warn); }
+  .debug-log .dbg-line.err { color: var(--danger); }
+  .debug-log .dbg-line .ts { color: var(--text-dim); margin-right: 6px; }
 </style>
 </head>
 <body>
@@ -421,6 +438,7 @@
       <span class="label" id="canvasPmStatus"></span>
       <span class="label" id="canvasJsonWatch" style="margin-right:auto;"></span>
     </div>
+    <div class="debug-log" id="debugLog" title="לוג ניפוי שגיאות — כל הודעה מ-Copilot Studio + תוצאת זיהוי JSON. גם נשלח לטרמינל של ה-server."></div>
   </div>
 
   <div class="embed-wrap hidden" id="embedWrap">
@@ -736,6 +754,50 @@ async function startSession() {
 // Custom Canvas — Bot Framework WebChat initialization
 // ============================================================
 
+// ============================================================
+// Debug logging — Browser console + UI panel + Server terminal
+// ============================================================
+
+const DBG_CLASSES = { bot: 'bot', json_yes: 'json-yes', json_no: 'json-no', err: 'err' };
+
+function debugLog(event, data, kind) {
+  // 1. browser DevTools console (F12)
+  try { console.log('[QA-AI-Hero]', event, data); } catch {}
+
+  // 2. UI panel
+  const el = document.getElementById('debugLog');
+  if (el) {
+    const line = document.createElement('div');
+    line.className = 'dbg-line' + (kind && DBG_CLASSES[kind] ? ' ' + DBG_CLASSES[kind] : '');
+    const ts = new Date().toTimeString().slice(0, 8);
+    const tsSpan = document.createElement('span');
+    tsSpan.className = 'ts';
+    tsSpan.textContent = `[${ts}]`;
+    line.appendChild(tsSpan);
+    let text;
+    if (typeof data === 'string') text = data;
+    else if (data == null) text = '';
+    else {
+      try { text = JSON.stringify(data); } catch { text = String(data); }
+    }
+    line.appendChild(document.createTextNode(`${event}: ${text.slice(0, 240)}`));
+    el.appendChild(line);
+    // שמירה על מקסימום 60 שורות
+    while (el.children.length > 60) el.removeChild(el.firstChild);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  // 3. server terminal (POST /debug-log)
+  try {
+    fetch('/debug-log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ event, data, session_id: sessionId }),
+      keepalive: true,
+    }).catch(() => {});
+  } catch {}
+}
+
 async function initWebChat(tokenEndpoint) {
   if (typeof window.WebChat === 'undefined') {
     addSystem('❌ webchat.js לא נטען מה-CDN. בדוק חיבור אינטרנט.');
@@ -785,6 +847,7 @@ async function initWebChat(tokenEndpoint) {
     //    (ב) DIRECT_LINE/INCOMING_ACTIVITY → מאזין לכל הודעת agent ובודק JSON
     const store = window.WebChat.createStore({}, ({ dispatch }) => next => action => {
       if (action.type === 'DIRECT_LINE/CONNECT_FULFILLED') {
+        debugLog('CONNECT_FULFILLED', 'WebChat connected to DirectLine — sending startConversation event');
         dispatch({
           type: 'DIRECT_LINE/POST_ACTIVITY',
           meta: { method: 'keyboard' },
@@ -797,10 +860,38 @@ async function initWebChat(tokenEndpoint) {
           },
         });
       }
+      if (action.type === 'DIRECT_LINE/CONNECT_REJECTED') {
+        debugLog('CONNECT_REJECTED', action.payload, 'err');
+      }
       if (action.type === 'DIRECT_LINE/INCOMING_ACTIVITY') {
-        const activity = action.payload.activity;
-        if (activity && activity.type === 'message' && activity.from && activity.from.role === 'bot') {
-          handleAgentMessage(activity.text || '');
+        const activity = action.payload.activity || {};
+        const from = activity.from || {};
+        const text = activity.text || '';
+        // לוג של כל activity נכנס — גם events לא-message (לאבחון)
+        debugLog('INCOMING_ACTIVITY', {
+          activity_type: activity.type,
+          from_role: from.role,
+          from_name: from.name,
+          text_len: text.length,
+          text_preview: text.slice(0, 100),
+        });
+        if (activity.type === 'message' && from.role === 'bot') {
+          // שלח את הטקסט המלא ל-server כדי שיודפס בטרמינל
+          fetch('/debug-log', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              event: 'BOT_MESSAGE_FULL',
+              session_id: sessionId,
+              data: {
+                text_full: text,
+                text_len: text.length,
+                text_preview: text.slice(0, 200),
+              },
+            }),
+            keepalive: true,
+          }).catch(() => {});
+          handleAgentMessage(text);
         }
       }
       return next(action);
@@ -808,9 +899,11 @@ async function initWebChat(tokenEndpoint) {
 
     window.WebChat.renderWebChat({ directLine, styleOptions, store }, webchatDiv);
     canvasJsonWatch.textContent = '🟢 מחובר — עוקב אחר JSON';
+    debugLog('WEBCHAT_READY', `DirectLine: ${directLineUrl} (webSocket=false)`);
   } catch (e) {
     canvasJsonWatch.textContent = '❌ ' + e.message;
     addSystem('❌ WebChat init failed: ' + e.message);
+    debugLog('WEBCHAT_INIT_FAILED', e.message, 'err');
   }
 }
 
@@ -819,37 +912,67 @@ async function initWebChat(tokenEndpoint) {
 // ============================================================
 
 function handleAgentMessage(text) {
-  if (canvasTriggered || !text) return;
-  const jsonArray = tryExtractJsonArray(text);
-  if (!jsonArray || jsonArray.length === 0) return;
+  if (canvasTriggered) {
+    debugLog('SKIP_ALREADY_TRIGGERED', 'Phase B כבר רץ — מתעלם מהודעה');
+    return;
+  }
+  if (!text) {
+    debugLog('SKIP_EMPTY_TEXT', 'הודעה ריקה — דילוג');
+    return;
+  }
+  debugLog('BOT_MSG', `${text.length} chars: "${text.slice(0, 80)}${text.length > 80 ? '…' : ''}"`, 'bot');
+
+  const extraction = tryExtractJsonArray(text);
+  if (!extraction.array) {
+    debugLog('NO_JSON', extraction.reason, 'json_no');
+    return;
+  }
+  const jsonArray = extraction.array;
   // ולידציה בסיסית — חייב להיות test_case_id בפריט הראשון לפחות
-  if (typeof jsonArray[0] !== 'object' || !jsonArray[0].test_case_id) return;
+  if (typeof jsonArray[0] !== 'object' || jsonArray[0] == null || !jsonArray[0].test_case_id) {
+    debugLog('JSON_INVALID_SHAPE', {
+      method: extraction.method,
+      array_len: jsonArray.length,
+      first_item_keys: jsonArray[0] && typeof jsonArray[0] === 'object'
+        ? Object.keys(jsonArray[0]) : typeof jsonArray[0],
+      reason: 'חסר test_case_id בפריט הראשון',
+    }, 'json_no');
+    return;
+  }
 
   canvasTriggered = true;
+  debugLog('JSON_FOUND', `${jsonArray.length} test cases via ${extraction.method}`, 'json_yes');
   canvasJsonWatch.innerHTML = `<span class="pulse">✓ זוהה JSON עם ${jsonArray.length} test cases — שולח ל-Phase B...</span>`;
   tlSet('tl-A', 'done');
   triggerPhaseBFromJson(jsonArray);
 }
 
+// מחזיר {array, method, reason} — array=null אם לא נמצא, reason מסביר למה
 function tryExtractJsonArray(text) {
   // 1. fenced ```json [...] ```
   const fenced = text.match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```/);
   if (fenced) {
     try {
       const p = JSON.parse(fenced[1]);
-      if (Array.isArray(p)) return p;
-    } catch {}
+      if (Array.isArray(p)) return { array: p, method: 'fenced ```json```' };
+      return { array: null, method: 'fenced', reason: 'JSON תקני אבל לא array' };
+    } catch (e) {
+      return { array: null, method: 'fenced', reason: 'fenced block נמצא אבל JSON.parse נכשל: ' + e.message };
+    }
   }
   // 2. raw — find first [ and last ]
   const start = text.indexOf('[');
   const end = text.lastIndexOf(']');
-  if (start >= 0 && end > start) {
-    try {
-      const p = JSON.parse(text.slice(start, end + 1));
-      if (Array.isArray(p)) return p;
-    } catch {}
+  if (start < 0 || end <= start) {
+    return { array: null, method: 'raw', reason: `לא נמצא [...] בטקסט (אורך ${text.length})` };
   }
-  return null;
+  try {
+    const p = JSON.parse(text.slice(start, end + 1));
+    if (Array.isArray(p)) return { array: p, method: 'raw [...]' };
+    return { array: null, method: 'raw', reason: 'JSON תקני אבל לא array' };
+  } catch (e) {
+    return { array: null, method: 'raw', reason: `JSON.parse נכשל: ${e.message.slice(0, 80)}` };
+  }
 }
 
 async function triggerPhaseBFromJson(testCases) {
