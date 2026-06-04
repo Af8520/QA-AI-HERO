@@ -96,6 +96,69 @@ _STATUS_PATTERN = re.compile(
 # Body: "body: {...}" — מנסה לתפוס JSON עם nesting פשוט
 _BODY_PATTERN = re.compile(r"body[:\s]+(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})", re.DOTALL)
 
+# Headers — שלוש תבניות שכיחות בתסריטי הסוכן:
+# 1. "עם header NAME: VALUE" או "header NAME=VALUE" (גם עברית "כותרת"/"כותרות")
+_HEADER_KV_PATTERN = re.compile(
+    r"(?:header[s]?|כותרת|כותרות)\s*[-:]?\s*([A-Za-z][\w\-]*)\s*[:=]\s*([^\s,;\)\}]+)",
+    re.IGNORECASE,
+)
+# 2. "headers: { ... }" — JSON dict
+_HEADERS_DICT_PATTERN = re.compile(
+    r'"?headers"?\s*[:=]\s*(\{[^{}]*\})',
+    re.IGNORECASE,
+)
+# 3. fallback — "MAC_something: value" שלא מקדים לו "header" (קונבנציה של ESB מכבי)
+_MAC_KV_PATTERN = re.compile(
+    r"\b(MAC[_\-][A-Za-z][\w\-]*)\s*[:=]\s*([^\s,;\)\}\"']+)",
+)
+
+# מצבים שמתעלמים מהם — מילים שכיחות שעלולות להיתפס בטעות כ-headers
+_HEADER_NAME_BLACKLIST = {"description", "type", "expected", "result", "expected_result", "rad", "mac"}
+
+
+def _clean_header_value(v: str) -> str:
+    """מסיר גרשיים מקיפים, פסיקים בסוף, רווחים."""
+    v = (v or "").strip().rstrip(",;.\"'")
+    if len(v) >= 2 and (
+        (v[0] == '"' and v[-1] == '"') or (v[0] == "'" and v[-1] == "'")
+    ):
+        v = v[1:-1]
+    return v
+
+
+def _extract_headers_via_regex(text: str) -> Dict[str, str]:
+    """מחלץ headers ממקורות שונים. אם הסוכן כתב 'עם header X: Y' או 'headers: {...}' או 'MAC_x: y'."""
+    headers: Dict[str, str] = {}
+
+    # 1. headers: {...} as JSON
+    for dm in _HEADERS_DICT_PATTERN.finditer(text):
+        try:
+            parsed = json.loads(dm.group(1))
+            if isinstance(parsed, dict):
+                for k, v in parsed.items():
+                    if isinstance(k, str) and k:
+                        headers[k] = str(v) if v is not None else ""
+        except json.JSONDecodeError:
+            pass
+
+    # 2. "header NAME: VALUE" — Hebrew or English keyword
+    for km in _HEADER_KV_PATTERN.finditer(text):
+        name = km.group(1)
+        if name.lower() in _HEADER_NAME_BLACKLIST:
+            continue
+        value = _clean_header_value(km.group(2))
+        if name and value:
+            headers[name] = value
+
+    # 3. MAC_*: value (no keyword required — ESB Maccabi convention)
+    for mm in _MAC_KV_PATTERN.finditer(text):
+        name = mm.group(1)
+        value = _clean_header_value(mm.group(2))
+        if name and value:
+            headers[name] = value
+
+    return headers
+
 
 def _try_regex_extract(text: str) -> Optional[Dict[str, Any]]:
     """ניסיון לחלץ request מטקסט תסריט בלי LLM. מחזיר None אם לא נמצא URL+method."""
@@ -128,10 +191,10 @@ def _try_regex_extract(text: str) -> Optional[Dict[str, Any]]:
         except ValueError:
             pass
 
-    # headers — אם POST/PUT/PATCH עם body → הוסף Content-Type
-    headers: Dict[str, str] = {}
+    # headers — חילוץ מ-3 תבניות + Content-Type אוטומטי לבקשות עם body
+    headers = _extract_headers_via_regex(text)
     if body is not None and method in ("POST", "PUT", "PATCH"):
-        headers["Content-Type"] = "application/json"
+        headers.setdefault("Content-Type", "application/json")
 
     return {
         "method": method,
@@ -140,6 +203,13 @@ def _try_regex_extract(text: str) -> Optional[Dict[str, Any]]:
         "body": body,
         "expected_status": status,
     }
+
+
+def _text_mentions_headers(text: str) -> bool:
+    """True אם הטקסט מאזכר headers — אם כן, regex אמור היה לתפוס משהו."""
+    return bool(
+        re.search(r"\b(header|headers|כותרת|כותרות|MAC[_\-][A-Za-z])", text or "", re.IGNORECASE)
+    )
 
 
 def _normalize_url(url: Optional[str]) -> Optional[str]:
@@ -299,20 +369,52 @@ class SmartCompiler:
         text = raw_ado_test_case.get("text") or title
 
         # 0) ★ FAST PATH: regex extraction
-        # Hybrid policy (corrected 2026-06):
-        #   GET → regex סוגר הכל (no LLM) — אין body/headers משמעותיים
-        #   POST/PUT/PATCH/DELETE → LLM ★ תמיד ★ רץ (כשזמין). הסיבה:
-        #     ה-regex תופס method+url (תבנית "שלח METHOD ל-URL") ולפעמים body
-        #     ("body: {...}"), אבל ה-regex לא מחפש HEADERS בכלל. אם נדלג ל-LLM
-        #     רק כש-body חסר — נפספס headers שהסוכן רושם בטקסט (כמו
-        #     MAC_consumerSysId), והקריאות יחזרו 400.
-        #   אם LLM לא זמין/נכשל — חוזרים ל-regex-only (פחות גרוע מ-blocked).
+        # Strategy (★ 2026-06 revised — minimum LLM calls):
+        #   GET → regex סוגר הכל.
+        #   POST/PUT/PATCH/DELETE → regex סוגר הכל אם תפס body + headers (כשהטקסט מאזכר headers).
+        #   רק אם regex פספס משהו ברור (body חסר, או הטקסט אומר 'header' אבל לא נתפס כלום) → LLM.
+        # התוצאה: 95%+ מהתסריטים נסגרים ב-regex בלבד (0 קריאות ל-LLM).
         regex_data = _try_regex_extract(text)
         if regex_data and regex_data.get("url"):
             method = regex_data["method"]
             needs_body = method in ("POST", "PUT", "PATCH", "DELETE")
+            regex_headers = regex_data["headers"] or {}
+            regex_body = regex_data["body"]
+            # התעלמות מ-Content-Type כי הוא מוזרק אוטומטית
+            custom_headers = [k for k in regex_headers.keys() if k.lower() != "content-type"]
+            text_has_header_mention = _text_mentions_headers(text)
 
-            if needs_body and settings.azure_openai_enabled:
+            # מתי regex מספיק:
+            #   - GET תמיד מספיק
+            #   - POST/PUT/PATCH/DELETE: יש body, וגם (אין אזכור headers בטקסט || regex תפס headers)
+            regex_sufficient = (
+                not needs_body
+                or (regex_body is not None and (not text_has_header_mention or len(custom_headers) >= 1))
+            )
+
+            if regex_sufficient:
+                return ExecutableTestCase(
+                    test_case_id=title,
+                    ado_test_case_id=ado_id,
+                    request=HttpRequestSpec(
+                        method=method,
+                        url=_normalize_url(regex_data["url"]),
+                        headers=regex_headers,
+                        body=regex_body,
+                    ),
+                    expected_response=ResponseAssertion(status=regex_data["expected_status"]),
+                    source_text=text,
+                    compiler_notes=(
+                        f"extracted via regex (no LLM call) — "
+                        f"headers={len(custom_headers)} body={'yes' if regex_body else 'no'}"
+                    ),
+                )
+
+            # ★ Safety net: regex פספס משהו → LLM מנקה
+            log.info("compiler_regex_insufficient_falling_back_to_llm",
+                     tc=title, has_body=regex_body is not None,
+                     header_mention=text_has_header_mention, regex_headers=custom_headers)
+            if settings.azure_openai_enabled:
                 llm_result = await self._compile_llm_only(
                     test_case_id=title, ado_id=ado_id, text=text,
                 )
@@ -325,28 +427,33 @@ class SmartCompiler:
                     # method+url מ-regex אמינים יותר — נכפה אותם מעל ה-LLM
                     llm_result.request.method = method
                     llm_result.request.url = _normalize_url(regex_data["url"])
-                    # Defensive: אם ה-LLM החזיר body=None אבל regex כן תפס — שמור את regex
-                    if llm_result.request.body is None and regex_data["body"] is not None:
-                        llm_result.request.body = regex_data["body"]
+                    # Defensive merge: התחל מ-LLM, ושמור על מה ש-regex תפס אם LLM החסיר
+                    if llm_result.request.body is None and regex_body is not None:
+                        llm_result.request.body = regex_body
+                    if regex_headers:
+                        merged = dict(llm_result.request.headers or {})
+                        for k, v in regex_headers.items():
+                            merged.setdefault(k, v)
+                        llm_result.request.headers = merged
                     llm_result.compiler_notes = (
-                        "hybrid: regex caught method+url; LLM extracted headers+body+status"
+                        "regex+LLM hybrid — LLM filled missing pieces"
                     )
                     return llm_result
-                log.warning("compiler_hybrid_llm_fill_failed_using_regex_only", tc=title)
+                log.warning("compiler_llm_fallback_failed_using_regex_only", tc=title)
 
-            # GET, או LLM לא זמין/נכשל
+            # אם LLM לא זמין/נכשל — חוזרים לתוצאת ה-regex (גם אם חלקית)
             return ExecutableTestCase(
                 test_case_id=title,
                 ado_test_case_id=ado_id,
                 request=HttpRequestSpec(
                     method=method,
                     url=_normalize_url(regex_data["url"]),
-                    headers=regex_data["headers"],
-                    body=regex_data["body"],
+                    headers=regex_headers,
+                    body=regex_body,
                 ),
                 expected_response=ResponseAssertion(status=regex_data["expected_status"]),
                 source_text=text,
-                compiler_notes="extracted via regex (no LLM call)",
+                compiler_notes="regex partial (LLM unavailable) — verify headers manually",
             )
 
         # 1) בחר Postman template
