@@ -285,14 +285,45 @@ class SmartCompiler:
         title = raw_ado_test_case.get("title") or f"TC-{ado_id}"
         text = raw_ado_test_case.get("text") or title
 
-        # 0) ★ FAST PATH: regex extraction בלי LLM
+        # 0) ★ FAST PATH: regex extraction
+        # Hybrid policy:
+        #   GET → regex סוגר הכל (no LLM)
+        #   POST/PUT/PATCH/DELETE שבו regex כן תפס body → regex סוגר הכל
+        #   POST/PUT/PATCH/DELETE שבו regex לא תפס body → LLM ממלא body/headers/status
+        # הסיבה: הסוכן בעברית לא תמיד כותב "body:" כפי שה-regex מצפה ("עם גוף הבקשה:" וכד׳),
+        # ובלי body הקריאה ל-ESB יוצאת ריקה ומחזירה 400. ה-LLM יודע לחלץ JSON מהטקסט בעברית.
         regex_data = _try_regex_extract(text)
         if regex_data and regex_data.get("url"):
+            method = regex_data["method"]
+            needs_body = method in ("POST", "PUT", "PATCH", "DELETE")
+            body_missing = regex_data["body"] is None
+
+            if needs_body and body_missing and settings.azure_openai_enabled:
+                llm_result = await self._compile_llm_only(
+                    test_case_id=title, ado_id=ado_id, text=text,
+                )
+                if (
+                    llm_result is not None
+                    and llm_result.request
+                    and llm_result.request.url
+                    and llm_result.request.url != "about:blank"
+                ):
+                    # ה-regex אמין יותר עבור method+url — נכפה אותם מעל מה ש-LLM החזיר
+                    # (לפעמים LLM משנה case של method או URL במידה זניחה אבל מבלבלת)
+                    llm_result.request.method = method
+                    llm_result.request.url = _normalize_url(regex_data["url"])
+                    llm_result.compiler_notes = (
+                        "hybrid: regex caught method+url; LLM filled body+status"
+                    )
+                    return llm_result
+                log.warning("compiler_hybrid_llm_fill_failed_using_regex_only", tc=title)
+
+            # GET, או method עם body שכן נתפס ב-regex, או LLM לא זמין/נכשל
             return ExecutableTestCase(
                 test_case_id=title,
                 ado_test_case_id=ado_id,
                 request=HttpRequestSpec(
-                    method=regex_data["method"],
+                    method=method,
                     url=_normalize_url(regex_data["url"]),
                     headers=regex_data["headers"],
                     body=regex_data["body"],
