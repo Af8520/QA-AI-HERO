@@ -16,10 +16,13 @@ from typing import List, Tuple
 from agents.bug_agent.ado_client import ADOClient
 from agents.bug_agent.bug_agent import BugAgent
 from agents.compiler.dotnet_compiler import DotNetCompiler
+from agents.payload_builder import PayloadBuilderBridge
+from agents.payload_builder.payload_builder_bridge import PayloadBuilderError
 from agents.reporter.reporter_agent import ReporterAgent
 from agents.runner.dotnet_runner import DotNetRunner
 from agents.validator.validator_agent import ValidatorAgent
 from config.logging_config import get_logger
+from config.settings import settings
 from models.dotnet_test_case import DotNetExecutableTestCase
 from models.executable_test_case import ExecutableTestCase, HttpRequestSpec
 from models.pipeline import PipelineResult
@@ -77,20 +80,22 @@ async def run_dotnet_pipeline(session: ChatSession) -> PipelineResult:
 
     await tl_step(1, "done", f"Pull test cases ({len(raw_cases)})")
 
-    # שלב 2 — Spec MD
-    await tl_step(2, "active", "Spec MD")
+    # שלב 2 — ★ Payload Builder (חדש)
+    # שולח את ה-spec לסוכן Copilot Studio שני (Payload Builder) שמחזיר templates + field_catalog.
+    # אם DOTNET_PAYLOAD_COPILOT_TOKEN_ENDPOINT ריק או spec_text לא זמין → דילוג עם warning.
+    await tl_step(2, "active", "Payload Builder")
     spec_md = session.spec_text
-    if spec_md:
-        await emit(f"שלב 2/{TOTAL_STAGES} — משתמש ב-spec ({len(spec_md)} תווים)")
-        await tl_step(2, "done", f"Spec ({len(spec_md)} chars)")
+    payload_templates = await _build_payloads(session, spec_md, emit)
+    if payload_templates:
+        tmpl_count = len(payload_templates.get("templates") or {})
+        await tl_step(2, "done", f"Payloads ({tmpl_count} templates)")
     else:
-        await emit(f"שלב 2/{TOTAL_STAGES} — אין spec MD")
-        await tl_step(2, "skipped", "No spec MD")
+        await tl_step(2, "skipped", "No payloads — using regex-only")
 
     # שלב 3 — DotNet Compiler
     await tl_step(3, "active", f"Compile (0/{len(raw_cases)})")
     await emit(f"שלב 3/{TOTAL_STAGES} — מהדר {len(raw_cases)} תסריטים ל-actions...")
-    compiler = DotNetCompiler(spec_md=spec_md)
+    compiler = DotNetCompiler(spec_md=spec_md, payload_templates=payload_templates)
     executables: List[DotNetExecutableTestCase] = []
     compile_failures = 0
     for raw in raw_cases:
@@ -262,6 +267,64 @@ def _to_http_shape(ex: DotNetExecutableTestCase) -> ExecutableTestCase:
         source_text=ex.source_text,
         compiler_notes=ex.compiler_notes,
     )
+
+
+async def _build_payloads(session: ChatSession, spec_text, emit):
+    """שולח את ה-spec_text לסוכן Payload Builder ומקבל templates + field_catalog.
+
+    מחזיר את ה-dict שהסוכן החזיר, או None אם:
+      - DOTNET_PAYLOAD_COPILOT_TOKEN_ENDPOINT ריק
+      - spec_text ריק
+      - שגיאה / timeout — מודיע בלוג ב-emit + structlog
+    """
+    if not settings.DOTNET_PAYLOAD_COPILOT_TOKEN_ENDPOINT:
+        await emit("שלב 2/" + str(TOTAL_STAGES) + " — Payload Builder לא מוגדר (DOTNET_PAYLOAD_COPILOT_TOKEN_ENDPOINT ריק). דילוג.")
+        log.warning("payload_builder_skipped_no_endpoint")
+        return None
+    if not spec_text or not spec_text.strip():
+        await emit("שלב 2/" + str(TOTAL_STAGES) + " — אין spec_text על ה-session. דילוג על Payload Builder.")
+        log.warning("payload_builder_skipped_no_spec")
+        return None
+
+    bridge = PayloadBuilderBridge()
+    await emit(f"שלב 2/{TOTAL_STAGES} — שולח spec ({len(spec_text)} תווים) לסוכן Payload Builder...")
+    try:
+        result = await bridge.generate(spec_text)
+    except PayloadBuilderError as e:
+        await emit(f"  ⚠ Payload Builder failed: {str(e)[:200]}")
+        log.warning("payload_builder_failed", error=str(e))
+        return None
+    except Exception as e:
+        await emit(f"  ✗ Payload Builder exception: {str(e)[:200]}")
+        log.exception("payload_builder_exception")
+        return None
+
+    tmpl_keys = list((result.get("templates") or {}).keys())
+    catalog_size = len(result.get("field_catalog") or {})
+    await emit(f"  ✓ קיבל {len(tmpl_keys)} templates ({', '.join(tmpl_keys) or '—'}), "
+               f"{catalog_size} שדות ב-catalog")
+    # שמירה ל-session + דיסק (לדיבוג)
+    session.payload_templates = result
+    session.payload_templates_file = _persist_payloads(session.session_id, result)
+    return result
+
+
+def _persist_payloads(session_id, payloads):
+    """שומר את התשובה של Payload Builder ל-logs/payload_builder/<ts>_<sid>.json לדיבוג."""
+    import datetime
+    import json as _json
+    from pathlib import Path
+
+    logs_dir = Path("logs") / "payload_builder"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_sid = (session_id or "anon")[:12]
+    fpath = logs_dir / f"{ts}_{safe_sid}.json"
+    try:
+        fpath.write_text(_json.dumps(payloads, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        log.warning("payload_persist_failed", error=str(e))
+    return str(fpath)
 
 
 async def _await_human_approval(session: ChatSession, timeout_seconds: int) -> bool:

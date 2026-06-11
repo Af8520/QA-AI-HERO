@@ -30,6 +30,12 @@ class ChatSession:
     # Phase A raw JSON (כפי שהגיע מהסוכן / הודבק) — לדיבוג; שמור גם לדיסק ב-logs/phase_a/
     phase_a_raw_json: Optional[List[Dict[str, Any]]] = None
     phase_a_json_file: Optional[str] = None
+    # .NET payload templates — תשובת סוכן Payload Builder. מבנה:
+    #   {"source_topic": "...", "target_topic": "...",
+    #    "templates": {"create": {...}, "delete": {...}},
+    #    "field_catalog": {...}}
+    payload_templates: Optional[Dict[str, Any]] = None
+    payload_templates_file: Optional[str] = None  # נתיב לקובץ ב-logs/payload_builder/
     pending_bugs: List[BugReport] = field(default_factory=list)
     pipeline_task: Optional[asyncio.Task] = None
     event_queue: "asyncio.Queue[Dict[str, Any]]" = field(default_factory=asyncio.Queue)

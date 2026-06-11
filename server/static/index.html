@@ -636,13 +636,16 @@ function applyDepartmentChrome(dept) {
       ? 'QA-AI-Hero — מכבי / .NET'
       : 'QA-AI-Hero — מכבי / ESB';
   }
-  // Timeline labels ב-.NET: step 4 = Publish+Observe, step 5 = skipped
+  // Timeline labels ב-.NET — Payload Builder + Publish+Observe + Verify embedded
+  const s2 = document.getElementById('tl-s2-name');
   const s4 = document.getElementById('tl-s4-name');
   const s5 = document.getElementById('tl-s5-name');
   if (dept === 'dotnet') {
+    if (s2) s2.textContent = '2. Payload Builder';
     if (s4) s4.textContent = '4. Publish + Observe';
     if (s5) s5.textContent = '5. Verify (embedded)';
   } else {
+    if (s2) s2.textContent = '2. Spec MD';
     if (s4) s4.textContent = '4. Execute';
     if (s5) s5.textContent = '5. Verify Kafka+Elastic';
   }

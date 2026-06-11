@@ -31,6 +31,7 @@ class KafkaWaitAction(BaseModel):
 
     match — פילטר לקליטת המסר הספציפי (תלוי key או field במסר).
     expected_fields — שדות שצריכים להופיע בערך הצפוי.
+    expect_no_message — תרחיש שלילי: timeout = PASS, מסר שמגיע = FAIL.
     """
 
     kind: Literal["kafka_wait"] = "kafka_wait"
@@ -38,6 +39,7 @@ class KafkaWaitAction(BaseModel):
     match: Dict[str, Any] = Field(default_factory=dict)
     expected_fields: Dict[str, Any] = Field(default_factory=dict)
     timeout_seconds: int = 30
+    expect_no_message: bool = False
 
 
 class CouchbaseWaitAction(BaseModel):

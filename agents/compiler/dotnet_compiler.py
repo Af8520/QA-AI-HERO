@@ -193,7 +193,7 @@ SYSTEM_PROMPT_DOTNET = """אתה QA Test Compiler עבור מחלקת אינטג
   "test_case_id": "string",
   "actions": [
     {"kind": "kafka_publish", "topic": "string", "key": "optional", "value": {...}, "headers": {...} | null},
-    {"kind": "kafka_wait", "topic": "string", "match": {...}, "expected_fields": {...}, "timeout_seconds": 30},
+    {"kind": "kafka_wait", "topic": "string", "match": {...}, "expected_fields": {...}, "timeout_seconds": 30, "expect_no_message": false},
     {"kind": "couchbase_wait", "bucket": "string", "scope": "...", "collection": "...", "key": "...", "query": "...", "expected_fields": {...}, "timeout_seconds": 30}
   ],
   "expected_status": 200,
@@ -208,43 +208,113 @@ SYSTEM_PROMPT_DOTNET = """אתה QA Test Compiler עבור מחלקת אינטג
 - expected_fields — שדות שהמסר/מסמך צריך להכיל (עם הערכים הצפויים).
 - timeout_seconds ברירת מחדל 30 אלא אם התסריט אומר אחרת.
 - שמור על שמות topics/buckets/keys בדיוק כפי שמופיעים בטקסט (case-sensitive).
-- אם תסריט שלילי (אמור להיכשל) — expected_status יכול להיות 400.
+- ★ תרחיש שלילי (negative test): אם התסריט בודק ש**לא** עובר מסר ל-target (type_code שגוי, תאריך
+  ישן, סינון), קבע expect_no_message=true על KafkaWaitAction. אז timeout = PASS,
+  ומסר שיגיע = FAIL.
 - אם תסריט מעורפל — החזר actions ריק + compiler_notes מסביר.
 - החזר JSON תקני בלבד, ללא טקסט נלווה.
 """
 
 
-class DotNetCompiler:
-    """מהדר תסריט .NET → DotNetExecutableTestCase עם רצף actions."""
+# ★ Prompt חדש כש-payload templates זמינים מסוכן Payload Builder.
+# ה-LLM ממזג template + תסריט לערכים מדויקים.
+SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחלקת אינטגרציה .NET במכבי.
 
-    def __init__(self, spec_md: Optional[str] = None) -> None:
+המחלקה בודקת Workers שמעבירים מידע: Kafka → Kafka או Kafka → Couchbase.
+
+קלט:
+1. TEST_CASE — תסריט בעברית. מתאר אילו שדות לשנות ולאיזה ערך, מה הצפוי בתוצאה.
+2. PAYLOAD_TEMPLATES — JSON templates מלאים פר action_type (create, delete, update, ...).
+   ★ אלה מבני ה-payload המלאים שצריך לשלוח. הם כוללים headers + root + _data וכל
+   השדות הנדרשים. השתמש בהם כבסיס ואל תשמיט שדות.
+3. FIELD_CATALOG — מילון שדות עם type/format/required/notes. השתמש לאימות התסריט.
+4. SOURCE_TOPIC + TARGET_TOPIC — שמות ה-topics לפרסום וקבלה.
+
+תפקידך לכל test case:
+1. זהה את action_type מהתסריט ("פתח", "create", "מחק", "delete" וכדומה).
+2. קח את הtemplate המתאים מ-PAYLOAD_TEMPLATES — זה הבסיס המלא.
+3. ★ זהה אילו שדות התסריט אומר לדרוס (לדוגמה "type_code=99918", "referral_date=2024-01-01").
+   החל את הדריסות **רק על השדות שהתסריט מציין**. כל שאר השדות נשארים מה-template.
+4. צור KafkaPublishAction עם topic=SOURCE_TOPIC, value=ה-template אחרי הדריסות (JSON מלא).
+5. צור KafkaWaitAction עם topic=TARGET_TOPIC (או CouchbaseWaitAction אם התסריט מזכיר Couchbase).
+6. אם התסריט הוא תרחיש שלילי (הערך שגוי, תאריך ישן, סינון, "אין להפיץ", "לא יגיע") —
+   קבע expect_no_message=true על ה-wait. אז timeout = PASS.
+7. expected_fields של ה-wait — שדות במסר ה-target שצריך לאמת (תוצאות העשרה/המרה).
+
+החזר JSON בלבד:
+{
+  "test_case_id": "string",
+  "actions": [
+    {"kind": "kafka_publish", "topic": "<SOURCE_TOPIC>", "value": {... template מלא עם דריסות ...}},
+    {"kind": "kafka_wait", "topic": "<TARGET_TOPIC>", "expected_fields": {...}, "timeout_seconds": 30, "expect_no_message": false}
+  ],
+  "expected_status": 200,
+  "compiler_notes": "string קצר — אילו דריסות הוחלו ולמה"
+}
+
+כללי כתיבה חשובים:
+- ★ אל תקצר את ה-template. ה-value של kafka_publish חייב להכיל את **כל** השדות
+  שמופיעים ב-template (headers + root + _data), עם דריסות בלבד היכן שהתסריט אומר.
+- שמור על מבנה ה-template (nested objects) כפי שהוא.
+- אם התסריט אומר "ערך לא תקין" / "שדה ריק" — הכנס את הערך הלא תקין בדיוק (גם אם זה
+  string במקום int) כדי לבדוק validation בצד ה-Worker.
+- שמור על case-sensitive בשמות topics ו-fields.
+- החזר JSON תקני בלבד, ללא טקסט נלווה.
+"""
+
+
+class DotNetCompiler:
+    """מהדר תסריט .NET → DotNetExecutableTestCase עם רצף actions.
+
+    שני מצבים:
+    - regex-only (לא מועברים templates): מחלץ actions מתסריט קריא, ה-value הוא placeholder.
+    - templates-mode (★ מומלץ): מקבל templates + field_catalog מסוכן Payload Builder.
+      ה-LLM מוצב כממזג — קח template, החל דריסות מהתסריט, פלוט payload מלא ומדויק.
+    """
+
+    def __init__(
+        self,
+        spec_md: Optional[str] = None,
+        payload_templates: Optional[Dict[str, Any]] = None,
+    ) -> None:
         self.spec_md = spec_md or ""
+        self.payload_templates = payload_templates  # full Payload Builder response
+
+    @property
+    def has_templates(self) -> bool:
+        return bool(self.payload_templates and self.payload_templates.get("templates"))
 
     async def compile(self, raw_ado_test_case: Dict[str, Any]) -> DotNetExecutableTestCase:
         ado_id = raw_ado_test_case.get("id")
         title = raw_ado_test_case.get("title") or f"TC-{ado_id}"
         text = raw_ado_test_case.get("text") or title
 
-        # 0) Regex-first
+        # ★ Templates mode: LLM ממזג template + תסריט. עדיף על regex כי ה-payload מלא ומדויק.
+        if self.has_templates and settings.azure_openai_enabled:
+            llm_result = await self._compile_with_templates(
+                test_case_id=title, ado_id=ado_id, text=text,
+            )
+            if llm_result is not None and llm_result.actions:
+                return llm_result
+            log.warning("dotnet_compiler_templates_mode_failed_falling_back", tc=title)
+
+        # 0) Regex-first (mode הישן)
         regex_actions = _try_regex_extract(text)
         text_mentions = _text_mentions_dotnet_action(text)
-
-        # מצב מספק: regex תפס לפחות action אחד + שלפחות יש publish או wait
         kinds = {a.kind for a in regex_actions}
         regex_sufficient = bool(regex_actions) and (
             "kafka_publish" in kinds or "kafka_wait" in kinds or "couchbase_wait" in kinds
         )
-
         if regex_sufficient:
             return DotNetExecutableTestCase(
                 test_case_id=title,
                 ado_test_case_id=ado_id,
                 actions=regex_actions,
                 source_text=text,
-                compiler_notes=f"extracted via regex — {len(regex_actions)} actions",
+                compiler_notes=f"extracted via regex — {len(regex_actions)} actions (no templates)",
             )
 
-        # 1) LLM fallback
+        # 1) LLM fallback ללא templates
         if settings.azure_openai_enabled and text_mentions:
             llm_result = await self._compile_via_llm(test_case_id=title, ado_id=ado_id, text=text)
             if llm_result is not None and llm_result.actions:
@@ -260,6 +330,46 @@ class DotNetCompiler:
             source_text=text,
             compiler_notes="לא ניתן לחלץ actions — וודא שהסוכן רושם publish/wait מפורש",
         )
+
+    async def _compile_with_templates(
+        self,
+        test_case_id: str,
+        ado_id: Optional[int],
+        text: str,
+    ) -> Optional[DotNetExecutableTestCase]:
+        """★ ממזג template + תסריט. ה-LLM מקבל את template + field_catalog ומפיק actions מדויקים."""
+        try:
+            client = _make_openai_client()
+        except ImportError:
+            log.warning("dotnet_compiler_openai_sdk_missing")
+            return None
+
+        pt = self.payload_templates or {}
+        user_payload = {
+            "TEST_CASE": {"id": test_case_id, "ado_id": ado_id, "text": text},
+            "SOURCE_TOPIC": pt.get("source_topic"),
+            "TARGET_TOPIC": pt.get("target_topic"),
+            "PAYLOAD_TEMPLATES": pt.get("templates") or {},
+            "FIELD_CATALOG": pt.get("field_catalog") or {},
+        }
+
+        try:
+            resp = await client.chat.completions.create(
+                model=settings.AZURE_OPENAI_DEPLOYMENT,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES},
+                    {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False, default=str)},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0,
+            )
+            content = resp.choices[0].message.content or "{}"
+            data = json.loads(content)
+        except Exception as e:
+            log.warning("dotnet_compiler_templates_llm_failed", error=str(e), tc=test_case_id)
+            return None
+
+        return self._parse_llm_response(test_case_id, ado_id, text, data, source_label="templates")
 
     async def _compile_via_llm(
         self,
@@ -294,6 +404,17 @@ class DotNetCompiler:
             log.warning("dotnet_compiler_llm_call_failed", error=str(e), tc=test_case_id)
             return None
 
+        return self._parse_llm_response(test_case_id, ado_id, text, data, source_label="LLM")
+
+    def _parse_llm_response(
+        self,
+        test_case_id: str,
+        ado_id: Optional[int],
+        text: str,
+        data: Dict[str, Any],
+        source_label: str = "LLM",
+    ) -> Optional[DotNetExecutableTestCase]:
+        """ממיר תשובת LLM (raw dict) ל-DotNetExecutableTestCase tegnerated."""
         raw_actions = data.get("actions") or []
         parsed_actions: List[DotNetAction] = []
         for a in raw_actions:
@@ -319,5 +440,5 @@ class DotNetCompiler:
             actions=parsed_actions,
             expected_status=int(data.get("expected_status") or 200),
             source_text=text,
-            compiler_notes=data.get("compiler_notes") or "extracted via LLM",
+            compiler_notes=data.get("compiler_notes") or f"extracted via {source_label}",
         )

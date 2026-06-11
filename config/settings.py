@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     COPILOT_TOKEN_ENDPOINT: Optional[str] = None
     # Token endpoint נפרד עבור מחלקת .NET (Kafka/Couchbase Worker tests).
     DOTNET_COPILOT_TOKEN_ENDPOINT: Optional[str] = None
+    # ★ Token endpoint של סוכן Payload Builder (Copilot Studio) — מקבל את מסמך האפיון ומחזיר
+    # templates + field_catalog ל-Compiler. אופציונלי: אם ריק, Compiler עובד במצב regex-only.
+    DOTNET_PAYLOAD_COPILOT_TOKEN_ENDPOINT: Optional[str] = None
+    # Timeout להמתנה לתשובה מסוכן Payload Builder (שניות).
+    DOTNET_PAYLOAD_BUILDER_TIMEOUT_SECONDS: int = 180
     # WebSocket — אם True, WebChat מתחבר ל-DirectLine ב-WebSocket (סטרימינג אמיתי, מילה-מילה).
     # ברשתות ארגוניות שחוסמות WebSocket — הגדר False וה-WebChat יחזור ל-HTTP polling.
     COPILOT_USE_WEBSOCKET: bool = True

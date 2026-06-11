@@ -205,6 +205,27 @@ class DotNetRunner:
             Consumer, conf, action.topic, action.match, action.timeout_seconds,
         )
 
+        # תרחיש שלילי: timeout = PASS, מסר שהגיע = FAIL
+        if action.expect_no_message:
+            if observed is None:
+                step = StepResult(
+                    step=f"WAIT NO-MESSAGE topic={action.topic} ({action.timeout_seconds}s)",
+                    expected_result="no message (negative test)",
+                    actual_result="no message arrived — as expected",
+                    status=TestStatus.PASSED,
+                    response_dump={"timeout": True, "expected_silence": True},
+                )
+                return step, {"timeout": True, "expected_silence": True}
+            step = StepResult(
+                step=f"WAIT NO-MESSAGE topic={action.topic}",
+                expected_result="no message (negative test)",
+                actual_result=f"message arrived (offset={observed.get('offset')}) — should NOT have arrived",
+                status=TestStatus.FAILED,
+                error_message="unexpected message in negative test",
+                response_dump=observed,
+            )
+            return step, observed
+
         if observed is None:
             step = StepResult(
                 step=f"WAIT topic={action.topic} (timeout {action.timeout_seconds}s)",
