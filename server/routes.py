@@ -39,15 +39,25 @@ async def health():
 
 @router.post("/session/start")
 async def start_session(request: Request):
+    # department נקבע ע"י ה-UI לפי ה-hash route (?department=esb|dotnet).
+    department = (request.query_params.get("department") or "esb").lower()
+    if department not in ("esb", "dotnet"):
+        department = "esb"
     session = await store.get_or_create(None)
-    if settings.copilot_canvas_mode:
+    session.department = department
+    log.info("session_started", session_id=session.session_id, department=department)
+
+    # Canvas mode + token endpoint נבחרים לפי department
+    token_endpoint = settings.token_endpoint_for(department)
+    if token_endpoint:
         # ★ Custom Canvas mode — UI מטמיע WebChat עם file upload + auto JSON detection
         return {
             "session_id": session.session_id,
             "phase": session.phase,
+            "department": department,
             "canvas_mode": True,
             "embed_mode": False,
-            "token_endpoint": settings.COPILOT_TOKEN_ENDPOINT,
+            "token_endpoint": token_endpoint,
             "webchat_url": None,
             "foundry_enabled": settings.foundry_enabled,
             "agent_message": None,
@@ -55,11 +65,12 @@ async def start_session(request: Request):
             "use_websocket": settings.COPILOT_USE_WEBSOCKET,
             "polling_interval_ms": settings.COPILOT_POLLING_INTERVAL_MS,
         }
-    if settings.copilot_embed_mode:
-        # Embed mode (fallback) — iframe חיצוני, cross-origin, JSON paste ידני
+    if settings.copilot_embed_mode and department == "esb":
+        # Embed mode (fallback) — iframe חיצוני, cross-origin, JSON paste ידני (ESB only)
         return {
             "session_id": session.session_id,
             "phase": session.phase,
+            "department": department,
             "canvas_mode": False,
             "embed_mode": True,
             "token_endpoint": None,
@@ -71,6 +82,7 @@ async def start_session(request: Request):
     return {
         "session_id": session.session_id,
         "phase": session.phase,
+        "department": department,
         "canvas_mode": False,
         "embed_mode": False,
         "token_endpoint": None,
@@ -407,20 +419,27 @@ async def events(session_id: str, request: Request):
 
 
 async def _trigger_phase_b(session: ChatSession, suite_id: int) -> None:
-    """מעבר Phase A -> Phase B: הפעלת ה-pipeline ב-background."""
+    """מעבר Phase A -> Phase B: הפעלת ה-pipeline ב-background.
+    בוחר pipeline לפי session.department: esb (ברירת מחדל) או dotnet.
+    """
     if session.phase != "A_copilot":
         return
-    if not session.postman_collection:
+    department = (session.department or "esb").lower()
+    if department == "esb" and not session.postman_collection:
         await session.emit("warning", {"text": "לא הועלה Postman Collection — נריץ ב-mock mode."})
     session.suite_id = suite_id
     session.phase = "B_pipeline"
-    log.info("phase_transition", session_id=session.session_id, suite_id=suite_id)
+    log.info("phase_transition", session_id=session.session_id, suite_id=suite_id, department=department)
 
-    from pipeline.esb_pipeline import run_esb_pipeline  # late import כדי להימנע מ-circular
+    # late imports כדי להימנע מ-circular
+    if department == "dotnet":
+        from pipeline.dotnet_pipeline import run_dotnet_pipeline as run_pipeline_fn
+    else:
+        from pipeline.esb_pipeline import run_esb_pipeline as run_pipeline_fn
 
     async def runner():
         try:
-            result = await run_esb_pipeline(session)
+            result = await run_pipeline_fn(session)
             session.pipeline_result = result.dict() if hasattr(result, "dict") else dict(result)
             session.phase = "done"
             await session.emit("pipeline_done", session.pipeline_result)

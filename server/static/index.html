@@ -421,7 +421,7 @@
   <h2>אנא בחר/י תת-מחלקה</h2>
   <div class="tile-grid subdept">
     <a class="tile" href="#/integration/esb">ESB</a>
-    <div class="tile disabled" title="בבנייה — צפוי בקרוב"><span class="badge">בבנייה</span>dotNet</div>
+    <a class="tile" href="#/integration/dotnet">dotNet</a>
     <div class="tile disabled" title="בבנייה — צפוי בקרוב"><span class="badge">בבנייה</span>DTM</div>
   </div>
 </section>
@@ -621,9 +621,35 @@ const landingScreen = document.getElementById('landingScreen');
 const subdeptScreen = document.getElementById('subdeptScreen');
 const appScreen = document.getElementById('appScreen');
 
+// תוצאה: "esb" | "dotnet" | null (אם לא ב-app)
+function currentDepartment() {
+  const hash = (window.location.hash || '').replace(/^#/, '');
+  if (hash === '/integration/esb') return 'esb';
+  if (hash === '/integration/dotnet') return 'dotnet';
+  return null;
+}
+
+function applyDepartmentChrome(dept) {
+  const header = document.querySelector('#appScreen header h1');
+  if (header) {
+    header.textContent = dept === 'dotnet'
+      ? 'QA-AI-Hero — מכבי / .NET'
+      : 'QA-AI-Hero — מכבי / ESB';
+  }
+  // Timeline labels ב-.NET: step 4 = Publish+Observe, step 5 = skipped
+  const s4 = document.getElementById('tl-s4-name');
+  const s5 = document.getElementById('tl-s5-name');
+  if (dept === 'dotnet') {
+    if (s4) s4.textContent = '4. Publish + Observe';
+    if (s5) s5.textContent = '5. Verify (embedded)';
+  } else {
+    if (s4) s4.textContent = '4. Execute';
+    if (s5) s5.textContent = '5. Verify Kafka+Elastic';
+  }
+}
+
 function navigate() {
   const hash = (window.location.hash || '').replace(/^#/, '');
-  // ה-routes התקפים — כל אחד שלא ברשימה נופל ל-landing
   const route = hash || '/';
   landingScreen.classList.add('hidden');
   subdeptScreen.classList.add('hidden');
@@ -634,15 +660,28 @@ function navigate() {
   } else if (route === '/integration') {
     subdeptScreen.classList.remove('hidden');
   } else if (route === '/integration/esb') {
+    applyDepartmentChrome('esb');
+    appScreen.classList.remove('hidden');
+  } else if (route === '/integration/dotnet') {
+    applyDepartmentChrome('dotnet');
     appScreen.classList.remove('hidden');
   } else {
-    // route לא מוכר — נחזיר ל-landing
     window.location.hash = '#/';
     landingScreen.classList.remove('hidden');
   }
 }
 
-window.addEventListener('hashchange', navigate);
+let _initialDepartment = null;
+
+window.addEventListener('hashchange', () => {
+  // אם נכנסנו ל-app screen עם department שונה מזה שאתחלנו איתו → reload כדי לטעון WebChat חדש
+  const newDept = currentDepartment();
+  if (newDept && _initialDepartment && newDept !== _initialDepartment) {
+    window.location.reload();
+    return;
+  }
+  navigate();
+});
 
 function setPhase(phase) {
   phasePill.classList.remove('A', 'B', 'done');
@@ -751,7 +790,9 @@ function hideTyping() {
 }
 
 async function startSession() {
-  const r = await fetch('/session/start', { method: 'POST' });
+  const dept = currentDepartment() || 'esb';
+  _initialDepartment = dept;
+  const r = await fetch(`/session/start?department=${encodeURIComponent(dept)}`, { method: 'POST' });
   const data = await r.json();
   sessionId = data.session_id;
   setPhase(data.phase);
@@ -1399,6 +1440,18 @@ function showTcDetail(tcId) {
   const d = tcDetails[tcId];
   if (!d) { alert('אין פרטים זמינים ל-' + tcId); return; }
   document.getElementById('tcDetailTitle').textContent = `פרטים — ${tcId}`;
+  // בדוק אם זה .NET (יש kind=dotnet) או HTTP רגיל
+  const isDotnet = (d.request && d.request.kind === 'dotnet')
+    || (d.response && d.response.kind === 'dotnet');
+  // עדכן את התוויות מעל ה-pre blocks
+  const headings = document.querySelectorAll('#tcDetailModal h4');
+  if (isDotnet) {
+    if (headings[0]) headings[0].textContent = 'Actions';
+    if (headings[1]) headings[1].textContent = 'Observations';
+  } else {
+    if (headings[0]) headings[0].textContent = 'Request';
+    if (headings[1]) headings[1].textContent = 'Response';
+  }
   document.getElementById('tcDetailRequest').textContent = JSON.stringify(d.request, null, 2);
   document.getElementById('tcDetailResponse').textContent = JSON.stringify(d.response, null, 2);
   document.getElementById('tcDetailModal').classList.add('open');

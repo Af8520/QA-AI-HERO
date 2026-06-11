@@ -18,6 +18,9 @@ Phase = Literal["A_copilot", "B_pipeline", "done"]
 class ChatSession:
     session_id: str
     phase: Phase = "A_copilot"
+    # תת-מחלקה: "esb" (HTTP API tests) | "dotnet" (Kafka/Couchbase Worker tests).
+    # ברירת מחדל esb כדי לשמור backward compat לפני התוספת של .NET.
+    department: str = "esb"
     spec_text: Optional[str] = None
     spec_filename: Optional[str] = None
     postman_collection: Optional[PostmanCollection] = None

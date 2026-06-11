@@ -58,3 +58,12 @@ msal>=1.36.0
 azure-ai-agents>=1.1.0
 azure-ai-projects>=2.0.0
 azure-identity>=1.25.0
+
+# ============================================================
+# .NET department — Kafka + Couchbase direct clients
+# OPTIONAL: required only when running #/integration/dotnet flows.
+# If JFrog blocks the install — the runner returns BLOCKED with a clear
+# message rather than crashing the pipeline.
+# ============================================================
+confluent-kafka>=2.4.0
+couchbase>=4.2.0

@@ -26,13 +26,31 @@ class Settings(BaseSettings):
     COPILOT_WEBCHAT_URL: Optional[str] = None
     # Canvas mode (★ מסלול ראשי): Token endpoint מ-Copilot Studio Custom website channel.
     # אם מסופק — ה-UI מטמיע Bot Framework WebChat עם file upload + auto JSON detection.
+    # זה ה-token endpoint עבור מחלקת ESB (תת-מחלקה של אינטגרציה).
     COPILOT_TOKEN_ENDPOINT: Optional[str] = None
+    # Token endpoint נפרד עבור מחלקת .NET (Kafka/Couchbase Worker tests).
+    DOTNET_COPILOT_TOKEN_ENDPOINT: Optional[str] = None
     # WebSocket — אם True, WebChat מתחבר ל-DirectLine ב-WebSocket (סטרימינג אמיתי, מילה-מילה).
     # ברשתות ארגוניות שחוסמות WebSocket — הגדר False וה-WebChat יחזור ל-HTTP polling.
     COPILOT_USE_WEBSOCKET: bool = True
     # פערים בין polls (ms) — רלוונטי רק כש-COPILOT_USE_WEBSOCKET=False.
     # ערך נמוך = יותר תכוף = קרוב יותר לסטרימינג, אבל יותר עומס רשת. ברירת מחדל 1000ms.
     COPILOT_POLLING_INTERVAL_MS: int = 1000
+
+    # .NET department — Kafka (direct via confluent-kafka SDK)
+    KAFKA_BOOTSTRAP_SERVERS: Optional[str] = None         # "broker1:9092,broker2:9092"
+    KAFKA_SECURITY_PROTOCOL: str = "PLAINTEXT"            # PLAINTEXT | SASL_SSL | SSL
+    KAFKA_SASL_MECHANISM: str = "PLAIN"                   # PLAIN | SCRAM-SHA-256 | SCRAM-SHA-512
+    KAFKA_SASL_USERNAME: Optional[str] = None
+    KAFKA_SASL_PASSWORD: Optional[str] = None
+    KAFKA_CONSUMER_GROUP_PREFIX: str = "qa-ai-hero"
+    KAFKA_DEFAULT_TIMEOUT_SECONDS: int = 30
+
+    # .NET department — Couchbase (direct via couchbase SDK)
+    COUCHBASE_CONNECTION_STRING: Optional[str] = None     # "couchbase://node1" / "couchbases://..."
+    COUCHBASE_USERNAME: Optional[str] = None
+    COUCHBASE_PASSWORD: Optional[str] = None
+    COUCHBASE_DEFAULT_TIMEOUT_SECONDS: int = 30
 
     # Azure AI Foundry — מסלול חלופי לכתיבת test cases (עוקף את Copilot Studio)
     AZURE_FOUNDRY_ENDPOINT: Optional[str] = None
@@ -77,6 +95,25 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 8000
     LOG_LEVEL: str = "INFO"
+
+    def token_endpoint_for(self, department: str) -> Optional[str]:
+        """מחזיר את ה-token endpoint המתאים לפי department.
+        backward-compat: department לא ידוע / לא מוגדר → ESB.
+        """
+        if (department or "").lower() == "dotnet":
+            return self.DOTNET_COPILOT_TOKEN_ENDPOINT
+        return self.COPILOT_TOKEN_ENDPOINT
+
+    def canvas_mode_for(self, department: str) -> bool:
+        return bool(self.token_endpoint_for(department))
+
+    @property
+    def kafka_enabled(self) -> bool:
+        return bool(self.KAFKA_BOOTSTRAP_SERVERS)
+
+    @property
+    def couchbase_enabled(self) -> bool:
+        return bool(self.COUCHBASE_CONNECTION_STRING)
 
     @property
     def copilot_canvas_mode(self) -> bool:
