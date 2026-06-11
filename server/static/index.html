@@ -914,6 +914,44 @@ function debugLog(event, data, kind) {
   } catch {}
 }
 
+// ============================================================
+// Auto-capture spec from WebChat 📎 (★ .NET department only)
+// ============================================================
+// ה-Payload Builder pipeline (שלב 2 ב-.NET) צריך את ה-spec_text על ה-session.
+// ב-Custom Canvas, הקובץ מ-📎 הולך ישירות לסוכן Copilot Studio דרך DirectLine
+// ובלי לעבור דרך השרת שלנו → לכן spec_text היה ריק.
+// כאן אנחנו תופסים את אותו File object לפני שזה יוצא, ושולחים עותק ל-/extract-spec.
+// ה-server שומר session.spec_text → ה-Payload Builder ב-Phase B מקבל אותו.
+function captureSpecToServer(files) {
+  if (_initialDepartment !== 'dotnet') return;  // ESB לא צריך — רק .NET
+  if (!sessionId || !files || files.length === 0) return;
+  for (const file of files) {
+    const name = (file && file.name) || '';
+    if (!/\.(docx|pdf|txt|doc)$/i.test(name)) {
+      debugLog('SPEC_SKIPPED', `${name || '(no name)'} — לא קובץ אפיון, מדלג`, 'json_no');
+      continue;
+    }
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('session_id', sessionId);
+    debugLog('SPEC_UPLOADING', name, 'bot');
+    fetch('/extract-spec', {
+      method: 'POST',
+      body: fd,
+      headers: { 'X-Session-ID': sessionId },
+      keepalive: true,
+    })
+      .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+      .then(data => {
+        debugLog('SPEC_CAPTURED', { name: data.filename, chars: data.chars }, 'json_yes');
+        if (canvasJsonWatch && !canvasTriggered) {
+          canvasJsonWatch.innerHTML = `<span style="color:var(--success);">✓ Spec נשמר לשרת (${data.chars.toLocaleString()} תווים)</span> — עוקב אחר JSON`;
+        }
+      })
+      .catch(err => debugLog('SPEC_CAPTURE_FAILED', String(err.message || err), 'err'));
+  }
+}
+
 async function initWebChat(tokenEndpoint) {
   if (typeof window.WebChat === 'undefined') {
     addSystem('❌ webchat.js לא נטען מה-CDN. בדוק חיבור אינטרנט.');
@@ -995,6 +1033,12 @@ async function initWebChat(tokenEndpoint) {
           || (action.type === 'DIRECT_LINE/POST_ACTIVITY' && action.payload && action.payload.activity
               && action.payload.activity.type === 'message')) {
         startThinking();
+      }
+      // ★ Auto-capture spec file: ב-.NET, כשהיוזר מעלה מסמך דרך 📎 ב-WebChat,
+      // אנחנו תופסים אותו במקביל ושולחים ל-/extract-spec כדי שיהיה זמין ל-Payload Builder.
+      // ה-WebChat ממשיך לשלוח את הקובץ לסוכן כרגיל — תפיסת השרת היא non-blocking.
+      if (action.type === 'WEB_CHAT/SEND_FILES') {
+        captureSpecToServer((action.payload || {}).files || []);
       }
       if (action.type === 'DIRECT_LINE/INCOMING_ACTIVITY') {
         const activity = action.payload.activity || {};
