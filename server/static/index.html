@@ -613,6 +613,7 @@ let embedMode = false;
 let canvasMode = false;
 let foundryEnabled = false;
 let canvasTriggered = false;  // flag כדי לא לטריג Phase B פעמיים
+const _seenActionTypes = new Set();  // discovery לוג של action types שעוברים ב-store middleware
 
 // ============================================================
 // Hash-based routing — Landing → Sub-department → App
@@ -920,36 +921,71 @@ function debugLog(event, data, kind) {
 // ה-Payload Builder pipeline (שלב 2 ב-.NET) צריך את ה-spec_text על ה-session.
 // ב-Custom Canvas, הקובץ מ-📎 הולך ישירות לסוכן Copilot Studio דרך DirectLine
 // ובלי לעבור דרך השרת שלנו → לכן spec_text היה ריק.
-// כאן אנחנו תופסים את אותו File object לפני שזה יוצא, ושולחים עותק ל-/extract-spec.
-// ה-server שומר session.spec_text → ה-Payload Builder ב-Phase B מקבל אותו.
+// יש שני נתיבי יירוט (גרסאות WebChat שונות מפעילות actions שונים):
+//   1. WEB_CHAT/SEND_FILES — ה-action הקלאסי, payload.files = File[]
+//   2. DIRECT_LINE/POST_ACTIVITY — fallback אחיד; activity.attachments מכיל את הקובץ
+//      כ-data: URL (אחרי המרה ל-base64). מאחזר את ה-blob ויוצר File מחדש.
+
+const _capturedSpecNames = new Set();  // anti-dup: same filename uploaded twice
+
 function captureSpecToServer(files) {
-  if (_initialDepartment !== 'dotnet') return;  // ESB לא צריך — רק .NET
+  if (_initialDepartment !== 'dotnet') return;
   if (!sessionId || !files || files.length === 0) return;
   for (const file of files) {
-    const name = (file && file.name) || '';
-    if (!/\.(docx|pdf|txt|doc)$/i.test(name)) {
-      debugLog('SPEC_SKIPPED', `${name || '(no name)'} — לא קובץ אפיון, מדלג`, 'json_no');
-      continue;
-    }
-    const fd = new FormData();
-    fd.append('file', file);
-    fd.append('session_id', sessionId);
-    debugLog('SPEC_UPLOADING', name, 'bot');
-    fetch('/extract-spec', {
-      method: 'POST',
-      body: fd,
-      headers: { 'X-Session-ID': sessionId },
-      keepalive: true,
-    })
-      .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
-      .then(data => {
-        debugLog('SPEC_CAPTURED', { name: data.filename, chars: data.chars }, 'json_yes');
-        if (canvasJsonWatch && !canvasTriggered) {
-          canvasJsonWatch.innerHTML = `<span style="color:var(--success);">✓ Spec נשמר לשרת (${data.chars.toLocaleString()} תווים)</span> — עוקב אחר JSON`;
-        }
-      })
-      .catch(err => debugLog('SPEC_CAPTURE_FAILED', String(err.message || err), 'err'));
+    _uploadSpecFile(file);
   }
+}
+
+// fallback: יירוט DIRECT_LINE/POST_ACTIVITY עם attachments (data: URL)
+function captureSpecFromActivity(activity) {
+  if (_initialDepartment !== 'dotnet') return;
+  if (!sessionId || !activity || !activity.attachments) return;
+  for (const att of activity.attachments) {
+    const name = att.name || (att.thumbnailUrl ? 'attachment' : '');
+    if (!name || !/\.(docx|pdf|txt|doc)$/i.test(name)) continue;
+    const url = att.contentUrl;
+    if (!url) continue;
+    // אם זה data: URL → fetch מתוך הדפדפן מחזיר את ה-blob
+    debugLog('SPEC_FROM_ACTIVITY', name, 'bot');
+    fetch(url)
+      .then(r => r.blob())
+      .then(blob => _uploadSpecFile(new File([blob], name, { type: blob.type })))
+      .catch(err => debugLog('SPEC_ACTIVITY_FETCH_FAILED', String(err.message || err), 'err'));
+  }
+}
+
+function _uploadSpecFile(file) {
+  const name = (file && file.name) || '';
+  if (!/\.(docx|pdf|txt|doc)$/i.test(name)) {
+    debugLog('SPEC_SKIPPED', `${name || '(no name)'} — לא קובץ אפיון`, 'json_no');
+    return;
+  }
+  // anti-duplicate: filename + size כ-key (כדי לא להעלות פעמיים אותו קובץ)
+  const dedupeKey = `${name}::${file.size || 0}`;
+  if (_capturedSpecNames.has(dedupeKey)) {
+    debugLog('SPEC_DUP', `${name} כבר נשלח — דילוג`, 'json_no');
+    return;
+  }
+  _capturedSpecNames.add(dedupeKey);
+
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('session_id', sessionId);
+  debugLog('SPEC_UPLOADING', name, 'bot');
+  fetch('/extract-spec', {
+    method: 'POST',
+    body: fd,
+    headers: { 'X-Session-ID': sessionId },
+    keepalive: true,
+  })
+    .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+    .then(data => {
+      debugLog('SPEC_CAPTURED', { name: data.filename, chars: data.chars }, 'json_yes');
+      if (canvasJsonWatch && !canvasTriggered) {
+        canvasJsonWatch.innerHTML = `<span style="color:var(--success);">✓ Spec נשמר לשרת (${(data.chars || 0).toLocaleString()} תווים)</span> — עוקב אחר JSON`;
+      }
+    })
+    .catch(err => debugLog('SPEC_CAPTURE_FAILED', String(err.message || err), 'err'));
 }
 
 async function initWebChat(tokenEndpoint) {
@@ -1035,10 +1071,28 @@ async function initWebChat(tokenEndpoint) {
         startThinking();
       }
       // ★ Auto-capture spec file: ב-.NET, כשהיוזר מעלה מסמך דרך 📎 ב-WebChat,
-      // אנחנו תופסים אותו במקביל ושולחים ל-/extract-spec כדי שיהיה זמין ל-Payload Builder.
-      // ה-WebChat ממשיך לשלוח את הקובץ לסוכן כרגיל — תפיסת השרת היא non-blocking.
+      // אנחנו תופסים אותו במקביל ושולחים ל-/extract-spec.
+      // נתיב 1 — ה-action הקלאסי של WebChat (גרסאות ישנות יותר)
       if (action.type === 'WEB_CHAT/SEND_FILES') {
         captureSpecToServer((action.payload || {}).files || []);
+      }
+      // נתיב 2 (fallback) — מ-DIRECT_LINE/POST_ACTIVITY עם attachments
+      // (גרסאות חדשות של WebChat לפעמים מדלגות על SEND_FILES ושולחות ישירות activity)
+      if (action.type === 'DIRECT_LINE/POST_ACTIVITY') {
+        const act = (action.payload || {}).activity || {};
+        if (act.type === 'message' && act.attachments && act.attachments.length > 0) {
+          captureSpecFromActivity(act);
+        }
+      }
+      // ★ Discovery logging: עוזר לנו לזהות איזה actions ה-WebChat שלך באמת מפעיל ב-📎
+      // כל סוג action חדש נרשם פעם אחת בקונסול. actions שעלולים להיות קשורים לקבצים — תמיד.
+      if (!_seenActionTypes.has(action.type)) {
+        _seenActionTypes.add(action.type);
+        try { console.log('[QA-AI-Hero][NewAction]', action.type, 'payload keys:', Object.keys(action.payload || {})); } catch {}
+      }
+      if (/FILE|ATTACH|UPLOAD/i.test(action.type)) {
+        try { console.log('[QA-AI-Hero][FileLike]', action.type, action.payload); } catch {}
+        debugLog('FILE_ACTION', action.type, 'bot');
       }
       if (action.type === 'DIRECT_LINE/INCOMING_ACTIVITY') {
         const activity = action.payload.activity || {};
