@@ -433,6 +433,7 @@
       <div class="tl-phase-head"><span class="tl-icon active" id="tl-A">▸</span> Phase A — שיחה עם הסוכן</div>
       <div class="tl-substeps">
         <button id="showPhaseAJsonBtn" class="tl-action-btn hidden" type="button" title="מציג את ה-JSON שהסוכן החזיר ב-Phase A (לדיבוג)">📄 JSON של Phase A</button>
+        <button id="showPayloadTemplatesBtn" class="tl-action-btn hidden" type="button" title="מציג את ה-templates ו-field_catalog שסוכן Payload Builder החזיר (.NET only)">📦 Templates של Payload Builder</button>
       </div>
     </div>
     <div class="tl-phase">
@@ -555,6 +556,21 @@
   </div>
 </div>
 
+<!-- Payload Templates modal — מציג את ה-templates+field_catalog מסוכן Payload Builder -->
+<div class="tc-detail-modal" id="payloadTemplatesModal" onclick="if(event.target===this)closePayloadTemplatesModal()">
+  <div class="tc-detail-box" id="payloadTemplatesBox">
+    <button class="close-btn" onclick="closePayloadTemplatesModal()">סגור ✕</button>
+    <h3>📦 Templates של Payload Builder — מה שהסוכן השני החזיר</h3>
+    <div class="file-path" id="payloadTemplatesFile"></div>
+    <h4>Topics</h4>
+    <pre id="payloadTopicsContent"></pre>
+    <h4>Templates (משמשים כבסיס לכל payload)</h4>
+    <pre id="payloadTemplatesContent"></pre>
+    <h4>Field Catalog</h4>
+    <pre id="payloadFieldCatalogContent"></pre>
+  </div>
+</div>
+
 <!-- Request/Response detail modal -->
 <div class="tc-detail-modal" id="tcDetailModal" onclick="if(event.target===this)closeTcDetail()">
   <div class="tc-detail-box">
@@ -639,14 +655,24 @@ function applyDepartmentChrome(dept) {
   }
   // Timeline labels ב-.NET — Payload Builder + Publish+Observe + Verify embedded
   const s2 = document.getElementById('tl-s2-name');
+  const s3 = document.getElementById('tl-s3-name');
   const s4 = document.getElementById('tl-s4-name');
   const s5 = document.getElementById('tl-s5-name');
   if (dept === 'dotnet') {
     if (s2) s2.textContent = '2. Payload Builder';
+    // ה-Compile ב-.NET — ה-LLM ממזג: לוקח template + תסריט → JSON מלא לכל קריאה
+    if (s3) {
+      s3.textContent = '3. Compile (מיזוג templates+תסריטים)';
+      s3.parentElement.title = 'GPT מקבל את ה-template מ-Payload Builder + התסריט מה-Test Case Writer, ומפיק payload JSON מלא לכל TC. זה ה"מוח" שמחבר בין מה שצריך לבדוק (בעברית) לבין מה שנשלח ל-Kafka (JSON).';
+    }
     if (s4) s4.textContent = '4. Publish + Observe';
     if (s5) s5.textContent = '5. Verify (embedded)';
   } else {
     if (s2) s2.textContent = '2. Spec MD';
+    if (s3) {
+      s3.textContent = '3. Compile';
+      s3.parentElement.title = 'GPT ממיר כל test case בעברית ל-HTTP request מלא (method/URL/headers/body) שיישלח ל-ESB API.';
+    }
     if (s4) s4.textContent = '4. Execute';
     if (s5) s5.textContent = '5. Verify Kafka+Elastic';
   }
@@ -1592,6 +1618,38 @@ function closePhaseAJsonModal() {
 window.openPhaseAJsonModal = openPhaseAJsonModal;
 window.closePhaseAJsonModal = closePhaseAJsonModal;
 
+// ============================================================
+// Payload Templates modal — JSON מסוכן Payload Builder (.NET only)
+// ============================================================
+async function openPayloadTemplatesModal() {
+  if (!sessionId) { alert('אין session פעיל'); return; }
+  try {
+    const r = await fetch(`/session/${encodeURIComponent(sessionId)}/payload-templates`);
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      alert('שגיאה: ' + (err.detail || r.statusText));
+      return;
+    }
+    const data = await r.json();
+    document.getElementById('payloadTemplatesFile').textContent =
+      `נשמר ב-${data.file || '(לא נשמר)'}`;
+    document.getElementById('payloadTopicsContent').textContent =
+      JSON.stringify({ source_topic: data.source_topic, target_topic: data.target_topic }, null, 2);
+    document.getElementById('payloadTemplatesContent').textContent =
+      JSON.stringify(data.templates, null, 2);
+    document.getElementById('payloadFieldCatalogContent').textContent =
+      JSON.stringify(data.field_catalog, null, 2);
+    document.getElementById('payloadTemplatesModal').classList.add('open');
+  } catch (e) {
+    alert('שגיאת רשת: ' + e.message);
+  }
+}
+function closePayloadTemplatesModal() {
+  document.getElementById('payloadTemplatesModal').classList.remove('open');
+}
+window.openPayloadTemplatesModal = openPayloadTemplatesModal;
+window.closePayloadTemplatesModal = closePayloadTemplatesModal;
+
 // ייעודי ל-bubble של TC detail — בונה DOM ישיר עם <button> אמיתי
 // (ולא innerHTML עם user data, שגרם לבאג של escaping ה-<a>)
 function addTcDetailBubble(tcId, httpStatus) {
@@ -1653,6 +1711,10 @@ function openSSE() {
   sse.addEventListener('tl_step', (e) => {
     const d = JSON.parse(e.data);
     tlSet(`tl-s${d.step}`, d.status, `${d.step}. ${d.label || ''}`);
+    // ★ כש-Payload Builder (שלב 2 ב-.NET) הסתיים בהצלחה → להציג את כפתור ה-templates
+    if (d.step === 2 && d.status === 'done' && /Payload|template/i.test(d.label || '')) {
+      if (showPayloadTemplatesBtn) showPayloadTemplatesBtn.classList.remove('hidden');
+    }
   });
   sse.addEventListener('tl_tc', (e) => {
     const d = JSON.parse(e.data);
@@ -1709,6 +1771,12 @@ msgInput.addEventListener('keydown', (e) => {
 const showPhaseAJsonBtn = document.getElementById('showPhaseAJsonBtn');
 if (showPhaseAJsonBtn) {
   showPhaseAJsonBtn.addEventListener('click', openPhaseAJsonModal);
+}
+
+// חיווט הכפתור של "📦 Templates של Payload Builder"
+const showPayloadTemplatesBtn = document.getElementById('showPayloadTemplatesBtn');
+if (showPayloadTemplatesBtn) {
+  showPayloadTemplatesBtn.addEventListener('click', openPayloadTemplatesModal);
 }
 
 // boot — navigation מציג את ה-screen הראשון, startSession טוען את המצב לרקע

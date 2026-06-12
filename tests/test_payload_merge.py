@@ -13,9 +13,55 @@ import pytest
 # בלי Azure OpenAI במצב default
 os.environ.setdefault("AZURE_OPENAI_KEY", "")
 
-from agents.compiler.dotnet_compiler import DotNetCompiler  # noqa: E402
+from agents.compiler.dotnet_compiler import DotNetCompiler, _strip_placeholders  # noqa: E402
 from agents.payload_builder.payload_builder_bridge import _try_extract_json_object  # noqa: E402
 from models.dotnet_test_case import KafkaPublishAction, KafkaWaitAction  # noqa: E402
+
+
+# ============================================================
+# _strip_placeholders — מסיר MISSING/TBD/PLACEHOLDER מ-payload שה-LLM החזיר
+# ============================================================
+
+def test_strip_placeholders_removes_missing_values():
+    payload = {
+        "root": {
+            "type_code": "99918",  # ערך אמיתי — נשאר
+            "details": {
+                "name": "MISSING - field not provided",  # placeholder — מוסר
+                "code": "TBD",  # placeholder — מוסר
+                "active": True,  # ערך אמיתי — נשאר
+            },
+        }
+    }
+    removed = _strip_placeholders(payload)
+    assert removed == 2
+    assert "name" not in payload["root"]["details"]
+    assert "code" not in payload["root"]["details"]
+    assert payload["root"]["type_code"] == "99918"
+    assert payload["root"]["details"]["active"] is True
+
+
+def test_strip_placeholders_removes_invented_keys():
+    payload = {"member_details": {
+        "MISSING_id": "anything",
+        "TODO_field": "x",
+        "real_field": "y",
+    }}
+    removed = _strip_placeholders(payload)
+    assert removed == 2
+    assert "MISSING_id" not in payload["member_details"]
+    assert "TODO_field" not in payload["member_details"]
+    assert payload["member_details"]["real_field"] == "y"
+
+
+def test_strip_placeholders_handles_lists():
+    payload = {"items": ["real_value", "MISSING - x", {"key": "TBD"}, {"key": "real"}]}
+    removed = _strip_placeholders(payload)
+    # "MISSING - x" + {"key": "TBD"} → 2 הסרות
+    assert removed == 2
+    assert payload["items"][0] == "real_value"
+    # ה-dict שהיה {"key": "TBD"} הפך ל-{} כי ה-value הוסר
+    assert {"key": "real"} in payload["items"]
 
 
 # ============================================================

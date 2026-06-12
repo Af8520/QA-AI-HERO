@@ -175,6 +175,59 @@ def _text_mentions_dotnet_action(text: str) -> bool:
 
 
 # ============================================================
+# Placeholder stripping — defensive post-processing על תשובת LLM
+# ============================================================
+
+# תבניות שמסמנות שה-LLM "המציא" ערך/שדה במקום להשתמש ב-template
+_PLACEHOLDER_VALUE_PATTERNS = re.compile(
+    r"^(MISSING|TBD|TO\s*BE\s*FILLED|<\s*placeholder|requires\s+clarification|N/?A)\b",
+    re.IGNORECASE,
+)
+_PLACEHOLDER_KEY_PATTERNS = re.compile(
+    r"^(MISSING_|TODO_|PLACEHOLDER_|UNKNOWN_)",
+    re.IGNORECASE,
+)
+
+
+def _is_placeholder_value(v) -> bool:
+    if isinstance(v, str):
+        return bool(_PLACEHOLDER_VALUE_PATTERNS.match(v.strip()))
+    return False
+
+
+def _is_placeholder_key(k) -> bool:
+    if isinstance(k, str):
+        return bool(_PLACEHOLDER_KEY_PATTERNS.match(k))
+    return False
+
+
+def _strip_placeholders(obj) -> int:
+    """מסיר recursive מ-dict/list כל value שהוא placeholder string, וכל key
+    שמתחיל ב-prefix של placeholder. מחזיר את מספר המסירות (לדיבוג).
+    """
+    removed = 0
+    if isinstance(obj, dict):
+        for k in list(obj.keys()):
+            v = obj[k]
+            if _is_placeholder_key(k) or _is_placeholder_value(v):
+                obj.pop(k, None)
+                removed += 1
+                continue
+            removed += _strip_placeholders(v)
+    elif isinstance(obj, list):
+        # מסיר items שהם placeholder, ועובר לעומק על שאר
+        keep = []
+        for item in obj:
+            if _is_placeholder_value(item):
+                removed += 1
+                continue
+            removed += _strip_placeholders(item)
+            keep.append(item)
+        obj[:] = keep
+    return removed
+
+
+# ============================================================
 # LLM fallback
 # ============================================================
 
@@ -260,6 +313,19 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
   string במקום int) כדי לבדוק validation בצד ה-Worker.
 - שמור על case-sensitive בשמות topics ו-fields.
 - החזר JSON תקני בלבד, ללא טקסט נלווה.
+
+★★★ איסורים מוחלטים — קריטי שלא תפר אותם ★★★
+1. **אסור** להוסיף שדות חדשים שלא קיימים ב-template. אם התסריט מאזכר שדה שאינו ב-template,
+   רשום ב-compiler_notes ("test case mentions field X not in template") **אבל אל תוסיף אותו ל-value**.
+2. **אסור** להחזיר ערכים מסוג "MISSING", "MISSING - ...", "TBD", "TO BE FILLED",
+   "<placeholder>", "requires clarification" וכדומה. **לעולם**. אם אינך יודע מה הערך:
+   - השאר את הערך מה-template כפי שהוא, או
+   - אם אין ערך ב-template — השמט את השדה לגמרי, או
+   - אם השדה חובה לפי ה-FIELD_CATALOG — השתמש בערך ריק "" / null / 0 (לפי ה-type).
+3. **אסור** להמציא שמות שדות עם prefix כמו "MISSING_id", "TODO_X", "PLACEHOLDER_Y".
+   השדות חייבים להיות בדיוק כפי שהם ב-template.
+4. אם התסריט עמום מדי לבצע דריסות מדויקות — החזר את ה-template כפי שהוא (בלי דריסות)
+   ורשום זאת ב-compiler_notes. **עדיף payload לא מדויק מאשר payload עם placeholders**.
 """
 
 
@@ -368,6 +434,10 @@ class DotNetCompiler:
         except Exception as e:
             log.warning("dotnet_compiler_templates_llm_failed", error=str(e), tc=test_case_id)
             return None
+
+        # ★ Post-process: מסנן placeholders שה-LLM החזיר בכל מקרה (גם בניגוד להוראות).
+        # יש LLMs שמתעקשים להחזיר "MISSING - ..." או דומה. מסירים את אלה לפני שליחה ל-Kafka.
+        _strip_placeholders(data)
 
         return self._parse_llm_response(test_case_id, ado_id, text, data, source_label="templates")
 

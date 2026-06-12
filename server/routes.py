@@ -281,6 +281,23 @@ async def get_phase_a_json(session_id: str):
     }
 
 
+@router.get("/session/{session_id}/payload-templates")
+async def get_payload_templates(session_id: str):
+    """מחזיר את ה-JSON שסוכן Payload Builder החזיר (.NET only). שימושי לדיבוג."""
+    session = await store.get(session_id)
+    if not session or not session.payload_templates:
+        raise HTTPException(404, "אין payload templates ל-session זה (Payload Builder לא רץ או נכשל)")
+    pt = session.payload_templates
+    return {
+        "session_id": session_id,
+        "source_topic": pt.get("source_topic"),
+        "target_topic": pt.get("target_topic"),
+        "templates": pt.get("templates") or {},
+        "field_catalog": pt.get("field_catalog") or {},
+        "file": session.payload_templates_file,
+    }
+
+
 @router.post("/upload-document")
 async def upload_document(
     request: Request,
