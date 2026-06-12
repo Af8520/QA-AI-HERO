@@ -81,33 +81,54 @@ class PayloadBuilderBridge:
                 "channelData": {"postBack": True},
             })
 
-            # 5. שליחת הקובץ — או כ-attachment (מועדף) או כטקסט (fallback)
+            # 5. שליחת הקובץ — שלושה ניסיונות לפי סדר העדפה:
+            #    (א) DirectLine /upload endpoint — הדרך הרשמית להעלות קובץ. הסוכן
+            #        מקבל attachment "תקני" שהוא יודע לעבד.
+            #    (ב) data: URL מוטמע ב-activity.attachments (אם /upload לא קיים)
+            #    (ג) טקסט גולמי (fallback אחרון — הסוכן עשוי לתת תוצאה חלקית)
+            sent_via = None
             if spec_bytes:
                 name = spec_filename or "spec.docx"
                 ct = spec_content_type or "application/octet-stream"
-                # data: URL עם base64 — בדיוק כמו WebChat 📎
-                b64 = base64.b64encode(spec_bytes).decode("ascii")
-                content_url = f"data:{ct};base64,{b64}"
-                activity = {
-                    "type": "message",
-                    "text": "",
-                    "from": {"id": "qa-ai-hero-server", "role": "user"},
-                    "attachments": [{
-                        "contentType": ct,
-                        "contentUrl": content_url,
-                        "name": name,
-                    }],
-                }
-                log.info("payload_builder_sending_attachment", filename=name, content_type=ct,
-                         bytes=len(spec_bytes), base64_size=len(b64))
-            else:
-                activity = {
+                # ניסיון (א): DirectLine upload endpoint
+                try:
+                    await self._upload_attachment(
+                        client, directline_url, conv_id, token, spec_bytes, name, ct,
+                    )
+                    sent_via = "upload_endpoint"
+                    log.info("payload_builder_sent_via_upload_endpoint",
+                             filename=name, content_type=ct, bytes=len(spec_bytes))
+                except PayloadBuilderError as e:
+                    log.warning("payload_builder_upload_endpoint_failed_falling_back",
+                                error=str(e))
+                # ניסיון (ב): activity עם data: URL
+                if sent_via is None:
+                    b64 = base64.b64encode(spec_bytes).decode("ascii")
+                    content_url = f"data:{ct};base64,{b64}"
+                    await self._post_activity(client, directline_url, conv_id, headers, {
+                        "type": "message",
+                        "text": "",
+                        "from": {"id": "qa-ai-hero-server", "role": "user"},
+                        "attachments": [{
+                            "contentType": ct,
+                            "contentUrl": content_url,
+                            "name": name,
+                        }],
+                    })
+                    sent_via = "data_url"
+                    log.info("payload_builder_sent_via_data_url",
+                             filename=name, bytes=len(spec_bytes), base64_size=len(b64))
+            # ניסיון (ג): טקסט (אם אין בייטים, או fallback)
+            if sent_via is None:
+                if not spec_text:
+                    raise PayloadBuilderError("אין spec_bytes ואין spec_text — לא ניתן לבקש templates")
+                await self._post_activity(client, directline_url, conv_id, headers, {
                     "type": "message",
                     "text": spec_text,
                     "from": {"id": "qa-ai-hero-server", "role": "user"},
-                }
-                log.info("payload_builder_sending_text_fallback", chars=len(spec_text))
-            await self._post_activity(client, directline_url, conv_id, headers, activity)
+                })
+                sent_via = "text"
+                log.info("payload_builder_sent_via_text", chars=len(spec_text))
 
             # 6. Polling עד שמגיע JSON object תקין מהבוט
             parsed, raw_text = await self._poll_for_json(client, directline_url, conv_id, headers)
@@ -187,6 +208,34 @@ class PayloadBuilderBridge:
         except httpx.HTTPError as e:
             raise PayloadBuilderError(f"post activity failed: {e}")
 
+    async def _upload_attachment(
+        self,
+        client: httpx.AsyncClient,
+        directline_url: str,
+        conv_id: str,
+        token: str,
+        spec_bytes: bytes,
+        filename: str,
+        content_type: str,
+    ) -> None:
+        """העלאת קובץ דרך DirectLine /upload endpoint — בדיוק כמו ש-WebChat 📎 עושה
+        ברגע שמותקנת ה-Bot Framework SDK הרגילה. ה-endpoint מטפל בקובץ פנימית ומייצר
+        activity עם attachment שהסוכן יכול לעבד בצורה תקנית (לא data: URL).
+        """
+        url = f"{directline_url}v3/directline/conversations/{conv_id}/upload"
+        params = {"userId": "qa-ai-hero-server", "filename": filename}
+        # ה-endpoint מצפה ל-multipart/form-data עם הקובץ
+        files = {"file": (filename, spec_bytes, content_type)}
+        # NOTE: אין לכלול Content-Type ידני — httpx יקבע multipart boundary אוטומטית
+        upload_headers = {"Authorization": f"Bearer {token}"}
+        try:
+            r = await client.post(url, headers=upload_headers, params=params, files=files)
+            if r.status_code == 404:
+                raise PayloadBuilderError("upload endpoint לא נתמך ע\"י ה-DirectLine הזה (404)")
+            r.raise_for_status()
+        except httpx.HTTPError as e:
+            raise PayloadBuilderError(f"upload endpoint failed: {e}")
+
     async def _poll_for_json(
         self,
         client: httpx.AsyncClient,
@@ -224,6 +273,14 @@ class PayloadBuilderBridge:
                 text = activity.get("text") or ""
                 if text:
                     accumulated += text + "\n"
+                # ★ Bail early on bot-side runtime errors (SystemError וכד'). אחרת
+                # נחכה לחינם 180 שניות עד timeout.
+                if _is_bot_error(text):
+                    raise PayloadBuilderError(
+                        f"הסוכן Payload Builder החזיר שגיאה: {text.strip()[:500]}\n"
+                        f"זה לרוב אומר ש-flow של הסוכן ב-Copilot Studio נכשל לעבד "
+                        f"את הקלט שלנו (בעיקר attachments). בדוק לוגים של Copilot Studio."
+                    )
                 obj = _try_extract_json_object(accumulated, required_keys=("templates", "source_topic"))
                 if obj is not None:
                     log.info("payload_builder_received", text_len=len(text),
@@ -234,13 +291,29 @@ class PayloadBuilderBridge:
 
         raise PayloadBuilderError(
             f"Timeout {self.timeout_seconds}s — אין JSON בתשובה. "
-            f"accumulated {len(accumulated)} chars (first 200: {accumulated[:200]!r})"
+            f"accumulated {len(accumulated)} chars: {accumulated[:500]!r}"
         )
 
 
 # ============================================================
 # Pure helpers — testable without DirectLine
 # ============================================================
+
+_BOT_ERROR_PATTERNS = (
+    "Sorry, something unexpected happened",
+    "Error code: SystemError",
+    "Error code: BotError",
+    "Conversation ID:",  # מופיע יחד עם שגיאות runtime
+    "מצטערים, משהו השתבש",  # עברית — חלק מהקונפיגורציות מציגות בעברית
+)
+
+
+def _is_bot_error(text: str) -> bool:
+    """True אם הטקסט מה-bot מכיל אינדיקציה לשגיאת runtime של Copilot Studio."""
+    if not text:
+        return False
+    return any(pattern in text for pattern in _BOT_ERROR_PATTERNS)
+
 
 def _try_extract_json_object(text: str, required_keys: tuple = ()) -> Optional[Dict[str, Any]]:
     """מחזיר JSON object מתוך טקסט. עדיפות ל-fenced ```json {...}``` ואז raw.
