@@ -971,12 +971,12 @@ function _uploadSpecFile(file) {
   const fd = new FormData();
   fd.append('file', file);
   fd.append('session_id', sessionId);
-  debugLog('SPEC_UPLOADING', name, 'bot');
+  debugLog('SPEC_UPLOADING', `${name} (${(file.size || 0).toLocaleString()} bytes)`, 'bot');
+  // ★ אין keepalive! keepalive מוגבל ל-64KiB גוף בקשה — docx של אפיון בדרך כלל גדול יותר.
   fetch('/extract-spec', {
     method: 'POST',
     body: fd,
     headers: { 'X-Session-ID': sessionId },
-    keepalive: true,
   })
     .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
     .then(data => {
@@ -1072,27 +1072,33 @@ async function initWebChat(tokenEndpoint) {
       }
       // ★ Auto-capture spec file: ב-.NET, כשהיוזר מעלה מסמך דרך 📎 ב-WebChat,
       // אנחנו תופסים אותו במקביל ושולחים ל-/extract-spec.
-      // נתיב 1 — ה-action הקלאסי של WebChat (גרסאות ישנות יותר)
+      //
+      // ★ הנתיב הראשי (WebChat 4.18+): SET_SEND_BOX_ATTACHMENTS עם attachments.blob = File.
+      // זה ה-action שמופעל ברגע שהיוזר בוחר את הקובץ ב-picker — לפני שהוא לוחץ על Send.
+      if (action.type === 'WEB_CHAT/SET_SEND_BOX_ATTACHMENTS') {
+        const atts = (action.payload || {}).attachments || [];
+        for (const att of atts) {
+          // WebChat שומר את ה-File המקורי תחת att.blob (לפעמים att.file)
+          const file = att && (att.blob || att.file);
+          if (file && file.name) _uploadSpecFile(file);
+        }
+      }
+      // נתיב fallback ישן: WEB_CHAT/SEND_FILES (גרסאות ישנות יותר של WebChat)
       if (action.type === 'WEB_CHAT/SEND_FILES') {
         captureSpecToServer((action.payload || {}).files || []);
       }
-      // נתיב 2 (fallback) — מ-DIRECT_LINE/POST_ACTIVITY עם attachments
-      // (גרסאות חדשות של WebChat לפעמים מדלגות על SEND_FILES ושולחות ישירות activity)
+      // נתיב fallback נוסף: POST_ACTIVITY עם attachments (data: URL)
       if (action.type === 'DIRECT_LINE/POST_ACTIVITY') {
         const act = (action.payload || {}).activity || {};
         if (act.type === 'message' && act.attachments && act.attachments.length > 0) {
           captureSpecFromActivity(act);
         }
       }
-      // ★ Discovery logging: עוזר לנו לזהות איזה actions ה-WebChat שלך באמת מפעיל ב-📎
-      // כל סוג action חדש נרשם פעם אחת בקונסול. actions שעלולים להיות קשורים לקבצים — תמיד.
+      // Discovery logging — silent ב-DevTools, רק פעם אחת לכל action type חדש.
+      // לא משפיע על UI; שימושי אם נצטרך לדבג WebChat actions בעתיד.
       if (!_seenActionTypes.has(action.type)) {
         _seenActionTypes.add(action.type);
         try { console.log('[QA-AI-Hero][NewAction]', action.type, 'payload keys:', Object.keys(action.payload || {})); } catch {}
-      }
-      if (/FILE|ATTACH|UPLOAD/i.test(action.type)) {
-        try { console.log('[QA-AI-Hero][FileLike]', action.type, action.payload); } catch {}
-        debugLog('FILE_ACTION', action.type, 'bot');
       }
       if (action.type === 'DIRECT_LINE/INCOMING_ACTIVITY') {
         const activity = action.payload.activity || {};
