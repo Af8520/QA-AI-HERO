@@ -170,8 +170,12 @@ async def extract_spec(
     text = _extract_text(file.filename or "doc", raw)
     session.spec_text = text
     session.spec_filename = file.filename
+    # ★ שומרים את הבייטים המקוריים + content_type כדי שנוכל לשלוח לסוכן Payload Builder
+    # כ-attachment (כמו ש-WebChat 📎 עושה). הסוכן מעבד קובץ הרבה יותר טוב מטקסט.
+    session.spec_bytes = raw
+    session.spec_content_type = file.content_type or _content_type_for(file.filename)
     session.touch()
-    log.info("spec_extracted", session_id=sid, filename=file.filename, chars=len(text))
+    log.info("spec_extracted", session_id=sid, filename=file.filename, chars=len(text), bytes=len(raw))
     return {
         "session_id": session.session_id,
         "filename": file.filename,
@@ -295,6 +299,9 @@ async def get_payload_templates(session_id: str):
         "templates": pt.get("templates") or {},
         "field_catalog": pt.get("field_catalog") or {},
         "file": session.payload_templates_file,
+        # ★ raw response — מה שהסוכן באמת החזיר ב-DirectLine, לפני חילוץ ה-JSON.
+        # מאפשר להבחין: "המידע מצומצם כי הסוכן החזיר מצומצם" vs "אצלנו נחתך".
+        "raw_bot_response": pt.get("__raw_bot_response") or "",
     }
 
 
@@ -467,6 +474,20 @@ async def _trigger_phase_b(session: ChatSession, suite_id: int) -> None:
             await session.emit("pipeline_done", {"error": str(e)})
 
     session.pipeline_task = asyncio.create_task(runner())
+
+
+def _content_type_for(filename: Optional[str]) -> str:
+    """Best-effort content-type לפי סיומת הקובץ. ברירת מחדל octet-stream."""
+    name = (filename or "").lower()
+    if name.endswith(".docx"):
+        return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    if name.endswith(".doc"):
+        return "application/msword"
+    if name.endswith(".pdf"):
+        return "application/pdf"
+    if name.endswith(".txt"):
+        return "text/plain"
+    return "application/octet-stream"
 
 
 def _extract_text(filename: str, content: bytes) -> str:

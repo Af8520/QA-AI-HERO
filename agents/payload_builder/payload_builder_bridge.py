@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import re
 import time
@@ -43,26 +44,31 @@ class PayloadBuilderBridge:
         self.timeout_seconds = timeout_seconds or settings.DOTNET_PAYLOAD_BUILDER_TIMEOUT_SECONDS
         self.enabled = bool(self.token_endpoint)
 
-    async def generate(self, spec_text: str) -> Dict[str, Any]:
-        """שולח spec_text לסוכן ומחזיר את ה-JSON המנותח.
+    async def generate(
+        self,
+        spec_text: str,
+        spec_bytes: Optional[bytes] = None,
+        spec_filename: Optional[str] = None,
+        spec_content_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """שולח spec לסוכן ומחזיר את ה-JSON המנותח.
 
-        זורק PayloadBuilderError במקרה של כשל.
+        ★ מועדף לשלוח קובץ (spec_bytes + filename + content_type) — הסוכן מעבד קובץ
+        עם flow מובנה יותר ומחזיר payload מלא. אם רק spec_text זמין — נשלח כטקסט
+        (fallback; הסוכן עשוי להחזיר תוצאה מצומצמת יותר).
         """
         if not self.enabled:
             raise PayloadBuilderError("DOTNET_PAYLOAD_COPILOT_TOKEN_ENDPOINT לא מוגדר")
-        if not spec_text or not spec_text.strip():
-            raise PayloadBuilderError("spec_text ריק — לא ניתן לבקש templates")
+        if not spec_text and not spec_bytes:
+            raise PayloadBuilderError("אין spec_text ואין spec_bytes — לא ניתן לבקש templates")
 
-        async with httpx.AsyncClient(verify=settings.VERIFY_SSL, timeout=30.0) as client:
-            # 1. Regional channel settings (כמו שה-WebChat בדפדפן עושה)
+        async with httpx.AsyncClient(verify=settings.VERIFY_SSL, timeout=60.0) as client:
             directline_url = await self._fetch_directline_url(client)
             log.info("payload_builder_directline_url", url=directline_url)
 
-            # 2. Token
             token = await self._fetch_token(client)
             log.info("payload_builder_token_fetched", token_len=len(token))
 
-            # 3. Conversation
             headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
             conv_id = await self._start_conversation(client, directline_url, headers)
             log.info("payload_builder_conversation_started", conv_id=conv_id)
@@ -75,15 +81,40 @@ class PayloadBuilderBridge:
                 "channelData": {"postBack": True},
             })
 
-            # 5. שליחת ה-spec_text כטקסט (אם הסוכן מצפה לקובץ, נשלח את התוכן כטקסט גולמי)
-            await self._post_activity(client, directline_url, conv_id, headers, {
-                "type": "message",
-                "text": spec_text,
-                "from": {"id": "qa-ai-hero-server", "role": "user"},
-            })
+            # 5. שליחת הקובץ — או כ-attachment (מועדף) או כטקסט (fallback)
+            if spec_bytes:
+                name = spec_filename or "spec.docx"
+                ct = spec_content_type or "application/octet-stream"
+                # data: URL עם base64 — בדיוק כמו WebChat 📎
+                b64 = base64.b64encode(spec_bytes).decode("ascii")
+                content_url = f"data:{ct};base64,{b64}"
+                activity = {
+                    "type": "message",
+                    "text": "",
+                    "from": {"id": "qa-ai-hero-server", "role": "user"},
+                    "attachments": [{
+                        "contentType": ct,
+                        "contentUrl": content_url,
+                        "name": name,
+                    }],
+                }
+                log.info("payload_builder_sending_attachment", filename=name, content_type=ct,
+                         bytes=len(spec_bytes), base64_size=len(b64))
+            else:
+                activity = {
+                    "type": "message",
+                    "text": spec_text,
+                    "from": {"id": "qa-ai-hero-server", "role": "user"},
+                }
+                log.info("payload_builder_sending_text_fallback", chars=len(spec_text))
+            await self._post_activity(client, directline_url, conv_id, headers, activity)
 
             # 6. Polling עד שמגיע JSON object תקין מהבוט
-            return await self._poll_for_json(client, directline_url, conv_id, headers)
+            parsed, raw_text = await self._poll_for_json(client, directline_url, conv_id, headers)
+            # שומרים גם את התשובה הגולמית של הסוכן לדיבוג — היוזר יכול לראות אם התשובה
+            # נחתכה אצלנו (לא) או שזה מה שהסוכן באמת החזיר.
+            parsed["__raw_bot_response"] = raw_text
+            return parsed
 
     # ============================================================
     # Helpers
@@ -162,10 +193,11 @@ class PayloadBuilderBridge:
         directline_url: str,
         conv_id: str,
         headers: Dict[str, str],
-    ) -> Dict[str, Any]:
+    ) -> tuple:
         """polling עד שאחת מהודעות הבוט מכילה JSON object שמכיל templates/source_topic.
 
-        מצטבר את כל תוכן ההודעות לטקסט אחד כדי לתפוס JSON שמתפצל על כמה הודעות.
+        מחזיר tuple (parsed_dict, raw_accumulated_text) — שני אלה מאפשרים לדבג ש"מה שראינו"
+        זה באמת מה שהסוכן החזיר.
         """
         url = f"{directline_url}v3/directline/conversations/{conv_id}/activities"
         watermark: Optional[str] = None
@@ -192,12 +224,12 @@ class PayloadBuilderBridge:
                 text = activity.get("text") or ""
                 if text:
                     accumulated += text + "\n"
-                # נסה לחלץ JSON object שמכיל את השדות שאנחנו מצפים להם
                 obj = _try_extract_json_object(accumulated, required_keys=("templates", "source_topic"))
                 if obj is not None:
                     log.info("payload_builder_received", text_len=len(text),
+                             accumulated_len=len(accumulated),
                              template_keys=list((obj.get("templates") or {}).keys()))
-                    return obj
+                    return obj, accumulated
             await asyncio.sleep(2.0)
 
         raise PayloadBuilderError(

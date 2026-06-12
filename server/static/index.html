@@ -568,6 +568,8 @@
     <pre id="payloadTemplatesContent"></pre>
     <h4>Field Catalog</h4>
     <pre id="payloadFieldCatalogContent"></pre>
+    <h4>Raw bot response (לפני חילוץ JSON — כדי לדעת אם נחתך אצלנו)</h4>
+    <pre id="payloadRawResponseContent" style="direction: ltr; text-align: left;"></pre>
   </div>
 </div>
 
@@ -1639,6 +1641,11 @@ async function openPayloadTemplatesModal() {
       JSON.stringify(data.templates, null, 2);
     document.getElementById('payloadFieldCatalogContent').textContent =
       JSON.stringify(data.field_catalog, null, 2);
+    const rawEl = document.getElementById('payloadRawResponseContent');
+    if (rawEl) {
+      const raw = data.raw_bot_response || '(אין תיעוד)';
+      rawEl.textContent = raw + `\n\n(אורך: ${raw.length} תווים)`;
+    }
     document.getElementById('payloadTemplatesModal').classList.add('open');
   } catch (e) {
     alert('שגיאת רשת: ' + e.message);

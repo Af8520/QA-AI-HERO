@@ -23,6 +23,10 @@ class ChatSession:
     department: str = "esb"
     spec_text: Optional[str] = None
     spec_filename: Optional[str] = None
+    # ★ בייטים מקוריים + content-type — נשלחים ל-Payload Builder כ-attachment
+    # (לסוכן יש flow שונה לקובץ vs טקסט; קובץ נותן פלט מלא הרבה יותר).
+    spec_bytes: Optional[bytes] = None
+    spec_content_type: Optional[str] = None
     postman_collection: Optional[PostmanCollection] = None
     suite_id: Optional[int] = None
     # Foundry mode: test_cases מועברים ישירות (ללא ADO)

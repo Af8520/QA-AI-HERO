@@ -287,9 +287,22 @@ async def _build_payloads(session: ChatSession, spec_text, emit):
         return None
 
     bridge = PayloadBuilderBridge()
-    await emit(f"שלב 2/{TOTAL_STAGES} — שולח spec ({len(spec_text)} תווים) לסוכן Payload Builder...")
+    # ★ העדפה: לשלוח את הקובץ המקורי (בייטים) ולא את הטקסט. הסוכן מקבל קובץ → flow מלא;
+    # קבלת טקסט גולמי → flow מצומצם שמחזיר רק חלקים מהשדות (עם MISSING placeholders).
+    has_bytes = bool(getattr(session, "spec_bytes", None))
+    if has_bytes:
+        await emit(f"שלב 2/{TOTAL_STAGES} — שולח קובץ ({len(session.spec_bytes):,} bytes, "
+                   f"{session.spec_filename}) לסוכן Payload Builder...")
+    else:
+        await emit(f"שלב 2/{TOTAL_STAGES} — שולח spec_text ({len(spec_text)} תווים) לסוכן Payload Builder "
+                   f"⚠ (אין קובץ מקורי — תוצאה עשויה להיות מצומצמת)")
     try:
-        result = await bridge.generate(spec_text)
+        result = await bridge.generate(
+            spec_text=spec_text,
+            spec_bytes=getattr(session, "spec_bytes", None),
+            spec_filename=getattr(session, "spec_filename", None),
+            spec_content_type=getattr(session, "spec_content_type", None),
+        )
     except PayloadBuilderError as e:
         await emit(f"  ⚠ Payload Builder failed: {str(e)[:200]}")
         log.warning("payload_builder_failed", error=str(e))
