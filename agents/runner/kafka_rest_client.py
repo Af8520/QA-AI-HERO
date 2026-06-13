@@ -87,9 +87,11 @@ class KafkaRestClient:
         topic: str,
         match: Dict[str, Any],
         timeout_seconds: int,
-        group_prefix: str,
+        group: str,
     ) -> Optional[Dict[str, Any]]:
         """יוצר consumer instance, נרשם ל-topic, ועושה polling עד שמסר תואם מגיע או timeout.
+
+        group — שם ה-consumer group המדויק (כבר resolved ע"י ה-caller; ACL בנוי עליו).
 
         מחזיר:
         - dict {value_parsed, offset, partition, topic, key} אם נמצא מסר תואם
@@ -97,7 +99,6 @@ class KafkaRestClient:
         - {"fatal_error": "..."} אם 401/403 (auth/ACL) — מפעיל early-stop בפייפליין
         - {"rest_consumer_unavailable": True} אם consumer API כבוי (404/501)
         """
-        group = f"{group_prefix}-{uuid.uuid4().hex[:8]}"
         instance_name = f"qa-{uuid.uuid4().hex[:8]}"
         headers_json = {"Content-Type": _V2_ACCEPT}
 

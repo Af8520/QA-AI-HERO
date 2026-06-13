@@ -234,7 +234,7 @@ class DotNetRunner:
             from agents.runner.kafka_rest_client import KafkaRestClient
             observed = await KafkaRestClient().consume(
                 action.topic, action.match, action.timeout_seconds,
-                settings.KAFKA_CONSUMER_GROUP_PREFIX,
+                _resolve_consumer_group(),
             )
             # consumer API כבוי ב-deployment → BLOCKED עם הסבר
             if isinstance(observed, dict) and observed.get("rest_consumer_unavailable"):
@@ -253,7 +253,7 @@ class DotNetRunner:
                     "confluent-kafka package not installed",
                 )
 
-            group_id = f"{settings.KAFKA_CONSUMER_GROUP_PREFIX}-{uuid.uuid4().hex[:8]}"
+            group_id = _resolve_consumer_group()
             conf = self._kafka_conf()
             conf.update({
                 "group.id": group_id,
@@ -527,6 +527,21 @@ class DotNetRunner:
 # Pure helpers (testable without confluent-kafka)
 # ============================================================
 
+def _parse_group_from_error(err_str: str) -> Optional[str]:
+    """מחלץ את שם ה-group מהודעת REST proxy: 'Not authorized to access group: X'."""
+    m = re.search(r"access group:\s*([^\"'\}\s]+)", err_str or "", re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+def _resolve_consumer_group() -> str:
+    """שם ה-consumer group: אם KAFKA_CONSUMER_GROUP מוגדר → verbatim (ACL literal).
+    אחרת PREFIX + suffix אקראי (לסביבות עם prefix ACL או בלי group ACL).
+    """
+    if settings.KAFKA_CONSUMER_GROUP:
+        return settings.KAFKA_CONSUMER_GROUP
+    return f"{settings.KAFKA_CONSUMER_GROUP_PREFIX}-{uuid.uuid4().hex[:8]}"
+
+
 def _normalize_topic(topic: str) -> str:
     """שמות topics ב-Kafka הם case-sensitive, ובמכבי הקונבנציה היא תמיד אותיות קטנות.
     ה-Payload Builder לפעמים מחזיר אותיות גדולות (Clicks-referral-streaming) → 403/אין ACL.
@@ -609,8 +624,25 @@ def _classify_kafka_error(err_str: str, topic: str = "", action: str = "publish"
         or "Not authorized" in s or "not authorized" in s
         or "40301" in s or "40101" in s
     )
+    mentions_group = "group" in s.lower()
+    user = settings.KAFKA_SASL_USERNAME or "<your-user>"
 
-    if "TOPIC_AUTHORIZATION_FAILED" in s or is_rest_authz:
+    # ★ Group authorization — חייב לבדוק *לפני* topic, כי REST מחזיר 403+group יחד
+    if "GROUP_AUTHORIZATION_FAILED" in s or (is_rest_authz and mentions_group):
+        bad_group = _parse_group_from_error(s) or settings.KAFKA_CONSUMER_GROUP or settings.KAFKA_CONSUMER_GROUP_PREFIX
+        out["friendly"] = (
+            f"אין הרשאת ACL ל-consumer group '{bad_group}'. ה-user שלך מזדהה בהצלחה "
+            f"אבל לא רשאי להשתמש ב-group הזה."
+        )
+        out["recommendation"] = (
+            f"שתי אפשרויות:\n"
+            f"  1) הגדר ב-.env את KAFKA_CONSUMER_GROUP לשם group מדויק שיש לך עליו הרשאה "
+            f"(ללא suffix אקראי).\n"
+            f"  2) בקש מ-admin: kafka-acls --add --consumer --topic {topic} --group {bad_group} "
+            f"--principal User:{user}"
+        )
+        out["is_fatal_infra"] = True
+    elif "TOPIC_AUTHORIZATION_FAILED" in s or is_rest_authz:
         op = "Write" if action == "publish" else "Read"
         out["friendly"] = (
             f"אין הרשאת ACL {op} ל-topic '{topic}'. ה-user שלך מזדהה בהצלחה אבל "
@@ -619,19 +651,8 @@ def _classify_kafka_error(err_str: str, topic: str = "", action: str = "publish"
         out["recommendation"] = (
             f"בקש מ-admin של Kafka להוסיף ACL:\n"
             f"  kafka-acls --add --{('producer' if action == 'publish' else 'consumer')} "
-            f"--topic {topic} --principal User:{settings.KAFKA_SASL_USERNAME or '<your-user>'}"
-            + (f" --group {settings.KAFKA_CONSUMER_GROUP_PREFIX}-*" if action == "consume" else "")
-        )
-        out["is_fatal_infra"] = True
-    elif "GROUP_AUTHORIZATION_FAILED" in s:
-        out["friendly"] = (
-            f"אין הרשאת ACL ל-consumer group. ה-user שלך לא יכול לצרוך עם group "
-            f"prefix '{settings.KAFKA_CONSUMER_GROUP_PREFIX}'."
-        )
-        out["recommendation"] = (
-            f"בקש מ-admin להוסיף ACL: "
-            f"kafka-acls --add --consumer --topic {topic} --group "
-            f"{settings.KAFKA_CONSUMER_GROUP_PREFIX}-* --principal User:{settings.KAFKA_SASL_USERNAME or '<your-user>'}"
+            f"--topic {topic} --principal User:{user}"
+            + (f" --group <your-group>" if action == "consume" else "")
         )
         out["is_fatal_infra"] = True
     elif "SASL_AUTHENTICATION_FAILED" in s or "Authentication failed" in s:

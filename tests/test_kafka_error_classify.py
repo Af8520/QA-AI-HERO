@@ -6,7 +6,11 @@ import os
 
 os.environ.setdefault("KAFKA_BOOTSTRAP_SERVERS", "")
 
-from agents.runner.dotnet_runner import _classify_kafka_error  # noqa: E402
+from agents.runner.dotnet_runner import (  # noqa: E402
+    _classify_kafka_error,
+    _parse_group_from_error,
+    _resolve_consumer_group,
+)
 
 
 def test_topic_authorization_failed_publish():
@@ -55,3 +59,44 @@ def test_unknown_error_is_not_fatal():
     out = _classify_kafka_error(err, topic="x", action="publish")
     assert out["is_fatal_infra"] is False
     assert out["friendly"] == "Some random Kafka error"
+
+
+def test_rest_group_authz_403():
+    """REST proxy: 403 + 'access group' → group branch (לא topic), עם שם ה-group."""
+    err = 'HTTP 403 on records: {"error_code":40301,"message":"Not authorized to access group: worker.cb.catalog-99dabfd0"}'
+    out = _classify_kafka_error(err, topic="patient_parameters-raw", action="consume")
+    assert out["is_fatal_infra"] is True
+    assert "consumer group" in out["friendly"]
+    assert "worker.cb.catalog-99dabfd0" in out["friendly"]
+    # ההמלצה מציעה KAFKA_CONSUMER_GROUP (לא topic ACL בלבד)
+    assert "KAFKA_CONSUMER_GROUP" in out["recommendation"]
+
+
+def test_rest_topic_authz_403_no_group():
+    """REST proxy: 403 בלי 'group' → topic branch."""
+    err = 'HTTP 403 on records: {"error_code":40301,"message":"Not authorized to access topic"}'
+    out = _classify_kafka_error(err, topic="some-topic", action="consume")
+    assert out["is_fatal_infra"] is True
+    assert "topic" in out["friendly"]
+    assert "some-topic" in out["friendly"]
+
+
+def test_parse_group_from_error():
+    err = '{"error_code":40301,"message":"Not authorized to access group: worker.cb.catalog-99dabfd0"}'
+    assert _parse_group_from_error(err) == "worker.cb.catalog-99dabfd0"
+    assert _parse_group_from_error("no group here") is None
+
+
+def test_resolve_consumer_group_exact(monkeypatch):
+    from config.settings import settings
+    monkeypatch.setattr(settings, "KAFKA_CONSUMER_GROUP", "exact-group", raising=False)
+    assert _resolve_consumer_group() == "exact-group"
+
+
+def test_resolve_consumer_group_prefix(monkeypatch):
+    from config.settings import settings
+    monkeypatch.setattr(settings, "KAFKA_CONSUMER_GROUP", None, raising=False)
+    monkeypatch.setattr(settings, "KAFKA_CONSUMER_GROUP_PREFIX", "qa-ai-hero", raising=False)
+    g = _resolve_consumer_group()
+    assert g.startswith("qa-ai-hero-")
+    assert len(g) > len("qa-ai-hero-")

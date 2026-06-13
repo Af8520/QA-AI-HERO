@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     KAFKA_SASL_USERNAME: Optional[str] = None
     KAFKA_SASL_PASSWORD: Optional[str] = None
     KAFKA_CONSUMER_GROUP_PREFIX: str = "qa-ai-hero"
+    # ★ שם consumer group מדויק (ללא suffix אקראי). הגדר אם ה-principal שלך מורשה
+    # ל-group ספציפי (ACL literal). אם ריק → נשתמש ב-PREFIX + suffix אקראי.
+    KAFKA_CONSUMER_GROUP: Optional[str] = None
     KAFKA_DEFAULT_TIMEOUT_SECONDS: int = 30
     # ★ Confluent REST Proxy — מסלול מועדף. אם מאוכלס, ה-.NET runner מפרסם/צורך דרך HTTP
     # (httpx, מכבד VERIFY_SSL) במקום הקליינט הנייטיב. עוקף בעיות ACL/cert של librdkafka,
