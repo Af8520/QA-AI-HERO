@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -49,7 +50,7 @@ class DotNetRunner:
         for action in executable.actions:
             try:
                 if isinstance(action, KafkaPublishAction):
-                    step, obs = await self._run_kafka_publish(action)
+                    step, obs = await self._run_kafka_publish(action, executable.test_case_id)
                 elif isinstance(action, KafkaWaitAction):
                     step, obs = await self._run_kafka_wait(action)
                 elif isinstance(action, CouchbaseWaitAction):
@@ -109,13 +110,21 @@ class DotNetRunner:
     # Kafka publish
     # ============================================================
 
-    async def _run_kafka_publish(self, action: KafkaPublishAction):
+    async def _run_kafka_publish(self, action: KafkaPublishAction, tc_id: str = ""):
         if not settings.kafka_enabled:
             return self._blocked_step(
                 f"PUBLISH topic={action.topic}",
-                "Kafka not configured (KAFKA_BOOTSTRAP_SERVERS empty)",
+                "Kafka not configured (KAFKA_BOOTSTRAP_SERVERS / KAFKA_REST_PROXY_URL ריקים)",
             )
 
+        # key ברירת מחדל: qa_ai_hero_<TC> — מאפשר זיהוי המסר בלוגים/אלסטיק
+        key = action.key or f"qa_ai_hero_{_tc_key(tc_id)}"
+
+        # ★ מסלול REST Proxy (מועדף כשמוגדר)
+        if settings.kafka_rest_enabled:
+            return await self._publish_via_rest(action, key)
+
+        # מסלול native
         try:
             from confluent_kafka import Producer  # type: ignore[import-not-found]
         except ImportError:
@@ -127,7 +136,7 @@ class DotNetRunner:
         conf = self._kafka_conf()
         producer = Producer(conf)
         value_bytes = self._encode_value(action.value)
-        key_bytes = action.key.encode("utf-8") if action.key else None
+        key_bytes = key.encode("utf-8") if key else None
         headers = (
             [(k, v.encode("utf-8")) for k, v in action.headers.items()]
             if action.headers
@@ -176,6 +185,35 @@ class DotNetRunner:
         )
         return step, delivery_result
 
+    async def _publish_via_rest(self, action: KafkaPublishAction, key: str):
+        """publish דרך Confluent REST Proxy. אותו shape של StepResult כמו ה-native path."""
+        from agents.runner.kafka_rest_client import KafkaRestClient
+
+        client = KafkaRestClient()
+        result = await client.produce(action.topic, key, action.value, action.headers)
+
+        if "error" in result:
+            classified = _classify_kafka_error(result["error"], action.topic, "publish")
+            result["classified"] = classified
+            step = StepResult(
+                step=f"PUBLISH topic={action.topic} (REST)",
+                expected_result="delivered",
+                actual_result=f"❌ {classified['friendly']}",
+                # auth/ACL → BLOCKED (תשתית); שאר → FAILED
+                status=TestStatus.BLOCKED if classified["is_fatal_infra"] else TestStatus.FAILED,
+                error_message=f"{classified['friendly']}\n→ {classified['recommendation']}",
+            )
+            return step, result
+
+        step = StepResult(
+            step=f"PUBLISH topic={action.topic} (REST) key={key}",
+            expected_result="delivered",
+            actual_result=f"offset={result.get('offset')} partition={result.get('partition')}",
+            status=TestStatus.PASSED,
+            response_dump=result,
+        )
+        return step, result
+
     # ============================================================
     # Kafka wait
     # ============================================================
@@ -184,29 +222,45 @@ class DotNetRunner:
         if not settings.kafka_enabled:
             return self._blocked_step(
                 f"WAIT topic={action.topic}",
-                "Kafka not configured (KAFKA_BOOTSTRAP_SERVERS empty)",
+                "Kafka not configured (KAFKA_BOOTSTRAP_SERVERS / KAFKA_REST_PROXY_URL ריקים)",
             )
 
-        try:
-            from confluent_kafka import Consumer  # type: ignore[import-not-found]
-        except ImportError:
-            return self._blocked_step(
-                f"WAIT topic={action.topic}",
-                "confluent-kafka package not installed",
+        # ★ מסלול REST Proxy (מועדף כשמוגדר)
+        if settings.kafka_rest_enabled:
+            from agents.runner.kafka_rest_client import KafkaRestClient
+            observed = await KafkaRestClient().consume(
+                action.topic, action.match, action.timeout_seconds,
+                settings.KAFKA_CONSUMER_GROUP_PREFIX,
             )
+            # consumer API כבוי ב-deployment → BLOCKED עם הסבר
+            if isinstance(observed, dict) and observed.get("rest_consumer_unavailable"):
+                return self._blocked_step(
+                    f"WAIT topic={action.topic} (REST)",
+                    "ה-consumer API של ה-REST Proxy לא זמין ({}). בקש מ-admin להפעיל אותו "
+                    "(kafka-rest consumer endpoints), או הגדר KAFKA_BOOTSTRAP_SERVERS "
+                    "למסלול native.".format(observed.get("detail", "404/501")),
+                )
+        else:
+            try:
+                from confluent_kafka import Consumer  # type: ignore[import-not-found]
+            except ImportError:
+                return self._blocked_step(
+                    f"WAIT topic={action.topic}",
+                    "confluent-kafka package not installed",
+                )
 
-        group_id = f"{settings.KAFKA_CONSUMER_GROUP_PREFIX}-{uuid.uuid4().hex[:8]}"
-        conf = self._kafka_conf()
-        conf.update({
-            "group.id": group_id,
-            "auto.offset.reset": "latest",
-            "enable.auto.commit": False,
-        })
+            group_id = f"{settings.KAFKA_CONSUMER_GROUP_PREFIX}-{uuid.uuid4().hex[:8]}"
+            conf = self._kafka_conf()
+            conf.update({
+                "group.id": group_id,
+                "auto.offset.reset": "latest",
+                "enable.auto.commit": False,
+            })
 
-        observed = await asyncio.to_thread(
-            self._consume_until_match,
-            Consumer, conf, action.topic, action.match, action.timeout_seconds,
-        )
+            observed = await asyncio.to_thread(
+                self._consume_until_match,
+                Consumer, conf, action.topic, action.match, action.timeout_seconds,
+            )
 
         # ★ שגיאת תשתית/ACL → דווח מיד עם הסבר ידידותי
         if isinstance(observed, dict) and "fatal_error" in observed:
@@ -469,6 +523,18 @@ class DotNetRunner:
 # Pure helpers (testable without confluent-kafka)
 # ============================================================
 
+def _tc_key(tc_id: str) -> str:
+    """מנקה test_case_id ל-key תקני של Kafka (TC-01 מתוך 'TC-01: ...')."""
+    if not tc_id:
+        return "unknown"
+    m = re.search(r"(TC[\s\-_]*\d+)", tc_id, re.IGNORECASE)
+    if m:
+        return re.sub(r"[\s_]", "-", m.group(1))
+    # fallback — אלפאנומרי בלבד, מוגבל ל-32 תווים
+    cleaned = re.sub(r"[^A-Za-z0-9\-]", "_", tc_id)
+    return cleaned[:32] or "unknown"
+
+
 def _matches(value: Optional[Dict[str, Any]], match: Dict[str, Any]) -> bool:
     """True אם value מכיל את כל ה-key:value-pairs ב-match."""
     if not match:
@@ -525,7 +591,14 @@ def _classify_kafka_error(err_str: str, topic: str = "", action: str = "publish"
     s = err_str or ""
     out: Dict[str, Any] = {"raw": s, "is_fatal_infra": False}
 
-    if "TOPIC_AUTHORIZATION_FAILED" in s:
+    # ★ REST Proxy authorization — HTTP 401/403, "Not authorized", error_code 40301
+    is_rest_authz = (
+        "HTTP 403" in s or "HTTP 401" in s
+        or "Not authorized" in s or "not authorized" in s
+        or "40301" in s or "40101" in s
+    )
+
+    if "TOPIC_AUTHORIZATION_FAILED" in s or is_rest_authz:
         op = "Write" if action == "publish" else "Read"
         out["friendly"] = (
             f"אין הרשאת ACL {op} ל-topic '{topic}'. ה-user שלך מזדהה בהצלחה אבל "

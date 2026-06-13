@@ -1,0 +1,110 @@
+"""טסטים ל-KafkaRestClient — פרסור תשובות + matching (ללא רשת)."""
+
+from __future__ import annotations
+
+import pytest
+
+from agents.runner.kafka_rest_client import (
+    _consumer_unavailable,
+    _parse_produce_response,
+    _record_matches,
+    _scan_records,
+)
+from agents.runner.dotnet_runner import _tc_key
+
+
+# ============================================================
+# _parse_produce_response
+# ============================================================
+
+def test_produce_success():
+    body = {"offsets": [{"partition": 3, "offset": 42}]}
+    out = _parse_produce_response(200, body)
+    assert out == {"partition": 3, "offset": 42}
+
+
+def test_produce_per_record_error():
+    body = {"offsets": [{"partition": None, "offset": None,
+                         "error_code": 40301, "error": "Not authorized"}]}
+    out = _parse_produce_response(200, body)
+    assert "error" in out
+    assert "40301" in out["error"]
+    assert "Not authorized" in out["error"]
+
+
+def test_produce_http_403():
+    out = _parse_produce_response(403, {"message": "forbidden"})
+    assert "error" in out
+    assert "HTTP 403" in out["error"]
+
+
+def test_produce_no_offsets():
+    out = _parse_produce_response(200, {"weird": "shape"})
+    assert "error" in out
+    assert "no offsets" in out["error"]
+
+
+# ============================================================
+# _record_matches / _scan_records
+# ============================================================
+
+def test_record_matches_dict():
+    assert _record_matches({"a": 1, "b": 2}, {"a": 1})
+    assert not _record_matches({"a": 1}, {"a": 2})
+    assert not _record_matches(None, {"a": 1})
+    assert _record_matches({"a": 1}, {})  # empty match always true
+
+
+def test_record_matches_json_string():
+    # REST proxy לפעמים מחזיר value כ-string
+    assert _record_matches('{"status": "ok"}', {"status": "ok"})
+    assert not _record_matches("not json", {"status": "ok"})
+
+
+def test_scan_records_finds_match():
+    records = [
+        {"value": {"id": 1}, "offset": 10, "partition": 0, "topic": "t"},
+        {"value": {"id": 2, "status": "enriched"}, "offset": 11, "partition": 0, "topic": "t"},
+    ]
+    out = _scan_records(records, "t", {"status": "enriched"})
+    assert out is not None
+    assert out["offset"] == 11
+    assert out["value_parsed"]["id"] == 2
+
+
+def test_scan_records_no_match_returns_none():
+    records = [{"value": {"id": 1}, "offset": 10, "topic": "t"}]
+    assert _scan_records(records, "t", {"id": 999}) is None
+
+
+def test_scan_records_empty():
+    assert _scan_records([], "t", {"x": 1}) is None
+    assert _scan_records("not a list", "t", {}) is None
+
+
+# ============================================================
+# _consumer_unavailable
+# ============================================================
+
+def test_consumer_unavailable():
+    assert _consumer_unavailable(404) is True
+    assert _consumer_unavailable(501) is True
+    assert _consumer_unavailable(200) is False
+    assert _consumer_unavailable(403) is False
+
+
+# ============================================================
+# _tc_key (key default for publish)
+# ============================================================
+
+def test_tc_key_extracts_tc_number():
+    assert _tc_key("TC-01: הקמת אורח") == "TC-01"
+    assert _tc_key("TC03 – סינון") == "TC03"
+    assert _tc_key("tc_5 something") == "tc-5"
+
+
+def test_tc_key_fallback():
+    assert _tc_key("") == "unknown"
+    out = _tc_key("random title with spaces")
+    assert " " not in out
+    assert len(out) <= 32

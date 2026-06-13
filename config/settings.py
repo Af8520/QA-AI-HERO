@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     KAFKA_SASL_PASSWORD: Optional[str] = None
     KAFKA_CONSUMER_GROUP_PREFIX: str = "qa-ai-hero"
     KAFKA_DEFAULT_TIMEOUT_SECONDS: int = 30
+    # ★ Confluent REST Proxy — מסלול מועדף. אם מאוכלס, ה-.NET runner מפרסם/צורך דרך HTTP
+    # (httpx, מכבד VERIFY_SSL) במקום הקליינט הנייטיב. עוקף בעיות ACL/cert של librdkafka,
+    # כי ה-proxy מפרסם ב-principal פריבילגי משלו ומשתמש ב-Basic-Auth רק בשכבת ה-HTTP.
+    KAFKA_REST_PROXY_URL: Optional[str] = None            # "https://cnf-cnct01-test:8082"
+    KAFKA_REST_USERNAME: Optional[str] = None             # ריק → fallback ל-KAFKA_SASL_USERNAME
+    KAFKA_REST_PASSWORD: Optional[str] = None             # ריק → fallback ל-KAFKA_SASL_PASSWORD
 
     # .NET department — Couchbase (direct via couchbase SDK)
     COUCHBASE_CONNECTION_STRING: Optional[str] = None     # "couchbase://node1" / "couchbases://..."
@@ -114,7 +120,19 @@ class Settings(BaseSettings):
 
     @property
     def kafka_enabled(self) -> bool:
-        return bool(self.KAFKA_BOOTSTRAP_SERVERS)
+        # ה-runner מוכן לרוץ אם יש או native bootstrap או REST proxy.
+        return bool(self.KAFKA_BOOTSTRAP_SERVERS or self.KAFKA_REST_PROXY_URL)
+
+    @property
+    def kafka_rest_enabled(self) -> bool:
+        return bool(self.KAFKA_REST_PROXY_URL)
+
+    @property
+    def kafka_rest_auth(self) -> tuple:
+        """(username, password) ל-Basic Auth מול ה-REST Proxy. fallback ל-SASL creds."""
+        user = self.KAFKA_REST_USERNAME or self.KAFKA_SASL_USERNAME or ""
+        pwd = self.KAFKA_REST_PASSWORD or self.KAFKA_SASL_PASSWORD or ""
+        return (user, pwd)
 
     @property
     def couchbase_enabled(self) -> bool:
