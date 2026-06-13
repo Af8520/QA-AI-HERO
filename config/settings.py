@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     # ל-group ספציפי (ACL literal). אם ריק → נשתמש ב-PREFIX + suffix אקראי.
     KAFKA_CONSUMER_GROUP: Optional[str] = None
     KAFKA_DEFAULT_TIMEOUT_SECONDS: int = 30
+    # ★ רצפת timeout ל-kafka_wait — ה-Worker אסינכרוני (כותב ל-target תוך עד דקה-שתיים).
+    # ה-wait ימתין לפחות כך הרבה (early-return ברגע שנמצא match).
+    KAFKA_WAIT_MIN_SECONDS: int = 150
     # ★ Confluent REST Proxy — מסלול מועדף. אם מאוכלס, ה-.NET runner מפרסם/צורך דרך HTTP
     # (httpx, מכבד VERIFY_SSL) במקום הקליינט הנייטיב. עוקף בעיות ACL/cert של librdkafka,
     # כי ה-proxy מפרסם ב-principal פריבילגי משלו ומשתמש ב-Basic-Auth רק בשכבת ה-HTTP.

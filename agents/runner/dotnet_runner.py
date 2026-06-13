@@ -257,8 +257,10 @@ class DotNetRunner:
             corr.append(f"key⊇{action.key_contains}")
         if action.match:
             corr.append(f"fields={json.dumps(action.match, ensure_ascii=False)}")
+        # ★ רצפת timeout — ה-Worker אסינכרוני (עד דקה-שתיים). early-return כשנמצא match.
+        effective_timeout = max(action.timeout_seconds, settings.KAFKA_WAIT_MIN_SECONDS)
         self._log("CONSUME", "info",
-                  f"צורך מ-target '{action.topic}' group={group} (timeout {action.timeout_seconds}s) "
+                  f"צורך מ-target '{action.topic}' group={group} (timeout {effective_timeout}s) "
                   f"correlation: {', '.join(corr) or '(אין!)'}")
 
         candidates: List[Dict[str, Any]] = []
@@ -266,7 +268,7 @@ class DotNetRunner:
         if settings.kafka_rest_enabled:
             from agents.runner.kafka_rest_client import KafkaRestClient
             rich = await KafkaRestClient().consume(
-                action.topic, action.match, action.timeout_seconds, group,
+                action.topic, action.match, effective_timeout, group,
                 key_equals=action.key_equals, key_contains=action.key_contains,
             )
             if rich.get("rest_consumer_unavailable"):
@@ -298,7 +300,7 @@ class DotNetRunner:
             })
             observed = await asyncio.to_thread(
                 self._consume_until_match,
-                Consumer, conf, action.topic, action.match, action.timeout_seconds,
+                Consumer, conf, action.topic, action.match, effective_timeout,
                 action.key_equals, action.key_contains,
             )
 
@@ -316,12 +318,23 @@ class DotNetRunner:
             )
             return step, observed
 
-        # ★ logging של ה-candidates — זה מה שמאפשר לבחור correlation field
+        # ★ logging של ה-candidates + breakdown לפי mac_sys_name — רואים מי כתב ל-target
         self._log("CONSUME", "info", f"נצפו {len(candidates)} מסרים ב-target topic")
-        for c in candidates[:20]:
+        breakdown: Dict[str, int] = {}
+        for c in candidates:
+            sysname = _extract_sys_name(c.get("value_parsed"))
+            breakdown[sysname] = breakdown.get(sysname, 0) + 1
+        if breakdown:
+            self._log("CONSUME", "info",
+                      "breakdown לפי mac_sys_name: " + json.dumps(breakdown, ensure_ascii=False))
+        for c in candidates[:15]:
             sysname = _extract_sys_name(c.get("value_parsed"))
             self._log("candidate", "info",
                       f"offset={c.get('offset')} key={c.get('key')} mac_sys_name={sysname}")
+        if len(candidates) == 0:
+            self._log("CONSUME", "warn",
+                      f"לא הגיע אף מסר ל-target תוך {effective_timeout}s — ייתכן שה-Worker איטי/לא הפיק "
+                      f"פלט למסר שלנו (בדוק latency/תקינות ה-payload).")
 
         # תרחיש שלילי: timeout = PASS, מסר שהגיע = FAIL
         if action.expect_no_message:

@@ -50,9 +50,10 @@ async def run_dotnet_pipeline(session: ChatSession) -> PipelineResult:
         pass
     _log_file = _runs_dir / f"{run_id}.jsonl"
 
-    async def run_log(message: str, status: str = "info", tc_id: str = "", action: str = "") -> None:
+    async def run_log(message: str, status: str = "info", tc_id: str = "", action: str = "",
+                      ts: str = "") -> None:
         entry = {
-            "ts": datetime.datetime.now().strftime("%H:%M:%S"),
+            "ts": ts or datetime.datetime.now().strftime("%H:%M:%S"),
             "run_id": run_id,
             "tc_id": tc_id,
             "action": action,
@@ -207,9 +208,11 @@ async def run_dotnet_pipeline(session: ChatSession) -> PipelineResult:
             r = await runner.execute(ex)
             results.append(r)
             # ★ שידור ה-log שצבר ה-runner פר action (PUBLISH/CONSUME/candidates/MATCH/ASSERT)
+            # שומרים את ה-ts המקורי של ה-runner (זמן הפעולה האמיתי, לא זמן ה-replay)
             for le in (r.api_response or {}).get("log", []) or []:
                 await run_log(le.get("message", ""), status=le.get("status", "info"),
-                              tc_id=ex.test_case_id, action=le.get("action", ""))
+                              tc_id=ex.test_case_id, action=le.get("action", ""),
+                              ts=le.get("ts", ""))
             await run_log(f"TC {ex.test_case_id} → {r.status.value}",
                           status=("success" if r.status == TestStatus.PASSED
                                   else "error" if r.status == TestStatus.FAILED else "warn"),
