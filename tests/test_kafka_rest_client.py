@@ -4,13 +4,21 @@ from __future__ import annotations
 
 import pytest
 
+import base64
+import json
+
 from agents.runner.kafka_rest_client import (
     _consumer_unavailable,
+    _decode_binary_record,
     _parse_produce_response,
     _record_matches,
     _scan_records,
 )
-from agents.runner.dotnet_runner import _normalize_topic, _tc_key
+from agents.runner.dotnet_runner import _extract_sys_name, _normalize_topic, _tc_key
+
+
+def _b64(s):
+    return base64.b64encode(s.encode("utf-8")).decode("ascii")
 
 
 # ============================================================
@@ -124,3 +132,67 @@ def test_normalize_topic_strips():
     assert _normalize_topic("  Topic-X  ") == "topic-x"
     assert _normalize_topic("") == ""
     assert _normalize_topic(None) == ""
+
+
+# ============================================================
+# Binary decode — the 408 fix: keys like 'verifyhub::0::4242' aren't JSON
+# ============================================================
+
+def test_decode_binary_record_json_value():
+    rec = {
+        "key": _b64("verifyhub::0::4242"),
+        "value": _b64('{"header":{"mac_sys_name":"encryption_child_development_worker"}}'),
+        "offset": 617009, "partition": 1, "topic": "patient_parameters-raw",
+    }
+    out = _decode_binary_record(rec, "patient_parameters-raw")
+    assert out["key"] == "verifyhub::0::4242"          # non-JSON key decoded fine
+    assert out["value_parsed"]["header"]["mac_sys_name"] == "encryption_child_development_worker"
+    assert out["offset"] == 617009
+
+
+def test_decode_binary_record_non_json_value():
+    rec = {"key": _b64("k"), "value": _b64("not json at all"), "offset": 1}
+    out = _decode_binary_record(rec, "t")
+    assert out["value_parsed"] == "not json at all"     # stays a string, no crash
+
+
+# ============================================================
+# Candidate collection — scan fills candidates even past the match
+# ============================================================
+
+def test_scan_collects_all_candidates():
+    records = [
+        {"key": _b64("verifyhub::0::1"), "value": _b64('{"id":1}'), "offset": 10},
+        {"key": _b64("qa_ai_hero_TC-01"), "value": _b64('{"id":2,"status":"enriched"}'), "offset": 11},
+        {"key": _b64("verifyhub::0::3"), "value": _b64('{"id":3}'), "offset": 12},
+    ]
+    candidates = []
+    matched = _scan_records(records, "t", {"status": "enriched"}, candidates)
+    assert matched is not None and matched["offset"] == 11
+    assert len(candidates) == 3   # all three collected for logging, not just the match
+
+
+# ============================================================
+# Dotted-path matching — match on nested header.mac_correlation_id
+# ============================================================
+
+def test_record_matches_dotted_path():
+    value = {"header": {"mac_correlation_id": "abc-123"}, "root": {"id": 5}}
+    assert _record_matches(value, {"header.mac_correlation_id": "abc-123"})
+    assert not _record_matches(value, {"header.mac_correlation_id": "other"})
+    assert not _record_matches(value, {"header.missing_field": "x"})
+    # flat keys still work alongside dotted
+    assert _record_matches(value, {"header.mac_correlation_id": "abc-123"})
+
+
+# ============================================================
+# _extract_sys_name — surfaces which worker wrote a candidate
+# ============================================================
+
+def test_extract_sys_name():
+    assert _extract_sys_name({"header": {"mac_sys_name": "encryption_child_development_worker"}}) \
+        == "encryption_child_development_worker"
+    assert _extract_sys_name({"headers": {"mac_sys_name": "verifyhub"}}) == "verifyhub"
+    assert _extract_sys_name({"mac_sys_name": "top-level"}) == "top-level"
+    assert _extract_sys_name({"no": "sysname"}) == "?"
+    assert _extract_sys_name("not a dict") == "?"

@@ -12,6 +12,7 @@ Consume: Confluent REST Proxy v2 consumer API —
 
 from __future__ import annotations
 
+import base64
 import json
 import time
 import uuid
@@ -26,7 +27,11 @@ log = get_logger(__name__)
 
 _PRODUCE_CONTENT_TYPE = "application/vnd.kafka.json.v2+json"
 _V2_ACCEPT = "application/vnd.kafka.v2+json"
-_JSON_ACCEPT = "application/vnd.kafka.json.v2+json"
+# ★ consume ב-binary: ה-proxy לא מנסה לפרסר key/value כ-JSON (ה-keys ב-target הם strings
+# רגילים כמו 'verifyhub::0::4242' שמפילים את json format). אנחנו מפענחים base64 בעצמנו.
+_BINARY_ACCEPT = "application/vnd.kafka.binary.v2+json"
+
+_CANDIDATE_CAP = 50  # כמה רשומות לאסוף ל-logging (לא רק את ההתאמה הראשונה)
 
 
 class KafkaRestClient:
@@ -93,9 +98,9 @@ class KafkaRestClient:
 
         group — שם ה-consumer group המדויק (כבר resolved ע"י ה-caller; ACL בנוי עליו).
 
-        מחזיר:
-        - dict {value_parsed, offset, partition, topic, key} אם נמצא מסר תואם
-        - None אם timeout (אין מסר תואם)
+        מחזיר dict עשיר:
+        - {"matched": <record|None>, "candidates": [...]} — matched הוא הרשומה התואמת (או None),
+          candidates הן כל הרשומות שנראו בחלון (capped) ל-logging.
         - {"fatal_error": "..."} אם 401/403 (auth/ACL) — מפעיל early-stop בפייפליין
         - {"rest_consumer_unavailable": True} אם consumer API כבוי (404/501)
         """
@@ -103,11 +108,11 @@ class KafkaRestClient:
         headers_json = {"Content-Type": _V2_ACCEPT}
 
         async with httpx.AsyncClient(verify=self.verify_ssl, timeout=30.0) as client:
-            # 1. create consumer instance
+            # 1. create consumer instance — format=binary (לא json! ה-keys ב-target אינם JSON)
             create_url = f"{self.base}/consumers/{group}"
             create_body = {
                 "name": instance_name,
-                "format": "json",
+                "format": "binary",
                 "auto.offset.reset": "latest",
                 "auto.commit.enable": "false",
             }
@@ -115,31 +120,26 @@ class KafkaRestClient:
                 r = await client.post(create_url, headers=headers_json, json=create_body, auth=self.auth)
             except httpx.HTTPError as e:
                 return {"fatal_error": f"REST consumer create transport error: {e}"}
-            unavailable = _consumer_unavailable(r.status_code)
-            if unavailable:
+            if _consumer_unavailable(r.status_code):
                 return {"rest_consumer_unavailable": True, "detail": f"HTTP {r.status_code} on create"}
-            if r.status_code in (401, 403):
-                return {"fatal_error": f"HTTP {r.status_code} on consumer create: {r.text[:200]}"}
             if r.status_code >= 400:
                 return {"fatal_error": f"HTTP {r.status_code} on consumer create: {r.text[:200]}"}
 
             # בונים את ה-instance base בעצמנו — לא סומכים על base_uri המוחזר (host פנימי שגוי מאחורי proxy)
             instance_base = f"{self.base}/consumers/{group}/instances/{instance_name}"
 
+            candidates: List[Dict[str, Any]] = []
             try:
                 # 2. subscribe
                 sub_url = f"{instance_base}/subscription"
                 rs = await client.post(sub_url, headers=headers_json, json={"topics": [topic]}, auth=self.auth)
-                if rs.status_code in (401, 403):
-                    return {"fatal_error": f"HTTP {rs.status_code} on subscribe: {rs.text[:200]}"}
                 if rs.status_code >= 400:
                     return {"fatal_error": f"HTTP {rs.status_code} on subscribe: {rs.text[:200]}"}
 
-                # 3. poll loop
+                # 3. poll loop — אוסף candidates + מחפש התאמה
                 records_url = f"{instance_base}/records"
-                poll_headers = {"Accept": _JSON_ACCEPT}
+                poll_headers = {"Accept": _BINARY_ACCEPT}
                 deadline = time.monotonic() + timeout_seconds
-                # קריאה ראשונה "מתחממת" — REST proxy לפעמים מחזיר ריק עד שה-assignment מתבצע
                 while time.monotonic() < deadline:
                     try:
                         rr = await client.get(records_url, headers=poll_headers,
@@ -147,20 +147,19 @@ class KafkaRestClient:
                     except httpx.HTTPError as e:
                         log.warning("kafka_rest_poll_transport_error", error=str(e))
                         continue
-                    if rr.status_code in (401, 403):
-                        return {"fatal_error": f"HTTP {rr.status_code} on records: {rr.text[:200]}"}
                     if rr.status_code >= 400:
-                        # 404 כאן יכול להיות consumer שפג — נחזיר fatal עם פירוט
                         return {"fatal_error": f"HTTP {rr.status_code} on records: {rr.text[:200]}"}
                     try:
                         records = rr.json()
                     except Exception:
                         records = []
-                    observed = _scan_records(records, topic, match)
-                    if observed is not None:
-                        log.info("kafka_rest_consumed", topic=topic, offset=observed.get("offset"))
-                        return observed
-                return None  # timeout — אין מסר תואם
+                    matched = _scan_records(records, topic, match, candidates)
+                    if matched is not None:
+                        log.info("kafka_rest_consumed", topic=topic, offset=matched.get("offset"),
+                                 candidates_seen=len(candidates))
+                        return {"matched": matched, "candidates": candidates}
+                # timeout — אין התאמה, אבל מחזירים את ה-candidates ל-logging
+                return {"matched": None, "candidates": candidates}
             finally:
                 # 4. cleanup — DELETE instance
                 try:
@@ -189,27 +188,76 @@ def _parse_produce_response(status: int, data: Any) -> Dict[str, Any]:
     return {"partition": first.get("partition"), "offset": first.get("offset")}
 
 
-def _scan_records(records: Any, topic: str, match: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """עובר על רשומות מ-GET /records ומחזיר את הראשונה שתואמת ל-match (או None)."""
+def _b64_to_str(v: Optional[str]) -> Optional[str]:
+    """base64 → UTF-8 string. אם לא base64 תקין — מחזיר כפי שהוא."""
+    if v is None:
+        return None
+    try:
+        return base64.b64decode(v).decode("utf-8", errors="replace")
+    except Exception:
+        return v
+
+
+def _decode_binary_record(rec: Dict[str, Any], topic: str) -> Dict[str, Any]:
+    """מפענח רשומת binary מ-REST proxy: value(base64)→dict/str, key(base64)→str."""
+    key_str = _b64_to_str(rec.get("key"))
+    value_str = _b64_to_str(rec.get("value"))
+    value_parsed: Any = value_str
+    if isinstance(value_str, str):
+        try:
+            value_parsed = json.loads(value_str)
+        except Exception:
+            value_parsed = value_str  # לא JSON — נשאר string
+    return {
+        "value_parsed": value_parsed,
+        "offset": rec.get("offset"),
+        "partition": rec.get("partition"),
+        "topic": rec.get("topic") or topic,
+        "key": key_str,
+    }
+
+
+def _scan_records(
+    records: Any,
+    topic: str,
+    match: Dict[str, Any],
+    candidates: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[Dict[str, Any]]:
+    """מפענח רשומות, מוסיף ל-candidates (capped), ומחזיר את הראשונה שתואמת ל-match (או None)."""
+    if candidates is None:
+        candidates = []
     if not isinstance(records, list):
         return None
+    matched = None
     for rec in records:
         if not isinstance(rec, dict):
             continue
-        value = rec.get("value")
-        if _record_matches(value, match):
-            return {
-                "value_parsed": value,
-                "offset": rec.get("offset"),
-                "partition": rec.get("partition"),
-                "topic": rec.get("topic") or topic,
-                "key": rec.get("key"),
-            }
-    return None
+        decoded = _decode_binary_record(rec, topic)
+        if len(candidates) < _CANDIDATE_CAP:
+            candidates.append(decoded)
+        if matched is None and _record_matches(decoded["value_parsed"], match):
+            matched = decoded
+    return matched
+
+
+def _get_path(d: Any, path: str) -> Any:
+    """מחלץ ערך לפי dotted path: 'header.mac_correlation_id'. מחזיר sentinel אם לא קיים."""
+    cur = d
+    for part in path.split("."):
+        if isinstance(cur, dict) and part in cur:
+            cur = cur[part]
+        else:
+            return _MISSING
+    return cur
+
+
+_MISSING = object()
 
 
 def _record_matches(value: Optional[Any], match: Dict[str, Any]) -> bool:
-    """True אם value (dict או JSON string) מכיל את כל ה-key:value-pairs ב-match."""
+    """True אם value (dict או JSON string) מכיל את כל ה-pairs ב-match.
+    מפתח עם נקודה ('header.mac_correlation_id') נחשב dotted path מקונן.
+    """
     if not match:
         return True
     if isinstance(value, str):
@@ -220,7 +268,8 @@ def _record_matches(value: Optional[Any], match: Dict[str, Any]) -> bool:
     if not isinstance(value, dict):
         return False
     for k, expected in match.items():
-        if k not in value or value[k] != expected:
+        actual = _get_path(value, k) if "." in k else value.get(k, _MISSING)
+        if actual is _MISSING or actual != expected:
             return False
     return True
 

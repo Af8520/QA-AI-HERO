@@ -40,6 +40,8 @@ class ChatSession:
     #    "field_catalog": {...}}
     payload_templates: Optional[Dict[str, Any]] = None
     payload_templates_file: Optional[str] = None  # נתיב לקובץ ב-logs/payload_builder/
+    # מזהה ריצה — נוצר בתחילת Phase B; לוגים נשמרים ב-logs/runs/<run_id>.jsonl
+    run_id: Optional[str] = None
     pending_bugs: List[BugReport] = field(default_factory=list)
     pipeline_task: Optional[asyncio.Task] = None
     event_queue: "asyncio.Queue[Dict[str, Any]]" = field(default_factory=asyncio.Queue)

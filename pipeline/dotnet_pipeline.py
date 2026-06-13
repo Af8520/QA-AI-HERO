@@ -36,11 +36,43 @@ TOTAL_STAGES = 7
 
 
 async def run_dotnet_pipeline(session: ChatSession) -> PipelineResult:
+    import datetime
+    import uuid as _uuid
+    from pathlib import Path
+
+    # ★ run_id + run log — לוג מובנה פר-ריצה, נשלח ב-SSE + נשמר לדיסק
+    run_id = _uuid.uuid4().hex[:12]
+    session.run_id = run_id
+    _runs_dir = Path("logs") / "runs"
+    try:
+        _runs_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    _log_file = _runs_dir / f"{run_id}.jsonl"
+
+    async def run_log(message: str, status: str = "info", tc_id: str = "", action: str = "") -> None:
+        entry = {
+            "ts": datetime.datetime.now().strftime("%H:%M:%S"),
+            "run_id": run_id,
+            "tc_id": tc_id,
+            "action": action,
+            "status": status,   # info | success | warn | error
+            "message": message,
+        }
+        await session.emit("log_line", entry)
+        try:
+            with _log_file.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
     async def emit(text: str) -> None:
         await session.emit("progress", {"text": text})
 
     async def tl_step(step: int, status: str, label: str = "") -> None:
         await session.emit("tl_step", {"step": step, "status": status, "label": label})
+        await run_log(f"שלב {step}: {label} [{status}]", status="info" if status != "failed" else "error",
+                      action="step")
 
     async def tl_tc(idx: int, total: int, name: str, status: str, http_status: int = 0) -> None:
         await session.emit("tl_tc", {
@@ -59,6 +91,7 @@ async def run_dotnet_pipeline(session: ChatSession) -> PipelineResult:
         })
 
     await session.emit("tl_phase", {"phase": "B", "status": "active"})
+    await run_log(f"▶ תחילת ריצה (.NET) — run_id={run_id}", status="info", action="run_start")
 
     suite_id = session.suite_id or 0
     ado = ADOClient()
@@ -170,8 +203,17 @@ async def run_dotnet_pipeline(session: ChatSession) -> PipelineResult:
             http_shaped_for_validator.append(_to_http_shape(ex))
             continue
         try:
+            await run_log(f"מתחיל TC: {ex.test_case_id}", status="info", tc_id=ex.test_case_id, action="tc_start")
             r = await runner.execute(ex)
             results.append(r)
+            # ★ שידור ה-log שצבר ה-runner פר action (PUBLISH/CONSUME/candidates/MATCH/ASSERT)
+            for le in (r.api_response or {}).get("log", []) or []:
+                await run_log(le.get("message", ""), status=le.get("status", "info"),
+                              tc_id=ex.test_case_id, action=le.get("action", ""))
+            await run_log(f"TC {ex.test_case_id} → {r.status.value}",
+                          status=("success" if r.status == TestStatus.PASSED
+                                  else "error" if r.status == TestStatus.FAILED else "warn"),
+                          tc_id=ex.test_case_id, action="tc_done")
             # ★ זיהוי שגיאת תשתית — שאר ה-TCs לא יורצו
             infra = _detect_infra_failure(r)
             if infra and not infra_failure:

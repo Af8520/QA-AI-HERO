@@ -387,6 +387,33 @@
   }
   .tl-action-btn:hover { background: var(--bg-elev); }
 
+  /* Run Logs modal */
+  #runLogsModal .tc-detail-box { max-width: 1100px; width: 92%; }
+  .runlog-toolbar { display: flex; gap: 10px; align-items: center; margin: 8px 0 12px; flex-wrap: wrap; }
+  .runlog-toolbar input {
+    flex: 1; min-width: 160px; background: var(--bg); border: 1px solid var(--border);
+    color: var(--text); padding: 6px 10px; border-radius: 6px; font-size: 13px;
+  }
+  .runlog-toolbar button {
+    background: var(--bg); color: var(--accent); border: 1px solid var(--accent);
+    border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px;
+  }
+  .runlog-toolbar button:hover { background: var(--bg-elev); }
+  .runlog-body {
+    max-height: 62vh; overflow-y: auto; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px;
+    font-family: 'Courier New', monospace; font-size: 12px;
+    direction: ltr; text-align: left;
+  }
+  .runlog-line { padding: 1px 0; white-space: pre-wrap; word-break: break-word; }
+  .runlog-line .ts { color: var(--text-dim); margin-right: 6px; }
+  .runlog-line .tc { color: var(--accent); margin-right: 6px; }
+  .runlog-line.info    { color: var(--text); }
+  .runlog-line.success { color: var(--success); }
+  .runlog-line.warn    { color: var(--warn); }
+  .runlog-line.error   { color: var(--danger); font-weight: 600; }
+  .runlog-line.candidate { color: var(--text-dim); }
+
   /* Phase A JSON modal */
   #phaseAJsonModal .tc-detail-box { max-width: 1000px; }
   #phaseAJsonModal pre { max-height: 60vh; }
@@ -434,6 +461,7 @@
       <div class="tl-substeps">
         <button id="showPhaseAJsonBtn" class="tl-action-btn hidden" type="button" title="מציג את ה-JSON שהסוכן החזיר ב-Phase A (לדיבוג)">📄 JSON של Phase A</button>
         <button id="showPayloadTemplatesBtn" class="tl-action-btn hidden" type="button" title="מציג את ה-templates ו-field_catalog שסוכן Payload Builder החזיר (.NET only)">📦 Templates של Payload Builder</button>
+        <button id="showRunLogsBtn" class="tl-action-btn hidden" type="button" title="לוג מלא של הריצה — כל פעולה עם חותמת זמן, פר test case">📜 לוגים של הריצה</button>
       </div>
     </div>
     <div class="tl-phase">
@@ -570,6 +598,20 @@
     <pre id="payloadFieldCatalogContent"></pre>
     <h4>Raw bot response (לפני חילוץ JSON — כדי לדעת אם נחתך אצלנו)</h4>
     <pre id="payloadRawResponseContent" style="direction: ltr; text-align: left;"></pre>
+  </div>
+</div>
+
+<!-- Run Logs modal — לוג מלא של הריצה (טאב לוגים) -->
+<div class="tc-detail-modal" id="runLogsModal" onclick="if(event.target===this)closeRunLogsModal()">
+  <div class="tc-detail-box">
+    <button class="close-btn" onclick="closeRunLogsModal()">סגור ✕</button>
+    <h3>📜 לוגים של הריצה</h3>
+    <div class="runlog-toolbar">
+      <span class="file-path" id="runLogsRunId"></span>
+      <input id="runLogsFilter" type="text" placeholder="סינון לפי TC / מילה..." />
+      <button id="runLogsDownloadBtn" type="button">⬇ הורד JSONL</button>
+    </div>
+    <div class="runlog-body" id="runLogsBody"></div>
   </div>
 </div>
 
@@ -1657,6 +1699,83 @@ function closePayloadTemplatesModal() {
 window.openPayloadTemplatesModal = openPayloadTemplatesModal;
 window.closePayloadTemplatesModal = closePayloadTemplatesModal;
 
+// ============================================================
+// Run Logs — טאב לוגים (stream של log_line מ-SSE)
+// ============================================================
+const runLogLines = [];   // {ts, run_id, tc_id, action, status, message}
+let runLogRunId = null;
+
+function addRunLogLine(entry) {
+  runLogLines.push(entry);
+  if (entry.run_id) runLogRunId = entry.run_id;
+  // הצג את הכפתור ברגע שמגיע הלוג הראשון
+  const btn = document.getElementById('showRunLogsBtn');
+  if (btn) btn.classList.remove('hidden');
+  // אם המודאל פתוח — צרף שורה חיה
+  const modal = document.getElementById('runLogsModal');
+  if (modal && modal.classList.contains('open')) {
+    const body = document.getElementById('runLogsBody');
+    const filter = (document.getElementById('runLogsFilter').value || '').toLowerCase();
+    if (_runLogMatchesFilter(entry, filter)) {
+      body.appendChild(_renderRunLogLine(entry));
+      body.scrollTop = body.scrollHeight;
+    }
+  }
+}
+
+function _runLogMatchesFilter(entry, filter) {
+  if (!filter) return true;
+  const hay = `${entry.tc_id || ''} ${entry.action || ''} ${entry.message || ''}`.toLowerCase();
+  return hay.includes(filter);
+}
+
+function _renderRunLogLine(entry) {
+  const div = document.createElement('div');
+  div.className = 'runlog-line ' + (entry.action === 'candidate' ? 'candidate' : (entry.status || 'info'));
+  const ts = document.createElement('span');
+  ts.className = 'ts';
+  ts.textContent = `[${entry.ts || ''}]`;
+  div.appendChild(ts);
+  if (entry.tc_id) {
+    const tc = document.createElement('span');
+    tc.className = 'tc';
+    tc.textContent = entry.tc_id;
+    div.appendChild(tc);
+  }
+  div.appendChild(document.createTextNode(entry.message || ''));
+  return div;
+}
+
+function _rerenderRunLog() {
+  const body = document.getElementById('runLogsBody');
+  const filter = (document.getElementById('runLogsFilter').value || '').toLowerCase();
+  body.innerHTML = '';
+  for (const entry of runLogLines) {
+    if (_runLogMatchesFilter(entry, filter)) body.appendChild(_renderRunLogLine(entry));
+  }
+  body.scrollTop = body.scrollHeight;
+}
+
+function openRunLogsModal() {
+  document.getElementById('runLogsRunId').textContent = runLogRunId ? `run_id=${runLogRunId}` : '';
+  _rerenderRunLog();
+  document.getElementById('runLogsModal').classList.add('open');
+}
+function closeRunLogsModal() {
+  document.getElementById('runLogsModal').classList.remove('open');
+}
+function downloadRunLog() {
+  const lines = runLogLines.map(e => JSON.stringify(e)).join('\n');
+  const blob = new Blob([lines], { type: 'application/x-ndjson' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `run-${runLogRunId || 'log'}.jsonl`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+window.openRunLogsModal = openRunLogsModal;
+window.closeRunLogsModal = closeRunLogsModal;
+
 // ייעודי ל-bubble של TC detail — בונה DOM ישיר עם <button> אמיתי
 // (ולא innerHTML עם user data, שגרם לבאג של escaping ה-<a>)
 function addTcDetailBubble(tcId, httpStatus) {
@@ -1733,6 +1852,10 @@ function openSSE() {
     // bubble קליק שיפתח את הפרטים — DOM ישיר (לא innerHTML — בטוח מ-XSS / escaping)
     addTcDetailBubble(d.test_case_id, d.response && d.response.status);
   });
+  // ★ Run logs — לוג מובנה פר-ריצה
+  sse.addEventListener('log_line', (e) => {
+    try { addRunLogLine(JSON.parse(e.data)); } catch {}
+  });
 }
 
 function safeJson(data, key) {
@@ -1785,6 +1908,14 @@ const showPayloadTemplatesBtn = document.getElementById('showPayloadTemplatesBtn
 if (showPayloadTemplatesBtn) {
   showPayloadTemplatesBtn.addEventListener('click', openPayloadTemplatesModal);
 }
+
+// חיווט הכפתור והכלים של "📜 לוגים של הריצה"
+const showRunLogsBtn = document.getElementById('showRunLogsBtn');
+if (showRunLogsBtn) showRunLogsBtn.addEventListener('click', openRunLogsModal);
+const runLogsFilterEl = document.getElementById('runLogsFilter');
+if (runLogsFilterEl) runLogsFilterEl.addEventListener('input', _rerenderRunLog);
+const runLogsDownloadBtn = document.getElementById('runLogsDownloadBtn');
+if (runLogsDownloadBtn) runLogsDownloadBtn.addEventListener('click', downloadRunLog);
 
 // boot — navigation מציג את ה-screen הראשון, startSession טוען את המצב לרקע
 navigate();

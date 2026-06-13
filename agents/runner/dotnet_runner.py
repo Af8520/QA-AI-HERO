@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import re
 import time
@@ -29,6 +30,18 @@ log = get_logger(__name__)
 class DotNetRunner:
     name = "dotnet"
 
+    def __init__(self) -> None:
+        self._log_entries: List[Dict[str, Any]] = []
+
+    def _log(self, action: str, status: str, message: str) -> None:
+        """מוסיף רשומת log פר-action עם זמן אמיתי. ה-pipeline משדר/מתמיד."""
+        self._log_entries.append({
+            "ts": datetime.datetime.now().strftime("%H:%M:%S"),
+            "action": action,
+            "status": status,   # info | success | warn | error
+            "message": message,
+        })
+
     async def execute(self, executable: DotNetExecutableTestCase) -> TestCaseResult:
         """מבצע את רצף ה-actions אחד אחרי השני. status סופי הוא AND של כולם."""
         if not executable.actions:
@@ -46,6 +59,8 @@ class DotNetRunner:
         observations: List[Dict[str, Any]] = []
         overall_status = TestStatus.PASSED
         error_message: Optional[str] = None
+        # ★ run log — נצבר פר TC; ה-pipeline משדר אותו כ-log_line + מתמיד לדיסק.
+        self._log_entries = []
 
         for action in executable.actions:
             try:
@@ -92,6 +107,7 @@ class DotNetRunner:
             "status": 200 if overall_status == TestStatus.PASSED else 0,
             "kind": "dotnet",
             "observations": observations,
+            "log": self._log_entries,
             "duration_ms": int(duration * 1000),
         }
         if error_message:
@@ -191,12 +207,14 @@ class DotNetRunner:
         """publish דרך Confluent REST Proxy. אותו shape של StepResult כמו ה-native path."""
         from agents.runner.kafka_rest_client import KafkaRestClient
 
+        self._log("PUBLISH", "info", f"מפרסם ל-topic '{action.topic}' key={key}")
         client = KafkaRestClient()
         result = await client.produce(action.topic, key, action.value, action.headers)
 
         if "error" in result:
             classified = _classify_kafka_error(result["error"], action.topic, "publish")
             result["classified"] = classified
+            self._log("PUBLISH", "error", f"נכשל: {classified['friendly']}")
             step = StepResult(
                 step=f"PUBLISH topic={action.topic} (REST)",
                 expected_result="delivered",
@@ -207,6 +225,8 @@ class DotNetRunner:
             )
             return step, result
 
+        self._log("PUBLISH", "success",
+                  f"נמסר ל-'{action.topic}' partition={result.get('partition')} offset={result.get('offset')}")
         step = StepResult(
             step=f"PUBLISH topic={action.topic} (REST) key={key}",
             expected_result="delivered",
@@ -229,21 +249,30 @@ class DotNetRunner:
                 "Kafka not configured (KAFKA_BOOTSTRAP_SERVERS / KAFKA_REST_PROXY_URL ריקים)",
             )
 
+        group = _resolve_consumer_group()
+        self._log("CONSUME", "info",
+                  f"צורך מ-target '{action.topic}' group={group} (timeout {action.timeout_seconds}s)")
+
+        candidates: List[Dict[str, Any]] = []
         # ★ מסלול REST Proxy (מועדף כשמוגדר)
         if settings.kafka_rest_enabled:
             from agents.runner.kafka_rest_client import KafkaRestClient
-            observed = await KafkaRestClient().consume(
-                action.topic, action.match, action.timeout_seconds,
-                _resolve_consumer_group(),
+            rich = await KafkaRestClient().consume(
+                action.topic, action.match, action.timeout_seconds, group,
             )
-            # consumer API כבוי ב-deployment → BLOCKED עם הסבר
-            if isinstance(observed, dict) and observed.get("rest_consumer_unavailable"):
+            if rich.get("rest_consumer_unavailable"):
+                self._log("CONSUME", "error", "ה-consumer API של ה-REST Proxy לא זמין")
                 return self._blocked_step(
                     f"WAIT topic={action.topic} (REST)",
                     "ה-consumer API של ה-REST Proxy לא זמין ({}). בקש מ-admin להפעיל אותו "
                     "(kafka-rest consumer endpoints), או הגדר KAFKA_BOOTSTRAP_SERVERS "
-                    "למסלול native.".format(observed.get("detail", "404/501")),
+                    "למסלול native.".format(rich.get("detail", "404/501")),
                 )
+            if "fatal_error" in rich:
+                observed: Any = rich  # נושא fatal_error → טופל בהמשך
+            else:
+                candidates = rich.get("candidates", []) or []
+                observed = rich.get("matched")
         else:
             try:
                 from confluent_kafka import Consumer  # type: ignore[import-not-found]
@@ -252,15 +281,12 @@ class DotNetRunner:
                     f"WAIT topic={action.topic}",
                     "confluent-kafka package not installed",
                 )
-
-            group_id = _resolve_consumer_group()
             conf = self._kafka_conf()
             conf.update({
-                "group.id": group_id,
+                "group.id": group,
                 "auto.offset.reset": "latest",
                 "enable.auto.commit": False,
             })
-
             observed = await asyncio.to_thread(
                 self._consume_until_match,
                 Consumer, conf, action.topic, action.match, action.timeout_seconds,
@@ -270,67 +296,96 @@ class DotNetRunner:
         if isinstance(observed, dict) and "fatal_error" in observed:
             classified = _classify_kafka_error(observed["fatal_error"], action.topic, "consume")
             observed["classified"] = classified
+            self._log("CONSUME", "error", classified["friendly"])
             step = StepResult(
                 step=f"WAIT topic={action.topic}",
                 expected_result="message arrives",
                 actual_result=f"❌ {classified['friendly']}",
-                status=TestStatus.BLOCKED,  # BLOCKED ולא FAILED — זה issue של תשתית
+                status=TestStatus.BLOCKED,
                 error_message=f"{classified['friendly']}\n→ {classified['recommendation']}",
             )
             return step, observed
 
+        # ★ logging של ה-candidates — זה מה שמאפשר לבחור correlation field
+        self._log("CONSUME", "info", f"נצפו {len(candidates)} מסרים ב-target topic")
+        for c in candidates[:20]:
+            sysname = _extract_sys_name(c.get("value_parsed"))
+            self._log("candidate", "info",
+                      f"offset={c.get('offset')} key={c.get('key')} mac_sys_name={sysname}")
+
         # תרחיש שלילי: timeout = PASS, מסר שהגיע = FAIL
         if action.expect_no_message:
             if observed is None:
+                self._log("MATCH", "success", "לא הגיע מסר (תרחיש שלילי) — תקין")
                 step = StepResult(
                     step=f"WAIT NO-MESSAGE topic={action.topic} ({action.timeout_seconds}s)",
                     expected_result="no message (negative test)",
                     actual_result="no message arrived — as expected",
                     status=TestStatus.PASSED,
-                    response_dump={"timeout": True, "expected_silence": True},
+                    response_dump={"timeout": True, "expected_silence": True, "candidates": candidates},
                 )
-                return step, {"timeout": True, "expected_silence": True}
+                return step, {"timeout": True, "expected_silence": True, "candidates": candidates}
+            self._log("MATCH", "error", "הגיע מסר למרות שזה תרחיש שלילי")
             step = StepResult(
                 step=f"WAIT NO-MESSAGE topic={action.topic}",
                 expected_result="no message (negative test)",
                 actual_result=f"message arrived (offset={observed.get('offset')}) — should NOT have arrived",
                 status=TestStatus.FAILED,
                 error_message="unexpected message in negative test",
-                response_dump=observed,
+                response_dump={**observed, "candidates": candidates},
             )
-            return step, observed
+            return step, {**observed, "candidates": candidates}
+
+        # ★ match ריק → לא ניתן לקבוע איזה מסר הוא שלנו → inconclusive (במקום false pass/fail)
+        if not action.match:
+            self._log("MATCH", "warn",
+                      f"match ריק — לא ניתן לזהות איזה מ-{len(candidates)} המסרים הוא התגובה שלנו. "
+                      f"בחר correlation field מהלוגים והגדר אותו.")
+            step = StepResult(
+                step=f"WAIT topic={action.topic}",
+                expected_result="message matched",
+                actual_result=f"⚠ צרכנו {len(candidates)} מסרים אך אין correlation match",
+                status=TestStatus.BLOCKED,
+                error_message=f"match ריק — צרכנו {len(candidates)} מסרים מ-target. "
+                              f"הגדר correlation field (ראה לוגים) כדי לזהות את התגובה שלנו.",
+            )
+            return step, {"inconclusive": True, "candidates": candidates, "match": {}}
 
         if observed is None:
+            self._log("MATCH", "error",
+                      f"לא נמצא מסר תואם ל-{json.dumps(action.match, ensure_ascii=False)} מתוך {len(candidates)} מסרים")
             step = StepResult(
                 step=f"WAIT topic={action.topic} (timeout {action.timeout_seconds}s)",
                 expected_result="message arrived matching " + json.dumps(action.match, ensure_ascii=False),
-                actual_result="timeout — no matching message",
+                actual_result=f"timeout — no matching message (saw {len(candidates)})",
                 status=TestStatus.FAILED,
                 error_message="message did not arrive within timeout",
             )
-            return step, {"timeout": True, "match": action.match}
+            return step, {"timeout": True, "match": action.match, "candidates": candidates}
 
         # אסרשנים על שדות צפויים
         missing = _check_expected_fields(observed.get("value_parsed") or {}, action.expected_fields)
         if missing:
+            self._log("ASSERT", "error", "שדות חסרים/לא תואמים: " + ", ".join(missing))
             step = StepResult(
                 step=f"WAIT topic={action.topic}",
                 expected_result=json.dumps(action.expected_fields, ensure_ascii=False),
                 actual_result=json.dumps(observed.get("value_parsed") or {}, ensure_ascii=False)[:300],
                 status=TestStatus.FAILED,
                 error_message="missing/mismatched fields: " + ", ".join(missing),
-                response_dump=observed,
+                response_dump={**observed, "candidates": candidates},
             )
-            return step, observed
+            return step, {**observed, "candidates": candidates}
 
+        self._log("MATCH", "success", f"נמצא מסר תואם offset={observed.get('offset')} + שדות תקינים")
         step = StepResult(
             step=f"WAIT topic={action.topic}",
             expected_result="message matched + fields ok",
             actual_result=f"offset={observed.get('offset')} fields_ok",
             status=TestStatus.PASSED,
-            response_dump=observed,
+            response_dump={**observed, "candidates": candidates},
         )
-        return step, observed
+        return step, {**observed, "candidates": candidates}
 
     @staticmethod
     def _consume_until_match(
@@ -526,6 +581,16 @@ class DotNetRunner:
 # ============================================================
 # Pure helpers (testable without confluent-kafka)
 # ============================================================
+
+def _extract_sys_name(value: Any) -> str:
+    """מחלץ mac_sys_name מ-value (top-level / header / headers) — לזיהוי איזה worker כתב."""
+    if not isinstance(value, dict):
+        return "?"
+    for container in (value, value.get("header"), value.get("headers")):
+        if isinstance(container, dict) and container.get("mac_sys_name"):
+            return str(container["mac_sys_name"])
+    return "?"
+
 
 def _parse_group_from_error(err_str: str) -> Optional[str]:
     """מחלץ את שם ה-group מהודעת REST proxy: 'Not authorized to access group: X'."""
