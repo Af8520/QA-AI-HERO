@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from agents.bug_agent.ado_client import ADOClient
 from agents.bug_agent.bug_agent import BugAgent
@@ -127,9 +127,29 @@ async def run_dotnet_pipeline(session: ChatSession) -> PipelineResult:
     await emit(f"שלב 4/{TOTAL_STAGES} — מבצע {len(executables)} תסריטי actions...")
     runner = DotNetRunner()
     results: List[TestCaseResult] = []
-    # נשמור גם רשימה מקבילה של ExecutableTestCase HTTP-shaped כדי שה-Validator הגנרי יוכל לעבוד
     http_shaped_for_validator: List[ExecutableTestCase] = []
+    # ★ Early abort: אם נתקלים בשגיאת תשתית fatal (ACL, auth) — לא מריצים את שאר ה-TCs
+    infra_failure: Optional[str] = None
     for i, ex in enumerate(executables, 1):
+        # ★ אם זוהתה שגיאת תשתית בקריאה קודמת — מסמנים את שאר ה-TCs כ-BLOCKED בלי להריץ
+        if infra_failure:
+            results.append(TestCaseResult(
+                test_case_id=ex.test_case_id,
+                ado_test_case_id=ex.ado_test_case_id,
+                status=TestStatus.BLOCKED,
+                step_results=[StepResult(
+                    step="(skipped due to prior infrastructure failure)",
+                    expected_result="(n/a)",
+                    actual_result=infra_failure,
+                    status=TestStatus.BLOCKED,
+                    error_message=infra_failure,
+                )],
+                duration_seconds=0.0,
+                api_response={"error": infra_failure, "skipped_after_infra_failure": True},
+            ))
+            await tl_tc(i, len(executables), ex.test_case_id, "blocked")
+            http_shaped_for_validator.append(_to_http_shape(ex))
+            continue
         if not ex.actions:
             results.append(TestCaseResult(
                 test_case_id=ex.test_case_id,
@@ -152,6 +172,12 @@ async def run_dotnet_pipeline(session: ChatSession) -> PipelineResult:
         try:
             r = await runner.execute(ex)
             results.append(r)
+            # ★ זיהוי שגיאת תשתית — שאר ה-TCs לא יורצו
+            infra = _detect_infra_failure(r)
+            if infra and not infra_failure:
+                infra_failure = infra
+                await emit(f"  🛑 זוהתה שגיאת תשתית: {infra[:200]}")
+                await emit(f"  ⊘ {len(executables) - i} ה-TCs הבאים יסומנו BLOCKED ללא הרצה.")
             tc_status = "done" if r.status == TestStatus.PASSED else (
                 "failed" if r.status == TestStatus.FAILED else "blocked"
             )
@@ -251,6 +277,22 @@ async def run_dotnet_pipeline(session: ChatSession) -> PipelineResult:
     await session.emit("tl_phase", {"phase": "B", "status": "done"})
     await emit("הסתיים.")
     return report
+
+
+def _detect_infra_failure(result: TestCaseResult) -> Optional[str]:
+    """מחזיר תקציר ההסבר אם ה-TC נכשל בגלל בעיית תשתית (ACL/auth/topic).
+    תוצאה לא ריקה → הפייפליין יפסיק להריץ TCs ויסמן את השאר BLOCKED.
+    """
+    api = result.api_response or {}
+    # observations מכיל את ה-actions ואת ה-classified error אם היה
+    for obs in api.get("observations") or []:
+        observation = (obs or {}).get("observation") or {}
+        classified = observation.get("classified")
+        if isinstance(classified, dict) and classified.get("is_fatal_infra"):
+            friendly = classified.get("friendly") or "infrastructure error"
+            recommendation = classified.get("recommendation") or ""
+            return f"{friendly}\n→ {recommendation}".strip()
+    return None
 
 
 def _to_http_shape(ex: DotNetExecutableTestCase) -> ExecutableTestCase:

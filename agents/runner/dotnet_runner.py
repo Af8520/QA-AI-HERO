@@ -155,12 +155,15 @@ class DotNetRunner:
         await asyncio.to_thread(producer.flush, 10)
 
         if "error" in delivery_result:
+            classified = _classify_kafka_error(delivery_result["error"], action.topic, "publish")
+            delivery_result["classified"] = classified
+            error_friendly = classified["friendly"]
             step = StepResult(
                 step=f"PUBLISH topic={action.topic}",
                 expected_result="delivered",
-                actual_result=f"error: {delivery_result['error']}",
+                actual_result=f"❌ {error_friendly}",
                 status=TestStatus.FAILED,
-                error_message=delivery_result["error"],
+                error_message=f"{error_friendly}\n→ {classified['recommendation']}",
             )
             return step, delivery_result
 
@@ -204,6 +207,19 @@ class DotNetRunner:
             self._consume_until_match,
             Consumer, conf, action.topic, action.match, action.timeout_seconds,
         )
+
+        # ★ שגיאת תשתית/ACL → דווח מיד עם הסבר ידידותי
+        if isinstance(observed, dict) and "fatal_error" in observed:
+            classified = _classify_kafka_error(observed["fatal_error"], action.topic, "consume")
+            observed["classified"] = classified
+            step = StepResult(
+                step=f"WAIT topic={action.topic}",
+                expected_result="message arrives",
+                actual_result=f"❌ {classified['friendly']}",
+                status=TestStatus.BLOCKED,  # BLOCKED ולא FAILED — זה issue של תשתית
+                error_message=f"{classified['friendly']}\n→ {classified['recommendation']}",
+            )
+            return step, observed
 
         # תרחיש שלילי: timeout = PASS, מסר שהגיע = FAIL
         if action.expect_no_message:
@@ -266,7 +282,11 @@ class DotNetRunner:
         match: Dict[str, Any],
         timeout_seconds: int,
     ) -> Optional[Dict[str, Any]]:
-        """סינכרוני — רץ ב-thread. polling עד שמתאים או timeout."""
+        """סינכרוני — רץ ב-thread. polling עד שמתאים או timeout.
+
+        אם נתקלים בשגיאת auth/ACL — מחזירים dict עם 'fatal_error' במקום לחזור על
+        השגיאה עד timeout. הרץ יזהה ויעצור את שאר ה-TCs.
+        """
         consumer = Consumer(conf)
         try:
             consumer.subscribe([topic])
@@ -276,6 +296,10 @@ class DotNetRunner:
                 if msg is None:
                     continue
                 if msg.error():
+                    err_str = str(msg.error())
+                    # אם זו שגיאת תשתית fatal — להחזיר מיד עם הסימן
+                    if any(code in err_str for code in FATAL_INFRA_ERROR_CODES):
+                        return {"fatal_error": err_str}
                     continue
                 raw_value = msg.value()
                 try:
@@ -474,3 +498,74 @@ def _check_expected_fields(value: Dict[str, Any], expected: Dict[str, Any]) -> L
         if str(actual) != str(want):
             issues.append(f"{k}={actual!r}≠{want!r}")
     return issues
+
+
+# ============================================================
+# Kafka error classification — מתרגם הודעות סתמיות לעברית עם המלצה
+# ============================================================
+
+# שגיאות שמסמנות בעיית תשתית/ACL שלא תתוקן בין TCs — אין טעם להמשיך
+FATAL_INFRA_ERROR_CODES = (
+    "TOPIC_AUTHORIZATION_FAILED",
+    "GROUP_AUTHORIZATION_FAILED",
+    "CLUSTER_AUTHORIZATION_FAILED",
+    "SASL_AUTHENTICATION_FAILED",
+    "_AUTHENTICATION",
+    "_AUTHORIZATION",
+)
+
+
+def _classify_kafka_error(err_str: str, topic: str = "", action: str = "publish") -> Dict[str, Any]:
+    """מסווג שגיאת Kafka לפי הטקסט שלה. מחזיר dict עם:
+    - friendly: הודעה ידידותית (עברית) שמסבירה מה הבעיה
+    - recommendation: מה לעשות לפי הסיווג
+    - is_fatal_infra: True אם זו בעיית תשתית/ACL שלא תיפתר בין TCs
+    - raw: הטקסט המקורי
+    """
+    s = err_str or ""
+    out: Dict[str, Any] = {"raw": s, "is_fatal_infra": False}
+
+    if "TOPIC_AUTHORIZATION_FAILED" in s:
+        op = "Write" if action == "publish" else "Read"
+        out["friendly"] = (
+            f"אין הרשאת ACL {op} ל-topic '{topic}'. ה-user שלך מזדהה בהצלחה אבל "
+            f"Kafka דוחה את הפעולה."
+        )
+        out["recommendation"] = (
+            f"בקש מ-admin של Kafka להוסיף ACL:\n"
+            f"  kafka-acls --add --{('producer' if action == 'publish' else 'consumer')} "
+            f"--topic {topic} --principal User:{settings.KAFKA_SASL_USERNAME or '<your-user>'}"
+            + (f" --group {settings.KAFKA_CONSUMER_GROUP_PREFIX}-*" if action == "consume" else "")
+        )
+        out["is_fatal_infra"] = True
+    elif "GROUP_AUTHORIZATION_FAILED" in s:
+        out["friendly"] = (
+            f"אין הרשאת ACL ל-consumer group. ה-user שלך לא יכול לצרוך עם group "
+            f"prefix '{settings.KAFKA_CONSUMER_GROUP_PREFIX}'."
+        )
+        out["recommendation"] = (
+            f"בקש מ-admin להוסיף ACL: "
+            f"kafka-acls --add --consumer --topic {topic} --group "
+            f"{settings.KAFKA_CONSUMER_GROUP_PREFIX}-* --principal User:{settings.KAFKA_SASL_USERNAME or '<your-user>'}"
+        )
+        out["is_fatal_infra"] = True
+    elif "SASL_AUTHENTICATION_FAILED" in s or "Authentication failed" in s:
+        out["friendly"] = "ה-SASL credentials שגויים (username/password לא מתאימים)."
+        out["recommendation"] = "בדוק KAFKA_SASL_USERNAME ו-KAFKA_SASL_PASSWORD ב-.env."
+        out["is_fatal_infra"] = True
+    elif "UNKNOWN_TOPIC_OR_PART" in s:
+        out["friendly"] = f"ה-topic '{topic}' לא קיים ב-cluster."
+        out["recommendation"] = (
+            f"בקש מ-admin ליצור את ה-topic, או שנה את ה-source/target topic ב-Payload Builder."
+        )
+        out["is_fatal_infra"] = True
+    elif "_TRANSPORT" in s or "Connection" in s or "broker" in s.lower():
+        out["friendly"] = "לא ניתן להתחבר ל-Kafka broker."
+        out["recommendation"] = (
+            f"בדוק KAFKA_BOOTSTRAP_SERVERS={settings.KAFKA_BOOTSTRAP_SERVERS!r} ו-VPN/network."
+        )
+        out["is_fatal_infra"] = True
+    else:
+        out["friendly"] = s[:200]
+        out["recommendation"] = "בדוק את הטקסט המלא של השגיאה."
+    return out
