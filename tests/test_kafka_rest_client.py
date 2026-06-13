@@ -10,7 +10,7 @@ from agents.runner.kafka_rest_client import (
     _record_matches,
     _scan_records,
 )
-from agents.runner.dotnet_runner import _tc_key
+from agents.runner.dotnet_runner import _normalize_topic, _tc_key
 
 
 # ============================================================
@@ -108,3 +108,19 @@ def test_tc_key_fallback():
     out = _tc_key("random title with spaces")
     assert " " not in out
     assert len(out) <= 32
+
+
+# ============================================================
+# _normalize_topic — Kafka topics are case-sensitive; org uses lowercase
+# ============================================================
+
+def test_normalize_topic_lowercases():
+    assert _normalize_topic("Clicks-referral-streaming") == "clicks-referral-streaming"
+    assert _normalize_topic("Patient_parameters-raw") == "patient_parameters-raw"
+    assert _normalize_topic("already-lower") == "already-lower"
+
+
+def test_normalize_topic_strips():
+    assert _normalize_topic("  Topic-X  ") == "topic-x"
+    assert _normalize_topic("") == ""
+    assert _normalize_topic(None) == ""

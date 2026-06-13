@@ -111,6 +111,8 @@ class DotNetRunner:
     # ============================================================
 
     async def _run_kafka_publish(self, action: KafkaPublishAction, tc_id: str = ""):
+        # ★ נרמול topic ל-lowercase (case-sensitive ב-Kafka; ACL בנוי על השם הקטן)
+        action.topic = _normalize_topic(action.topic)
         if not settings.kafka_enabled:
             return self._blocked_step(
                 f"PUBLISH topic={action.topic}",
@@ -219,6 +221,8 @@ class DotNetRunner:
     # ============================================================
 
     async def _run_kafka_wait(self, action: KafkaWaitAction):
+        # ★ נרמול topic ל-lowercase (case-sensitive ב-Kafka; ACL בנוי על השם הקטן)
+        action.topic = _normalize_topic(action.topic)
         if not settings.kafka_enabled:
             return self._blocked_step(
                 f"WAIT topic={action.topic}",
@@ -522,6 +526,14 @@ class DotNetRunner:
 # ============================================================
 # Pure helpers (testable without confluent-kafka)
 # ============================================================
+
+def _normalize_topic(topic: str) -> str:
+    """שמות topics ב-Kafka הם case-sensitive, ובמכבי הקונבנציה היא תמיד אותיות קטנות.
+    ה-Payload Builder לפעמים מחזיר אותיות גדולות (Clicks-referral-streaming) → 403/אין ACL.
+    מנרמלים גורף ל-lowercase.
+    """
+    return (topic or "").strip().lower()
+
 
 def _tc_key(tc_id: str) -> str:
     """מנקה test_case_id ל-key תקני של Kafka (TC-01 מתוך 'TC-01: ...')."""
