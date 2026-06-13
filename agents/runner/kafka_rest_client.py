@@ -93,6 +93,8 @@ class KafkaRestClient:
         match: Dict[str, Any],
         timeout_seconds: int,
         group: str,
+        key_equals: Optional[str] = None,
+        key_contains: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """יוצר consumer instance, נרשם ל-topic, ועושה polling עד שמסר תואם מגיע או timeout.
 
@@ -153,7 +155,8 @@ class KafkaRestClient:
                         records = rr.json()
                     except Exception:
                         records = []
-                    matched = _scan_records(records, topic, match, candidates)
+                    matched = _scan_records(records, topic, match, candidates,
+                                            key_equals=key_equals, key_contains=key_contains)
                     if matched is not None:
                         log.info("kafka_rest_consumed", topic=topic, offset=matched.get("offset"),
                                  candidates_seen=len(candidates))
@@ -217,13 +220,26 @@ def _decode_binary_record(rec: Dict[str, Any], topic: str) -> Dict[str, Any]:
     }
 
 
+def _key_matches(key: Optional[str], key_equals: Optional[str], key_contains: Optional[str]) -> bool:
+    """True אם ה-key המפוענח עומד ב-matchers (כל אחד שמולא חייב להתקיים)."""
+    k = key or ""
+    if key_equals is not None and k != key_equals:
+        return False
+    if key_contains is not None and key_contains not in k:
+        return False
+    return True
+
+
 def _scan_records(
     records: Any,
     topic: str,
     match: Dict[str, Any],
     candidates: Optional[List[Dict[str, Any]]] = None,
+    key_equals: Optional[str] = None,
+    key_contains: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """מפענח רשומות, מוסיף ל-candidates (capped), ומחזיר את הראשונה שתואמת ל-match (או None)."""
+    """מפענח רשומות, מוסיף ל-candidates (capped), ומחזיר את הראשונה שתואמת לכל ה-matchers
+    (key_equals AND key_contains AND value match) — או None."""
     if candidates is None:
         candidates = []
     if not isinstance(records, list):
@@ -235,7 +251,9 @@ def _scan_records(
         decoded = _decode_binary_record(rec, topic)
         if len(candidates) < _CANDIDATE_CAP:
             candidates.append(decoded)
-        if matched is None and _record_matches(decoded["value_parsed"], match):
+        if (matched is None
+                and _key_matches(decoded.get("key"), key_equals, key_contains)
+                and _record_matches(decoded["value_parsed"], match)):
             matched = decoded
     return matched
 

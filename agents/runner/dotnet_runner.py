@@ -250,8 +250,16 @@ class DotNetRunner:
             )
 
         group = _resolve_consumer_group()
+        corr = []
+        if action.key_equals:
+            corr.append(f"key={action.key_equals}")
+        if action.key_contains:
+            corr.append(f"key⊇{action.key_contains}")
+        if action.match:
+            corr.append(f"fields={json.dumps(action.match, ensure_ascii=False)}")
         self._log("CONSUME", "info",
-                  f"צורך מ-target '{action.topic}' group={group} (timeout {action.timeout_seconds}s)")
+                  f"צורך מ-target '{action.topic}' group={group} (timeout {action.timeout_seconds}s) "
+                  f"correlation: {', '.join(corr) or '(אין!)'}")
 
         candidates: List[Dict[str, Any]] = []
         # ★ מסלול REST Proxy (מועדף כשמוגדר)
@@ -259,6 +267,7 @@ class DotNetRunner:
             from agents.runner.kafka_rest_client import KafkaRestClient
             rich = await KafkaRestClient().consume(
                 action.topic, action.match, action.timeout_seconds, group,
+                key_equals=action.key_equals, key_contains=action.key_contains,
             )
             if rich.get("rest_consumer_unavailable"):
                 self._log("CONSUME", "error", "ה-consumer API של ה-REST Proxy לא זמין")
@@ -290,6 +299,7 @@ class DotNetRunner:
             observed = await asyncio.to_thread(
                 self._consume_until_match,
                 Consumer, conf, action.topic, action.match, action.timeout_seconds,
+                action.key_equals, action.key_contains,
             )
 
         # ★ שגיאת תשתית/ACL → דווח מיד עם הסבר ידידותי
@@ -336,11 +346,11 @@ class DotNetRunner:
             )
             return step, {**observed, "candidates": candidates}
 
-        # ★ match ריק → לא ניתן לקבוע איזה מסר הוא שלנו → inconclusive (במקום false pass/fail)
-        if not action.match:
+        # ★ אין שום matcher (לא key ולא value) → לא ניתן לקבוע איזה מסר הוא שלנו → inconclusive
+        if not action.match and not action.key_equals and not action.key_contains:
             self._log("MATCH", "warn",
-                      f"match ריק — לא ניתן לזהות איזה מ-{len(candidates)} המסרים הוא התגובה שלנו. "
-                      f"בחר correlation field מהלוגים והגדר אותו.")
+                      f"אין correlation (key/match) — לא ניתן לזהות איזה מ-{len(candidates)} המסרים הוא התגובה שלנו. "
+                      f"בחר correlation מהלוגים והגדר אותו.")
             step = StepResult(
                 step=f"WAIT topic={action.topic}",
                 expected_result="message matched",
@@ -394,6 +404,8 @@ class DotNetRunner:
         topic: str,
         match: Dict[str, Any],
         timeout_seconds: int,
+        key_equals: Optional[str] = None,
+        key_contains: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """סינכרוני — רץ ב-thread. polling עד שמתאים או timeout.
 
@@ -419,6 +431,12 @@ class DotNetRunner:
                     parsed = json.loads(raw_value.decode("utf-8")) if raw_value else None
                 except Exception:
                     parsed = None
+                msg_key = msg.key()
+                key_str = msg_key.decode("utf-8", errors="replace") if isinstance(msg_key, bytes) else (msg_key or None)
+                if key_equals is not None and (key_str or "") != key_equals:
+                    continue
+                if key_contains is not None and key_contains not in (key_str or ""):
+                    continue
                 if not _matches(parsed, match):
                     continue
                 return {
@@ -641,18 +659,50 @@ def _matches(value: Optional[Dict[str, Any]], match: Dict[str, Any]) -> bool:
     return True
 
 
+_FIELD_MISSING = object()
+
+
+def _resolve_field_path(obj: Any, path: str) -> Any:
+    """מחלץ ערך לפי dotted path עם תמיכה ב-list index:
+    'header.mac_sys_name', '_data.parameters.0.gender'. מחזיר _FIELD_MISSING אם לא קיים.
+    """
+    cur = obj
+    for part in path.split("."):
+        if isinstance(cur, dict):
+            if part in cur:
+                cur = cur[part]
+            else:
+                return _FIELD_MISSING
+        elif isinstance(cur, list):
+            try:
+                idx = int(part)
+            except ValueError:
+                return _FIELD_MISSING
+            if -len(cur) <= idx < len(cur):
+                cur = cur[idx]
+            else:
+                return _FIELD_MISSING
+        else:
+            return _FIELD_MISSING
+    return cur
+
+
 def _check_expected_fields(value: Dict[str, Any], expected: Dict[str, Any]) -> List[str]:
-    """מחזיר רשימה של שדות שחסרים / לא תואמים. ריק = הכל בסדר."""
+    """מחזיר רשימה של שדות שחסרים / לא תואמים. ריק = הכל בסדר.
+    מפתח עם נקודה ('header.mac_sys_name', '_data.parameters.0.gender') נחשב dotted path מקונן.
+    """
     issues: List[str] = []
     if not expected:
         return issues
-    if not isinstance(value, dict):
+    if not isinstance(value, (dict, list)):
         return list(expected.keys())
     for k, want in expected.items():
-        if k not in value:
+        actual = _resolve_field_path(value, k) if "." in k else (
+            value.get(k, _FIELD_MISSING) if isinstance(value, dict) else _FIELD_MISSING
+        )
+        if actual is _FIELD_MISSING:
             issues.append(f"{k} (missing)")
             continue
-        actual = value[k]
         if str(actual) != str(want):
             issues.append(f"{k}={actual!r}≠{want!r}")
     return issues

@@ -173,6 +173,43 @@ def test_scan_collects_all_candidates():
 
 
 # ============================================================
+# Key matching — the correlation handle (child_development::<member_id>::<code>)
+# ============================================================
+
+_TARGET_RECORDS = [
+    {"key": _b64("verifyhub::0::27394311"), "value": _b64('{"id":1}'), "offset": 1},
+    {"key": _b64("child_development::038374476::0"), "value": _b64('{"action":"create"}'), "offset": 2},
+    {"key": _b64("user_login_status::0001938670"), "value": _b64('{"id":3}'), "offset": 3},
+]
+
+
+def test_scan_key_contains_picks_our_message():
+    candidates = []
+    matched = _scan_records(_TARGET_RECORDS, "t", {}, candidates, key_contains="038374476")
+    assert matched is not None and matched["offset"] == 2   # not the verifyhub one
+    assert len(candidates) == 3
+
+
+def test_scan_key_equals_exact():
+    matched = _scan_records(_TARGET_RECORDS, "t", {}, [], key_equals="child_development::038374476::0")
+    assert matched is not None and matched["offset"] == 2
+    assert _scan_records(_TARGET_RECORDS, "t", {}, [], key_equals="child_development::999::0") is None
+
+
+def test_scan_key_and_value_both_required():
+    # key matches but value field doesn't → no match
+    matched = _scan_records(_TARGET_RECORDS, "t", {"action": "delete"}, [], key_contains="038374476")
+    assert matched is None
+    # both satisfied
+    matched = _scan_records(_TARGET_RECORDS, "t", {"action": "create"}, [], key_contains="038374476")
+    assert matched is not None and matched["offset"] == 2
+
+
+def test_scan_no_key_match_returns_none():
+    assert _scan_records(_TARGET_RECORDS, "t", {}, [], key_contains="nonexistent") is None
+
+
+# ============================================================
 # Dotted-path matching — match on nested header.mac_correlation_id
 # ============================================================
 

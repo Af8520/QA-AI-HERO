@@ -40,6 +40,28 @@ def test_check_expected_fields():
     assert any("≠" in x for x in _check_expected_fields({"a": "x"}, {"a": "y"}))
 
 
+def test_check_expected_fields_dotted_and_list():
+    """אסרשנים על שדות target מקוננים/מומרים — header.x, _data.parameters.0.gender."""
+    value = {
+        "header": {"mac_sys_name": "worker"},
+        "root": {"action": "create", "entity_type": "child_development"},
+        "_data": {"parameters": [{"gender": "זכר", "member_id": "038374476"}]},
+    }
+    # הכל תואם → אין issues
+    assert _check_expected_fields(value, {
+        "header.mac_sys_name": "worker",
+        "root.action": "create",
+        "_data.parameters.0.gender": "זכר",
+    }) == []
+    # ערך מומר שגוי → issue
+    issues = _check_expected_fields(value, {"_data.parameters.0.gender": "M"})
+    assert any("gender" in i for i in issues)
+    # path חסר → missing
+    assert any("missing" in i for i in _check_expected_fields(value, {"header.mac_channel": "x"}))
+    # list index מחוץ לטווח → missing
+    assert any("missing" in i for i in _check_expected_fields(value, {"_data.parameters.5.gender": "x"}))
+
+
 @pytest.mark.asyncio
 async def test_runner_blocked_when_no_actions():
     runner = DotNetRunner()

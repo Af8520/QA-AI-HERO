@@ -246,7 +246,7 @@ SYSTEM_PROMPT_DOTNET = """אתה QA Test Compiler עבור מחלקת אינטג
   "test_case_id": "string",
   "actions": [
     {"kind": "kafka_publish", "topic": "string", "key": "optional", "value": {...}, "headers": {...} | null},
-    {"kind": "kafka_wait", "topic": "string", "match": {...}, "expected_fields": {...}, "timeout_seconds": 30, "expect_no_message": false},
+    {"kind": "kafka_wait", "topic": "string", "key_contains": "<מזהה מה-publish לזיהוי המסר שלנו>", "match": {...}, "expected_fields": {"header.x":"...", "_data.parameters.0.y":"..."}, "timeout_seconds": 30, "expect_no_message": false},
     {"kind": "couchbase_wait", "bucket": "string", "scope": "...", "collection": "...", "key": "...", "query": "...", "expected_fields": {...}, "timeout_seconds": 30}
   ],
   "expected_status": 200,
@@ -256,7 +256,9 @@ SYSTEM_PROMPT_DOTNET = """אתה QA Test Compiler עבור מחלקת אינטג
 כללים:
 - actions לפי הסדר הטבעי של ה-step.
 - "פרסם" / "שלח" → kafka_publish. ה-value הוא ה-payload (JSON dict).
-- "ודא שמסר הגיע ל-topic" → kafka_wait.
+- "ודא שמסר הגיע ל-topic" → kafka_wait. אם התסריט מציין KEY בפורמט (entity::מזהה::קוד) — קבע
+  key_contains = המזהה ששלחת ב-publish (member_id/technical_id/entity_id לפי האפיון), כדי לתפוס את
+  המסר שלנו ב-topic משותף. expected_fields עם dotted paths לערכים המומרים; דלג על GUID/תאריכים.
 - "ודא שמסמך נכתב ל-Couchbase" → couchbase_wait. אם key ידוע — הכנס. אם לא, אפשר query N1QL.
 - expected_fields — שדות שהמסר/מסמך צריך להכיל (עם הערכים הצפויים).
 - timeout_seconds ברירת מחדל 30 אלא אם התסריט אומר אחרת.
@@ -292,17 +294,39 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
 5. צור KafkaWaitAction עם topic=TARGET_TOPIC (או CouchbaseWaitAction אם התסריט מזכיר Couchbase).
 6. אם התסריט הוא תרחיש שלילי (הערך שגוי, תאריך ישן, סינון, "אין להפיץ", "לא יגיע") —
    קבע expect_no_message=true על ה-wait. אז timeout = PASS.
-7. expected_fields של ה-wait — שדות במסר ה-target שצריך לאמת (תוצאות העשרה/המרה).
+
+★★★ זיהוי המסר שלנו ב-target (correlation) — קריטי ★★★
+ה-target topic משותף — הרבה מסרים לא קשורים (verifyhub, user_login_status...). חייבים לזהות
+את *המסר שלנו* לפי מה שהתסריט אומר על ה-KEY של מסר ה-target:
+- התסריט אומר משהו כמו "ודא שמסר נכתב לטופיק X עם KEY בפורמט: <entity>::<מזהה>::<קוד>".
+- זהה את **המזהה הדינמי** שה-key בנוי ממנו (member_id / technical_id / entity_id — *לפי האפיון
+  הספציפי*, זה משתנה מ-Worker ל-Worker). השתמש ב**אותו ערך מדויק שהזרקת ל-publish**.
+- קבע על ה-wait:
+  - key_contains = הערך הייחודי (לרוב המזהה, למשל ה-member_id ששלחת) — עמיד וגמיש. **העדף את זה.**
+  - key_equals = ה-key המלא רק אם הפורמט ודאי לחלוטין.
+- אל תמציא מזהה — קח את הערך מה-publish payload שלך.
+
+★★★ expected_fields — אימות השדות המומרים ב-target ★★★
+מתוך שורות "במסר היעד header/root/_data ודא שדות ...":
+- הכנס את ה**ערכים המומרים הקונקרטיים** עם **dotted paths** (כולל index ל-arrays):
+  "header.mac_sys_name":"worker", "root.action":"create", "root.entity_type":"child_development",
+  "_data.parameters.0.gender":"זכר".
+- ה-Worker עושה טרנספורמציה (gender:M → "זכר") — אמת את ה**ערך המומר** הצפוי ב-target, לא ערך המקור.
+- ★ **דלג על שדות דינמיים** — message_id=GUID חדש, תאריכים, timestamps, כל GUID. אל תכניס אותם
+  ל-expected_fields (הם משתנים בכל ריצה).
 
 החזר JSON בלבד:
 {
   "test_case_id": "string",
   "actions": [
     {"kind": "kafka_publish", "topic": "<SOURCE_TOPIC>", "value": {... template מלא עם דריסות ...}},
-    {"kind": "kafka_wait", "topic": "<TARGET_TOPIC>", "expected_fields": {...}, "timeout_seconds": 30, "expect_no_message": false}
+    {"kind": "kafka_wait", "topic": "<TARGET_TOPIC>",
+     "key_contains": "<המזהה ששלחת — member_id/technical_id/entity_id לפי האפיון>",
+     "expected_fields": {"header.mac_sys_name":"...", "root.action":"...", "_data.parameters.0.gender":"..."},
+     "timeout_seconds": 30, "expect_no_message": false}
   ],
   "expected_status": 200,
-  "compiler_notes": "string קצר — אילו דריסות הוחלו ולמה"
+  "compiler_notes": "string קצר — אילו דריסות הוחלו, ולפי איזה מזהה תופסים את ה-target"
 }
 
 כללי כתיבה חשובים:

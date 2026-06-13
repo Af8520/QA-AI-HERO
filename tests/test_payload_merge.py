@@ -157,6 +157,39 @@ async def test_compile_uses_llm_when_templates_present():
 
 
 @pytest.mark.asyncio
+async def test_compile_emits_key_contains_and_nested_expected_fields():
+    """המוח מפיק key_contains (correlation) + expected_fields מקוננים מומרים."""
+    mock_resp = MagicMock()
+    mock_resp.choices = [MagicMock(message=MagicMock(content=(
+        '{"test_case_id": "TC-1", "actions": ['
+        '{"kind": "kafka_publish", "topic": "clicks-referral-streaming", '
+        '"value": {"_data": {"parameters": [{"member_id": "038374476"}]}}},'
+        '{"kind": "kafka_wait", "topic": "patient_parameters-raw", '
+        '"key_contains": "038374476", '
+        '"expected_fields": {"root.action": "create", "_data.parameters.0.gender": "\\u05d6\\u05db\\u05e8"}, '
+        '"timeout_seconds": 30}'
+        '], "expected_status": 200, "compiler_notes": "correlate by member_id"}'
+    )))]
+    mock_client = MagicMock()
+    mock_client.chat.completions.create = AsyncMock(return_value=mock_resp)
+
+    with patch("agents.compiler.dotnet_compiler.settings") as mock_settings, \
+         patch("agents.compiler.dotnet_compiler._make_openai_client", return_value=mock_client):
+        mock_settings.azure_openai_enabled = True
+        mock_settings.AZURE_OPENAI_DEPLOYMENT = "gpt-x"
+        mock_settings.KAFKA_DEFAULT_TIMEOUT_SECONDS = 30
+        mock_settings.COUCHBASE_DEFAULT_TIMEOUT_SECONDS = 30
+
+        compiler = DotNetCompiler(payload_templates=PAYLOAD_TEMPLATES)
+        ex = await compiler.compile({"id": 1, "title": "TC-1", "text": "פתח אורח, ודא ב-target עם KEY child_development::<ת.ז>"})
+
+    wait = next(a for a in ex.actions if a.kind == "kafka_wait")
+    assert wait.key_contains == "038374476"   # correlation handle, derived from publish
+    assert wait.expected_fields["root.action"] == "create"
+    assert wait.expected_fields["_data.parameters.0.gender"] == "זכר"
+
+
+@pytest.mark.asyncio
 async def test_compile_negative_test_marks_expect_no_message():
     """LLM אומר expect_no_message=true → KafkaWaitAction מסומן ככזה."""
     mock_resp = MagicMock()

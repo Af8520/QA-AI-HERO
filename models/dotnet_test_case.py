@@ -29,13 +29,22 @@ class KafkaPublishAction(BaseModel):
 class KafkaWaitAction(BaseModel):
     """המתנה למסר ב-target topic + אסרשנים על שדות.
 
-    match — פילטר לקליטת המסר הספציפי (תלוי key או field במסר).
-    expected_fields — שדות שצריכים להופיע בערך הצפוי.
+    correlation — איך מזהים שזה *המסר שלנו* בתוך topic משותף (verifyhub וכו'):
+    - key_contains: תת-מחרוזת ב-key (לרוב המזהה הדינמי — member_id/technical_id/entity_id
+      לפי האפיון; המוח ממלא את אותו ערך שהוזרק ל-publish).
+    - key_equals: key מדויק (כשהפורמט המלא ידוע).
+    - match: שדות ערך (dotted paths) שצריכים להתקיים במסר.
+    רשומה תואמת אם *כל* ה-matchers שמולאו מתקיימים.
+
+    expected_fields — שדות (dotted/list paths) המומרים שצריך לאמת ב-target. דינמיים
+    (GUID/תאריך/message_id) לא נכנסים לכאן.
     expect_no_message — תרחיש שלילי: timeout = PASS, מסר שמגיע = FAIL.
     """
 
     kind: Literal["kafka_wait"] = "kafka_wait"
     topic: str
+    key_equals: Optional[str] = None
+    key_contains: Optional[str] = None
     match: Dict[str, Any] = Field(default_factory=dict)
     expected_fields: Dict[str, Any] = Field(default_factory=dict)
     timeout_seconds: int = 30
