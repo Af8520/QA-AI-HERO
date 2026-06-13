@@ -590,10 +590,14 @@
     <button class="close-btn" onclick="closePayloadTemplatesModal()">סגור ✕</button>
     <h3>📦 Templates של Payload Builder — מה שהסוכן השני החזיר</h3>
     <div class="file-path" id="payloadTemplatesFile"></div>
-    <h4>Topics</h4>
+    <h4>Topics + Target entity_type (★ נשלח למוח)</h4>
     <pre id="payloadTopicsContent"></pre>
-    <h4>Templates (משמשים כבסיס לכל payload)</h4>
+    <h4>Source Templates (★ נשלח למוח — בסיס ה-publish)</h4>
     <pre id="payloadTemplatesContent"></pre>
+    <h4>★ Target Templates (נשלח למוח — מבנה היעד + key_built_from + dynamic_fields)</h4>
+    <pre id="payloadTargetTemplatesContent"></pre>
+    <h4>★ Transformations (נשלח למוח — מיפוי source→target)</h4>
+    <pre id="payloadTransformationsContent"></pre>
     <h4>Field Catalog</h4>
     <pre id="payloadFieldCatalogContent"></pre>
     <h4>Raw bot response (לפני חילוץ JSON — כדי לדעת אם נחתך אצלנו)</h4>
@@ -1678,9 +1682,14 @@ async function openPayloadTemplatesModal() {
     document.getElementById('payloadTemplatesFile').textContent =
       `נשמר ב-${data.file || '(לא נשמר)'}`;
     document.getElementById('payloadTopicsContent').textContent =
-      JSON.stringify({ source_topic: data.source_topic, target_topic: data.target_topic }, null, 2);
+      JSON.stringify({ source_topic: data.source_topic, target_topic: data.target_topic,
+                       target_entity_type: data.target_entity_type }, null, 2);
     document.getElementById('payloadTemplatesContent').textContent =
       JSON.stringify(data.templates, null, 2);
+    document.getElementById('payloadTargetTemplatesContent').textContent =
+      JSON.stringify(data.target_templates || {}, null, 2);
+    document.getElementById('payloadTransformationsContent').textContent =
+      JSON.stringify(data.transformations || {}, null, 2);
     document.getElementById('payloadFieldCatalogContent').textContent =
       JSON.stringify(data.field_catalog, null, 2);
     const rawEl = document.getElementById('payloadRawResponseContent');

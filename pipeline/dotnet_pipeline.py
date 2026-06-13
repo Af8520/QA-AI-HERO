@@ -400,9 +400,11 @@ async def _build_payloads(session: ChatSession, spec_text, emit):
         return None
 
     tmpl_keys = list((result.get("templates") or {}).keys())
-    catalog_size = len(result.get("field_catalog") or {})
-    await emit(f"  ✓ קיבל {len(tmpl_keys)} templates ({', '.join(tmpl_keys) or '—'}), "
-               f"{catalog_size} שדות ב-catalog")
+    target_keys = list((result.get("target_templates") or {}).keys())
+    n_transforms = len(result.get("transformations") or {})
+    await emit(f"  ✓ קיבל {len(tmpl_keys)} source templates ({', '.join(tmpl_keys) or '—'}), "
+               f"{len(target_keys)} target templates, {n_transforms} transformations, "
+               f"target_entity_type={result.get('target_entity_type') or '—'}")
     # שמירה ל-session + דיסק (לדיבוג)
     session.payload_templates = result
     session.payload_templates_file = _persist_payloads(session.session_id, result)

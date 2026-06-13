@@ -296,11 +296,15 @@ async def get_payload_templates(session_id: str):
         "session_id": session_id,
         "source_topic": pt.get("source_topic"),
         "target_topic": pt.get("target_topic"),
+        "target_entity_type": pt.get("target_entity_type"),
         "templates": pt.get("templates") or {},
+        # ★ אלה בדיוק מה שעובר ל"מוח" (Compiler): target_templates → TARGET_EXAMPLE,
+        # transformations → TRANSFORMATIONS. כך רואים מה ה-LLM מקבל לקורלציה ולאסרשנים.
+        "target_templates": pt.get("target_templates") or {},
+        "transformations": pt.get("transformations") or {},
         "field_catalog": pt.get("field_catalog") or {},
         "file": session.payload_templates_file,
         # ★ raw response — מה שהסוכן באמת החזיר ב-DirectLine, לפני חילוץ ה-JSON.
-        # מאפשר להבחין: "המידע מצומצם כי הסוכן החזיר מצומצם" vs "אצלנו נחתך".
         "raw_bot_response": pt.get("__raw_bot_response") or "",
     }
 
