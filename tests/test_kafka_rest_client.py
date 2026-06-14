@@ -297,10 +297,11 @@ class _FakeProxyClient:
       - GET /records         → 404 אם partition מוקצה לא קיים (broker UNKNOWN_PARTITION),
                                אחרת 200 [] — זה אות הקיום האמיתי שעליו ה-probe מסתמך."""
 
-    def __init__(self, existing, describe_status=403, describe_partitions=None):
+    def __init__(self, existing, describe_status=403, describe_partitions=None, create_status=200):
         self.existing = set(existing)
         self.describe_status = describe_status
         self.describe_partitions = describe_partitions
+        self.create_status = create_status
         self.calls = []
         self._assigned = []
 
@@ -319,6 +320,8 @@ class _FakeProxyClient:
 
     async def post(self, url, json=None, **kw):
         self.calls.append(("POST", url, json))
+        if "/consumers/" in url and "/instances/" not in url:   # create consumer
+            return _FakeResp(self.create_status, {"instance_id": "i", "base_uri": url + "/instances/i"})
         if url.endswith("/assignments"):
             self._assigned = [p["partition"] for p in (json or {}).get("partitions", [])]
             return _FakeResp(200, {})
@@ -326,8 +329,11 @@ class _FakeProxyClient:
             return _FakeResp(200, {})   # ★ משקר כמו ה-proxy האמיתי — תמיד 200
         return _FakeResp(200, {})
 
+    async def delete(self, url, **kw):
+        self.calls.append(("DELETE", url))
+        return _FakeResp(200, {})
 
-_INST = "http://proxy/consumers/g/instances/i"
+
 _HJ = {"Content-Type": "x"}
 _PH = {"Accept": "binary"}   # poll headers ל-records-fetch
 
@@ -367,36 +373,83 @@ async def test_candidate_partitions_falls_back_to_probe(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_discover_probe_finds_real_count_without_describe(monkeypatch):
-    """★ התרחיש האמיתי במכבי: אין Describe ACL, ה-topic בעל 6 partitions (0..5).
-    ה-probe מגלה אותם לבד למרות PROBE_MAX=16 → כיסוי מלא (כולל partition 5)."""
-    monkeypatch.setattr(_settings, "KAFKA_TARGET_PARTITIONS", None)
-    monkeypatch.setattr(_settings, "KAFKA_PARTITION_PROBE_MAX", 16)
-    fake = _FakeProxyClient(existing={0, 1, 2, 3, 4, 5}, describe_status=403)
-    info = await _rest_client()._discover_partitions(fake, _INST, "t", _HJ, _PH)
-    assert info["mode"] == "probe"
-    assert info["n_partitions"] == 6
-    assert [p["partition"] for p in info["parts"]] == [0, 1, 2, 3, 4, 5]
+async def test_open_partition_consumer_valid():
+    """partition קיים → consumer מוכן (instance_base מוחזר, status None)."""
+    fake = _FakeProxyClient(existing={0, 1, 2, 3, 4, 5})
+    ib, status = await _rest_client()._open_partition_consumer(fake, "g", "t", 5, _HJ, _PH)
+    assert status is None
+    assert ib is not None and "/instances/" in ib
 
 
 @pytest.mark.asyncio
-async def test_discover_configured_too_large_self_corrects(monkeypatch):
-    """המשתמש אמר 8 אבל קיימים רק 0..4 → records-fetch מסנן את 5..7 הפנטום ל-5.
-    מבטיח שספירה ידנית גדולה-מדי לא מזהמת את ה-assignment ושוברת כיסוי."""
-    monkeypatch.setattr(_settings, "KAFKA_TARGET_PARTITIONS", 8)
-    fake = _FakeProxyClient(existing={0, 1, 2, 3, 4})
-    info = await _rest_client()._discover_partitions(fake, _INST, "t", _HJ, _PH)
-    assert info["mode"] == "configured"
-    assert info["n_partitions"] == 5
-    assert [p["partition"] for p in info["parts"]] == [0, 1, 2, 3, 4]
+async def test_open_partition_consumer_phantom_dropped():
+    """★ partition פנטום (9, לא קיים) → records-fetch מחזיר 404 → consumer נמחק ומושמט.
+    זה מה שמונע זיהום ה-fetch ב-partitions לא-קיימים."""
+    fake = _FakeProxyClient(existing={0, 1, 2, 3, 4, 5})
+    ib, status = await _rest_client()._open_partition_consumer(fake, "g", "t", 9, _HJ, _PH)
+    assert ib is None and status is None
+    assert any(c[0] == "DELETE" for c in fake.calls)   # נוקה
 
 
 @pytest.mark.asyncio
-async def test_discover_no_partitions_fails_cleanly(monkeypatch):
-    """אף partition לא קיים → n_partitions=0 (ה-caller יחזיר fatal_error, *לא* subscribe חלקי)."""
-    monkeypatch.setattr(_settings, "KAFKA_TARGET_PARTITIONS", None)
-    monkeypatch.setattr(_settings, "KAFKA_PARTITION_PROBE_MAX", 4)
-    fake = _FakeProxyClient(existing=set(), describe_status=403)
-    info = await _rest_client()._discover_partitions(fake, _INST, "t", _HJ, _PH)
-    assert info["n_partitions"] == 0
-    assert info["parts"] == []
+async def test_open_partition_consumer_unavailable():
+    """create מחזיר 404/501 → ה-consumer API כבוי → status 'unavailable'."""
+    fake = _FakeProxyClient(existing={0, 1}, create_status=501)
+    ib, status = await _rest_client()._open_partition_consumer(fake, "g", "t", 0, _HJ, _PH)
+    assert ib is None and status == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_consume_reads_per_partition_finds_worker_message(monkeypatch):
+    """★ הרגרסיה המרכזית: 6 partitions (configured), ה-Worker כתב *רק* ל-partition 5.
+    consumer-per-partition קורא את p5 ומוצא את המסר (ה-multi-partition fetch של ה-proxy
+    החזיר רק p1 ופספס אותו). רק ה-consumer של p5 מחזיר את מסר ה-Worker."""
+    monkeypatch.setattr(_settings, "KAFKA_TARGET_PARTITIONS", 6)
+
+    worker_rec = {"key": _b64("child_development::0::555"),
+                  "value": _b64('{"header":{"mac_sys_name":"encryption_child_development_worker"},'
+                                 '"entity_type":"child_development"}'),
+                  "offset": 395507, "partition": 5, "timestamp": 5000}
+
+    def _inst(url):
+        return url.split("/instances/")[1].split("/")[0] if "/instances/" in url else None
+
+    class _PerPartFake(_FakeProxyClient):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self._by_instance = {}   # instance_name → assigned partitions
+
+        async def post(self, url, json=None, **kw):
+            if url.endswith("/assignments"):
+                self._by_instance[_inst(url)] = [p["partition"] for p in (json or {}).get("partitions", [])]
+            return await super().post(url, json=json, **kw)
+
+        async def get(self, url, **kw):
+            self.calls.append(("GET", url))
+            if url.endswith("/records"):
+                # רק ה-consumer המוקצה ל-partition 5 מחזיר את מסר ה-Worker
+                if self._by_instance.get(_inst(url)) == [5]:
+                    return _FakeResp(200, [worker_rec])
+                return _FakeResp(200, [])
+            return _FakeResp(200, {})
+
+    fake = _PerPartFake(existing={0, 1, 2, 3, 4, 5})
+
+    class _CM:   # מחליף את httpx.AsyncClient(...) ב-consume
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return fake
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr("agents.runner.kafka_rest_client.httpx.AsyncClient", _CM)
+
+    rich = await _rest_client().consume(
+        "t", {"entity_type": "child_development"}, timeout_seconds=2, group="g",
+        key_contains="555", on_ready=None, skew_ms=0)
+    assert rich.get("matched") is not None
+    assert rich["matched"]["partition"] == 5
+    assert rich["assign"]["n_partitions"] == 6

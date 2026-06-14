@@ -101,90 +101,97 @@ class KafkaRestClient:
         on_ready=None,
         skew_ms: int = 0,
     ) -> Optional[Dict[str, Any]]:
-        """יוצר consumer, נרשם, עושה seek-to-end (אם warm-up), ואז polling עד match/timeout.
+        """★ consumer *נפרד לכל partition* (לא consumer יחיד עם multi-partition assign!).
 
-        on_ready — async callable שמורץ **אחרי** ה-subscribe + seek-to-end (כאן ה-caller מפרסם),
-          ומחזיר את ה-publish timestamp (ms). אז מסננים רק רשומות עם timestamp >= publish_ts - skew_ms
-          (מונע לתפוס מסר ישן מ-TC קודם).
+        למה: ה-multi-partition fetch של ה-REST Proxy החזיר בפועל רק partition אחד (verifyhub),
+        ופספס את ה-partition שעליו ה-Worker כותב (נצפה: assignment של 6 partitions אבל
+        'partitions עם תעבורה: [1]'). consumer single-partition קורא בוודאות את ה-partition שלו,
+        וה-verifyhub flood מבודד. כל consumer עושה seek-to-end לפני ה-publish; ה-poll סורק את כולם.
 
-        מחזיר dict עשיר: {matched, candidates} / {fatal_error} / {rest_consumer_unavailable}.
+        on_ready — async callable שמורץ **אחרי** seek-to-end של כל ה-consumers (כאן ה-caller
+          מפרסם), ומחזיר publish timestamp (ms). מסננים רשומות עם timestamp >= publish_ts - skew_ms.
+
+        מחזיר dict עשיר: {matched, candidates, assign} / {fatal_error} / {rest_consumer_unavailable}.
         """
-        instance_name = f"qa-{uuid.uuid4().hex[:8]}"
         headers_json = {"Content-Type": _V2_ACCEPT}
+        poll_headers = {"Accept": _BINARY_ACCEPT}
+        candidates: List[Dict[str, Any]] = []
 
         async with httpx.AsyncClient(verify=self.verify_ssl, timeout=30.0) as client:
-            create_url = f"{self.base}/consumers/{group}"
-            create_body = {
-                "name": instance_name,
-                "format": "binary",
-                "auto.offset.reset": "latest",
-                "auto.commit.enable": "false",
-            }
-            try:
-                r = await client.post(create_url, headers=headers_json, json=create_body, auth=self.auth)
-            except httpx.HTTPError as e:
-                return {"fatal_error": f"REST consumer create transport error: {e}"}
-            if _consumer_unavailable(r.status_code):
-                return {"rest_consumer_unavailable": True, "detail": f"HTTP {r.status_code} on create"}
-            if r.status_code >= 400:
-                return {"fatal_error": f"HTTP {r.status_code} on consumer create: {r.text[:200]}"}
+            # 1. אילו partitions לקרוא (configured / describe / probe)
+            part_nums, mode, reason = await self._candidate_partitions(client, topic, headers_json)
+            base_assign = {"mode": mode, "n_partitions": 0, "parts": [], "reason": reason}
+            if not part_nums:
+                return {"fatal_error": f"no candidate partitions ({reason})", "assign": base_assign}
 
-            instance_base = f"{self.base}/consumers/{group}/instances/{instance_name}"
-            records_url = f"{instance_base}/records"
-            poll_headers = {"Accept": _BINARY_ACCEPT}
-            candidates: List[Dict[str, Any]] = []
-            try:
-                # ★ manual assign של *כל* ה-partitions (לעולם לא subscribe!) — חיוני.
-                # ה-group הקבוע משותף עם ה-Worker, אז subscribe נותן רק חלק מה-partitions
-                # (rebalancing) ומפספס את ה-partition שעליו נכתב המסר שלנו. _discover_partitions
-                # מאמת קיום partition דרך records-fetch אמיתי (seek-to-end לבדו משקר — ה-proxy
-                # מחזיר 200 גם ל-partition לא-קיים), כדי לא לזהם את ה-assignment ב-partitions
-                # פנטום ששוברים את ה-fetch של librdkafka. כיסוי מלא ללא תלות ב-group/Describe ACL.
-                assign_info = await self._discover_partitions(
-                    client, instance_base, topic, headers_json, poll_headers)
-                log.info("kafka_rest_assigned_all", topic=topic,
-                         mode=assign_info.get("mode"), partitions=assign_info.get("n_partitions"))
-                if assign_info.get("n_partitions", 0) <= 0:
-                    # אין כיסוי — עדיף fatal_error ברור מ-subscribe חלקי שמטעה
-                    return {"fatal_error": "partition assignment failed — no coverage "
-                                           f"({assign_info.get('reason', 'unknown')})",
-                            "assign": assign_info}
+            # 2. consumer ייעודי לכל partition. _open_partition_consumer מאמת קיום דרך
+            #    records-fetch ומשמיט partitions פנטום (probe / configured גדול-מדי).
+            consumers: List[tuple] = []   # (instance_base, partition)
+            unavailable = False
+            for p in part_nums:
+                ib, status = await self._open_partition_consumer(
+                    client, group, topic, p, headers_json, poll_headers)
+                if status == "unavailable":
+                    unavailable = True
+                    break
+                if ib is not None:
+                    consumers.append((ib, p))
 
-                # ★ ה-publish קורה כאן — אחרי seek-to-end על כל ה-partitions
+            try:
+                if unavailable:
+                    return {"rest_consumer_unavailable": True, "detail": "consumer API לא זמין"}
+                if not consumers:
+                    return {"fatal_error": f"no readable partitions ({reason})", "assign": base_assign}
+
+                assign_info = {"mode": mode, "n_partitions": len(consumers), "reason": reason,
+                               "parts": [{"topic": topic, "partition": p} for _, p in consumers]}
+                log.info("kafka_rest_per_partition_consumers", topic=topic, mode=mode, n=len(consumers))
+
+                # 3. seek-to-end על כל ה-consumers *ממש לפני* ה-publish (מיקום אחיד לסוף)
+                for ib, p in consumers:
+                    try:
+                        await client.post(f"{ib}/positions/end", headers=headers_json,
+                                          json={"partitions": [{"topic": topic, "partition": p}]},
+                                          auth=self.auth)
+                    except httpx.HTTPError:
+                        pass
+
+                # 4. publish (on_ready) + timestamp filter
                 min_timestamp_ms = 0
                 if on_ready is not None:
                     pub_ts = await on_ready()
                     if isinstance(pub_ts, int) and pub_ts > 0:
                         min_timestamp_ms = pub_ts - skew_ms
 
-                # poll loop — אוסף candidates + מחפש התאמה (עם timestamp filter)
+                # 5. poll loop — סורק את *כל* ה-consumers בכל סיבוב; early-return ב-match
                 deadline = time.monotonic() + timeout_seconds
                 while time.monotonic() < deadline:
-                    try:
-                        rr = await client.get(records_url, headers=poll_headers,
-                                              params={"timeout": 1000}, auth=self.auth)
-                    except httpx.HTTPError as e:
-                        log.warning("kafka_rest_poll_transport_error", error=str(e))
-                        continue
-                    if rr.status_code >= 400:
-                        return {"fatal_error": f"HTTP {rr.status_code} on records: {rr.text[:200]}"}
-                    try:
-                        records = rr.json()
-                    except Exception:
-                        records = []
-                    matched = _scan_records(records, topic, match, candidates,
-                                            key_equals=key_equals, key_contains=key_contains,
-                                            min_timestamp_ms=min_timestamp_ms)
-                    if matched is not None:
-                        log.info("kafka_rest_consumed", topic=topic, offset=matched.get("offset"),
-                                 candidates_seen=len(candidates))
-                        return {"matched": matched, "candidates": candidates, "assign": assign_info}
+                    for ib, p in consumers:
+                        try:
+                            rr = await client.get(f"{ib}/records", headers=poll_headers,
+                                                  params={"timeout": 500}, auth=self.auth)
+                        except httpx.HTTPError as e:
+                            log.warning("kafka_rest_poll_transport_error", error=str(e))
+                            continue
+                        if rr.status_code >= 400:
+                            continue   # partition בודד נכשל — לא מפיל את כל ה-wait
+                        try:
+                            records = rr.json()
+                        except Exception:
+                            records = []
+                        matched = _scan_records(records, topic, match, candidates,
+                                                key_equals=key_equals, key_contains=key_contains,
+                                                min_timestamp_ms=min_timestamp_ms)
+                        if matched is not None:
+                            log.info("kafka_rest_consumed", topic=topic, offset=matched.get("offset"),
+                                     partition=matched.get("partition"), candidates_seen=len(candidates))
+                            return {"matched": matched, "candidates": candidates, "assign": assign_info}
+                        if time.monotonic() >= deadline:
+                            break
                 return {"matched": None, "candidates": candidates, "assign": assign_info}
             finally:
-                try:
-                    await client.delete(instance_base, headers={"Content-Type": _V2_ACCEPT}, auth=self.auth)
-                except Exception as e:
-                    log.warning("kafka_rest_consumer_delete_failed", error=str(e))
+                for ib, _p in consumers:
+                    await self._safe_delete(client, ib)
 
     # ============================================================
     # Partition discovery — manual assign של *כל* ה-partitions, ללא Describe ACL
@@ -220,74 +227,54 @@ class KafkaRestClient:
         mx = max(1, int(settings.KAFKA_PARTITION_PROBE_MAX or 16))
         return list(range(mx)), "probe", f"{describe_reason}; probing 0..{mx - 1}"
 
-    async def _assign_and_seek(self, client, instance_base: str, topic: str,
-                               partitions: List[int], headers_json: Dict[str, str]) -> bool:
-        """assign של partitions נתון + seek-to-end. True רק אם *שתי* הקריאות הצליחו."""
-        parts = [{"topic": topic, "partition": p} for p in partitions]
-        asg = await client.post(f"{instance_base}/assignments",
-                                headers=headers_json, json={"partitions": parts}, auth=self.auth)
-        if asg.status_code >= 400:
-            return False
-        sk = await client.post(f"{instance_base}/positions/end",
-                               headers=headers_json, json={"partitions": parts}, auth=self.auth)
-        return sk.status_code < 400
-
-    async def _validate_individually(self, client, instance_base: str, topic: str,
-                                     candidates: List[int], headers_json: Dict[str, str],
-                                     poll_headers: Dict[str, str]) -> List[int]:
-        """מאמת כל partition בנפרד דרך records-fetch אמיתי. partition לא-קיים → ה-broker
-        מחזיר UNKNOWN_PARTITION (4xx/5xx) ונשמט. seek-to-end לבדו לא מספיק — ה-proxy מחזיר
-        200 גם ל-partition פנטום, וזיהומו ל-assignment שובר את ה-fetch של librdkafka.
-
-        רץ *לפני* ה-publish → אין side-effect על מסר ה-Worker (עדיין לא הופק). כל מסר verifyhub
-        שייקרא כאן מתאפס ע"י ה-seek-to-end הסופי שב-_discover_partitions לפני ה-publish."""
-        valid: List[int] = []
-        records_url = f"{instance_base}/records"
-        for p in candidates:
-            try:
-                if not await self._assign_and_seek(client, instance_base, topic, [p], headers_json):
-                    continue
-                rr = await client.get(records_url, headers=poll_headers,
-                                      params={"timeout": _PROBE_FETCH_TIMEOUT_MS}, auth=self.auth)
-                if rr.status_code >= 400:
-                    continue
-            except httpx.HTTPError:
-                continue
-            valid.append(p)
-        return valid
-
-    async def _discover_partitions(self, client, instance_base: str, topic: str,
-                                   headers_json: Dict[str, str],
-                                   poll_headers: Dict[str, str]) -> Dict[str, Any]:
-        """מגלה ומאמת את כל ה-partitions של topic, מבצע manual assign + seek-to-end על כולם.
-        מחזיר {mode, n_partitions, parts, reason}. n_partitions==0 → כשל (ה-caller יחזיר fatal_error).
-        לעולם לא נופל ל-subscribe (שייתן כיסוי חלקי על ה-group המשותף עם ה-Worker)."""
-        candidates, mode, reason = await self._candidate_partitions(client, topic, headers_json)
-        if not candidates:
-            return {"mode": mode, "n_partitions": 0, "parts": [], "reason": reason}
-
-        if mode == "describe":
-            # רשימה אמיתית ממטא-דאטה — בוטחים בה (אין partitions פנטום).
-            valid = candidates
-        else:
-            # configured/probe — מאמתים כל partition דרך records-fetch כדי לא לזהם את
-            # ה-assignment ב-partitions פנטום (גם configured גדול-מדי מתנקה כך לאמיתי).
-            valid = await self._validate_individually(
-                client, instance_base, topic, candidates, headers_json, poll_headers)
-
-        if not valid:
-            return {"mode": mode, "n_partitions": 0, "parts": [],
-                    "reason": f"{reason}; לא נמצא אף partition תקף (records-fetch נכשל לכולם)"}
-
-        # ★ assignment סופי נקי + seek-to-end רק על ה-partitions התקפים (ממש לפני ה-publish)
-        final_parts = [{"topic": topic, "partition": p} for p in valid]
+    async def _open_partition_consumer(self, client, group: str, topic: str, p: int,
+                                       headers_json: Dict[str, str], poll_headers: Dict[str, str]):
+        """יוצר consumer ייעודי ל-partition *יחיד*, מקצה ומאמת קיום דרך records-fetch.
+        מחזיר (instance_base, status):
+          - (instance_base, None) → consumer מוכן לקריאה.
+          - (None, 'unavailable')  → ה-consumer API כבוי (404/501 על create).
+          - (None, None)           → partition לא-קיים (broker UNKNOWN_PARTITION) או כשל; נמחק."""
+        instance_name = f"qa-{uuid.uuid4().hex[:8]}"
+        create_body = {"name": instance_name, "format": "binary",
+                       "auto.offset.reset": "latest", "auto.commit.enable": "false"}
         try:
-            ok = await self._assign_and_seek(client, instance_base, topic, valid, headers_json)
-        except httpx.HTTPError as e:
-            return {"mode": mode, "n_partitions": 0, "parts": [], "reason": f"{reason}; final assign error: {e}"}
-        if not ok:
-            return {"mode": mode, "n_partitions": 0, "parts": [], "reason": f"{reason}; final assign/seek נכשל"}
-        return {"mode": mode, "n_partitions": len(valid), "parts": final_parts, "reason": reason}
+            r = await client.post(f"{self.base}/consumers/{group}", headers=headers_json,
+                                  json=create_body, auth=self.auth)
+        except httpx.HTTPError:
+            return None, None
+        if _consumer_unavailable(r.status_code):
+            return None, "unavailable"
+        if r.status_code >= 400:
+            return None, None
+
+        instance_base = f"{self.base}/consumers/{group}/instances/{instance_name}"
+        parts = [{"topic": topic, "partition": p}]
+        try:
+            asg = await client.post(f"{instance_base}/assignments",
+                                    headers=headers_json, json={"partitions": parts}, auth=self.auth)
+            if asg.status_code >= 400:
+                await self._safe_delete(client, instance_base)
+                return None, None
+            # seek-to-end ואז records-fetch: partition פנטום → ה-broker מחזיר UNKNOWN_PARTITION (4xx/5xx).
+            # seek-to-end לבדו משקר (200 גם לפנטום), לכן ה-fetch הוא אות הקיום האמיתי.
+            await client.post(f"{instance_base}/positions/end",
+                              headers=headers_json, json={"partitions": parts}, auth=self.auth)
+            rr = await client.get(f"{instance_base}/records", headers=poll_headers,
+                                  params={"timeout": _PROBE_FETCH_TIMEOUT_MS}, auth=self.auth)
+            if rr.status_code >= 400:
+                await self._safe_delete(client, instance_base)
+                return None, None
+        except httpx.HTTPError:
+            await self._safe_delete(client, instance_base)
+            return None, None
+        return instance_base, None
+
+    async def _safe_delete(self, client, instance_base: str) -> None:
+        """מוחק consumer instance, בולע שגיאות (cleanup best-effort)."""
+        try:
+            await client.delete(instance_base, headers={"Content-Type": _V2_ACCEPT}, auth=self.auth)
+        except Exception as e:
+            log.warning("kafka_rest_consumer_delete_failed", error=str(e))
 
 
 # ============================================================

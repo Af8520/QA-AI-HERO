@@ -354,9 +354,9 @@ class DotNetRunner:
                 n_parts = asg.get("n_partitions", 0)
                 mode = asg.get("mode", "?")
                 if n_parts > 0:
-                    # describe / configured / probe — כולם manual assign = כיסוי מלא
+                    # describe / configured / probe — consumer נפרד לכל partition = כיסוי מלא
                     self._log("CONSUME", "info",
-                              f"assignment: {mode} — {n_parts} partitions (כיסוי מלא, manual assign)")
+                              f"assignment: {mode} — {n_parts} partitions (כיסוי מלא, consumer לכל partition)")
                 else:
                     self._log("CONSUME", "error",
                               f"assignment: {mode} — נכשל ({asg.get('reason', '')})")
