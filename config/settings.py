@@ -66,6 +66,15 @@ class Settings(BaseSettings):
     KAFKA_REST_PROXY_URL: Optional[str] = None            # "https://cnf-cnct01-test:8082"
     KAFKA_REST_USERNAME: Optional[str] = None             # ריק → fallback ל-KAFKA_SASL_USERNAME
     KAFKA_REST_PASSWORD: Optional[str] = None             # ריק → fallback ל-KAFKA_SASL_PASSWORD
+    # ★ כיסוי partitions ב-consume: ה-group משותף עם ה-Worker, אז subscribe נותן רק חלק
+    # מה-partitions (rebalance) ומפספס את המסר. הפתרון: manual assign של *כל* ה-partitions.
+    # כש-GET /topics חסום (אין Describe ACL) אי-אפשר לגלות כמה partitions יש — לכן probe:
+    # מאמתים 0..PROBE_MAX-1 ושומרים רק את התקפים (seek-to-end per-partition). מגלה את
+    # המספר האמיתי לבד, בלי תלות ב-ACL או בספירה ידנית.
+    KAFKA_PARTITION_PROBE_MAX: int = 16
+    # ★ override אופציונלי: אם ידוע מספר ה-partitions של ה-target — מאמתים 0..N-1 ישירות
+    # (מדלג על ה-probe). ריק → probe אוטומטי (ברירת מחדל מומלצת כשהמספר לא ודאי).
+    KAFKA_TARGET_PARTITIONS: Optional[int] = None
 
     # .NET department — Couchbase (direct via couchbase SDK)
     COUCHBASE_CONNECTION_STRING: Optional[str] = None     # "couchbase://node1" / "couchbases://..."

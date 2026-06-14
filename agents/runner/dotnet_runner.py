@@ -351,9 +351,15 @@ class DotNetRunner:
                 candidates = rich.get("candidates", []) or []
                 observed = rich.get("matched")
                 asg = rich.get("assign") or {}
-                self._log("CONSUME", "info" if asg.get("mode") == "manual" else "warn",
-                          f"assignment: {asg.get('mode', '?')} — {asg.get('n_partitions', 0)} partitions "
-                          + ("(כיסוי מלא)" if asg.get("mode") == "manual" else "(subscribe — כיסוי חלקי!)"))
+                n_parts = asg.get("n_partitions", 0)
+                mode = asg.get("mode", "?")
+                if n_parts > 0:
+                    # describe / configured / probe — כולם manual assign = כיסוי מלא
+                    self._log("CONSUME", "info",
+                              f"assignment: {mode} — {n_parts} partitions (כיסוי מלא, manual assign)")
+                else:
+                    self._log("CONSUME", "error",
+                              f"assignment: {mode} — נכשל ({asg.get('reason', '')})")
         else:
             try:
                 from confluent_kafka import Consumer  # type: ignore[import-not-found]

@@ -130,51 +130,22 @@ class KafkaRestClient:
             records_url = f"{instance_base}/records"
             poll_headers = {"Accept": _BINARY_ACCEPT}
             candidates: List[Dict[str, Any]] = []
-            assign_info = {"mode": "subscribe", "n_partitions": 0}
             try:
-                # ★ manual assign של *כל* ה-partitions (במקום subscribe) — חיוני!
+                # ★ manual assign של *כל* ה-partitions (לעולם לא subscribe!) — חיוני.
                 # ה-group הקבוע משותף עם ה-Worker, אז subscribe נותן רק חלק מה-partitions
-                # (rebalancing) ומפספס את ה-partition שעליו נכתב המסר שלנו. manual assign
-                # נותן כיסוי מלא, ללא תלות בחלוקת ה-group.
-                assigned = False
-                try:
-                    tmeta = await client.get(f"{self.base}/topics/{topic}", headers=headers_json, auth=self.auth)
-                    if tmeta.status_code < 400:
-                        part_nums = [p.get("partition") for p in (tmeta.json() or {}).get("partitions") or []]
-                        parts = [{"topic": topic, "partition": p} for p in part_nums if p is not None]
-                        if parts:
-                            asg = await client.post(f"{instance_base}/assignments",
-                                                    headers=headers_json, json={"partitions": parts}, auth=self.auth)
-                            if asg.status_code < 400:
-                                # seek-to-end על כל ה-partitions (חסין offset committed ישן)
-                                await client.post(f"{instance_base}/positions/end",
-                                                  headers=headers_json, json={"partitions": parts}, auth=self.auth)
-                                assigned = True
-                                assign_info = {"mode": "manual", "n_partitions": len(parts)}
-                                log.info("kafka_rest_assigned_all", topic=topic, partitions=len(parts))
-                except httpx.HTTPError as e:
-                    log.warning("kafka_rest_manual_assign_failed", error=str(e))
+                # (rebalancing) ומפספס את ה-partition שעליו נכתב המסר שלנו. _discover_partitions
+                # עוקף את היעדר ה-Describe ACL ע"י probe (0..MAX) + seek-to-end per-partition,
+                # ומגלה את מספר ה-partitions האמיתי בעצמו → כיסוי מלא ללא תלות ב-group.
+                assign_info = await self._discover_partitions(client, instance_base, topic, headers_json)
+                log.info("kafka_rest_assigned_all", topic=topic,
+                         mode=assign_info.get("mode"), partitions=assign_info.get("n_partitions"))
+                if assign_info.get("n_partitions", 0) <= 0:
+                    # אין כיסוי — עדיף fatal_error ברור מ-subscribe חלקי שמטעה
+                    return {"fatal_error": "partition assignment failed — no coverage "
+                                           f"({assign_info.get('reason', 'unknown')})",
+                            "assign": assign_info}
 
-                # fallback: subscribe + seek-to-end (אם manual assign לא עבד — למשל אין Describe ACL)
-                if not assigned:
-                    log.warning("kafka_rest_fallback_subscribe", topic=topic)
-                    rs = await client.post(f"{instance_base}/subscription", headers=headers_json,
-                                           json={"topics": [topic]}, auth=self.auth)
-                    if rs.status_code >= 400:
-                        return {"fatal_error": f"HTTP {rs.status_code} on subscribe: {rs.text[:200]}"}
-                    try:
-                        await client.get(records_url, headers=poll_headers, params={"timeout": 500}, auth=self.auth)
-                        asg = await client.get(f"{instance_base}/assignments", headers=headers_json, auth=self.auth)
-                        if asg.status_code < 400:
-                            parts = (asg.json() or {}).get("partitions") or []
-                            assign_info = {"mode": "subscribe", "n_partitions": len(parts)}
-                            if parts:
-                                await client.post(f"{instance_base}/positions/end",
-                                                  headers=headers_json, json={"partitions": parts}, auth=self.auth)
-                    except httpx.HTTPError as e:
-                        log.warning("kafka_rest_seek_end_failed", error=str(e))
-
-                # ★ ה-publish קורה כאן — אחרי שאנחנו ממוקמים על סוף ה-topic
+                # ★ ה-publish קורה כאן — אחרי seek-to-end על כל ה-partitions
                 min_timestamp_ms = 0
                 if on_ready is not None:
                     pub_ts = await on_ready()
@@ -209,6 +180,101 @@ class KafkaRestClient:
                     await client.delete(instance_base, headers={"Content-Type": _V2_ACCEPT}, auth=self.auth)
                 except Exception as e:
                     log.warning("kafka_rest_consumer_delete_failed", error=str(e))
+
+    # ============================================================
+    # Partition discovery — manual assign של *כל* ה-partitions, ללא Describe ACL
+    # ============================================================
+
+    async def _candidate_partitions(self, client, topic: str, headers_json: Dict[str, str]):
+        """מחזיר (partition_numbers, mode, reason) — קבוצת מועמדים לפני אימות קיום.
+
+        סדר עדיפויות:
+          1. KAFKA_TARGET_PARTITIONS (override ידוע) → 0..N-1.
+          2. Describe (GET /topics) → רשימה אמיתית (עובד רק עם ACL — במכבי חסום).
+          3. Probe (ברירת מחדל) → 0..PROBE_MAX-1; ה-seek-to-end per-partition יסנן לא-קיימים.
+        """
+        cfg = settings.KAFKA_TARGET_PARTITIONS
+        if cfg and int(cfg) > 0:
+            n = int(cfg)
+            return list(range(n)), "configured", f"KAFKA_TARGET_PARTITIONS={n}"
+
+        describe_reason = "describe skipped"
+        try:
+            tmeta = await client.get(f"{self.base}/topics/{topic}", headers=headers_json, auth=self.auth)
+            if tmeta.status_code < 400:
+                nums = [p.get("partition") for p in (tmeta.json() or {}).get("partitions") or []]
+                nums = sorted({p for p in nums if p is not None})
+                if nums:
+                    return nums, "describe", "GET /topics ok"
+                describe_reason = "GET /topics החזיר 0 partitions"
+            else:
+                describe_reason = f"GET /topics HTTP {tmeta.status_code} (אין Describe ACL?)"
+        except httpx.HTTPError as e:
+            describe_reason = f"GET /topics transport error: {e}"
+
+        mx = max(1, int(settings.KAFKA_PARTITION_PROBE_MAX or 16))
+        return list(range(mx)), "probe", f"{describe_reason}; probing 0..{mx - 1}"
+
+    async def _assign_and_seek(self, client, instance_base: str, topic: str,
+                               partitions: List[int], headers_json: Dict[str, str]) -> bool:
+        """assign של partitions נתון + seek-to-end. True רק אם *שתי* הקריאות הצליחו."""
+        parts = [{"topic": topic, "partition": p} for p in partitions]
+        asg = await client.post(f"{instance_base}/assignments",
+                                headers=headers_json, json={"partitions": parts}, auth=self.auth)
+        if asg.status_code >= 400:
+            return False
+        sk = await client.post(f"{instance_base}/positions/end",
+                               headers=headers_json, json={"partitions": parts}, auth=self.auth)
+        return sk.status_code < 400
+
+    async def _validate_individually(self, client, instance_base: str, topic: str,
+                                     candidates: List[int], headers_json: Dict[str, str]) -> List[int]:
+        """מאמת כל partition בנפרד (assign+seek). partition לא-קיים נכשל ונשמט.
+        כך מתגלה מספר ה-partitions האמיתי בלי Describe ACL."""
+        valid: List[int] = []
+        for p in candidates:
+            try:
+                ok = await self._assign_and_seek(client, instance_base, topic, [p], headers_json)
+            except httpx.HTTPError:
+                ok = False
+            if ok:
+                valid.append(p)
+        return valid
+
+    async def _discover_partitions(self, client, instance_base: str, topic: str,
+                                   headers_json: Dict[str, str]) -> Dict[str, Any]:
+        """מגלה ומאמת את כל ה-partitions של topic, מבצע manual assign + seek-to-end על כולם.
+        מחזיר {mode, n_partitions, parts, reason}. n_partitions==0 → כשל (ה-caller יחזיר fatal_error).
+        לעולם לא נופל ל-subscribe (שייתן כיסוי חלקי על ה-group המשותף עם ה-Worker)."""
+        candidates, mode, reason = await self._candidate_partitions(client, topic, headers_json)
+        if not candidates:
+            return {"mode": mode, "n_partitions": 0, "parts": [], "reason": reason}
+
+        if mode == "probe":
+            valid = await self._validate_individually(client, instance_base, topic, candidates, headers_json)
+        else:
+            # describe/configured — בוטחים בקבוצה, אבל מאמתים ב-batch assign+seek;
+            # אם נכשל (למשל המספר המוגדר גדול מהאמיתי) → נופלים לאימות per-partition.
+            try:
+                ok = await self._assign_and_seek(client, instance_base, topic, candidates, headers_json)
+            except httpx.HTTPError:
+                ok = False
+            valid = candidates if ok else \
+                await self._validate_individually(client, instance_base, topic, candidates, headers_json)
+
+        if not valid:
+            return {"mode": mode, "n_partitions": 0, "parts": [],
+                    "reason": f"{reason}; לא נמצא אף partition תקף"}
+
+        # ★ assignment סופי נקי + seek-to-end רק על ה-partitions התקפים (ממש לפני ה-publish)
+        final_parts = [{"topic": topic, "partition": p} for p in valid]
+        try:
+            ok = await self._assign_and_seek(client, instance_base, topic, valid, headers_json)
+        except httpx.HTTPError as e:
+            return {"mode": mode, "n_partitions": 0, "parts": [], "reason": f"{reason}; final assign error: {e}"}
+        if not ok:
+            return {"mode": mode, "n_partitions": 0, "parts": [], "reason": f"{reason}; final assign/seek נכשל"}
+        return {"mode": mode, "n_partitions": len(valid), "parts": final_parts, "reason": reason}
 
 
 # ============================================================

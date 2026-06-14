@@ -8,6 +8,7 @@ import base64
 import json
 
 from agents.runner.kafka_rest_client import (
+    KafkaRestClient,
     _consumer_unavailable,
     _decode_binary_record,
     _parse_produce_response,
@@ -15,6 +16,7 @@ from agents.runner.kafka_rest_client import (
     _scan_records,
 )
 from agents.runner.dotnet_runner import _extract_sys_name, _normalize_topic, _tc_key
+from config.settings import settings as _settings
 
 
 def _b64(s):
@@ -269,3 +271,126 @@ def test_extract_sys_name():
     assert _extract_sys_name({"mac_sys_name": "top-level"}) == "top-level"
     assert _extract_sys_name({"no": "sysname"}) == "?"
     assert _extract_sys_name("not a dict") == "?"
+
+
+# ============================================================
+# Partition discovery — manual assign של *כל* ה-partitions ללא Describe ACL.
+# זה הליבה של תיקון "no matching message": ה-group משותף עם ה-Worker, subscribe
+# נתן כיסוי חלקי ופספס את ה-partition של המסר. ה-probe מגלה את כל ה-partitions.
+# ============================================================
+
+class _FakeResp:
+    def __init__(self, status_code=200, payload=None, text=""):
+        self.status_code = status_code
+        self._payload = payload if payload is not None else {}
+        self.text = text
+
+    def json(self):
+        return self._payload
+
+
+class _FakeProxyClient:
+    """httpx-like fake ל-REST Proxy:
+      - GET /topics/{t}        → describe (status/partitions ניתנים לשליטה)
+      - POST /assignments      → תמיד 200 (ה-proxy מקבל assignment ללא ולידציה)
+      - POST /positions/end    → 200 רק אם *כל* ה-partitions בבקשה קיימים, אחרת 404
+    כך partition לא-קיים "נכשל" ב-seek ומסונן — בדיוק כמו ה-proxy האמיתי."""
+
+    def __init__(self, existing, describe_status=403, describe_partitions=None):
+        self.existing = set(existing)
+        self.describe_status = describe_status
+        self.describe_partitions = describe_partitions
+        self.calls = []
+
+    async def get(self, url, **kw):
+        self.calls.append(("GET", url))
+        if "/topics/" in url and "/instances/" not in url:
+            if self.describe_status < 400:
+                parts = [{"partition": p} for p in (self.describe_partitions or [])]
+                return _FakeResp(200, {"partitions": parts})
+            return _FakeResp(self.describe_status, {}, "forbidden")
+        return _FakeResp(200, {})
+
+    async def post(self, url, json=None, **kw):
+        self.calls.append(("POST", url, json))
+        if url.endswith("/positions/end"):
+            reqs = [p["partition"] for p in (json or {}).get("partitions", [])]
+            ok = bool(reqs) and all(p in self.existing for p in reqs)
+            return _FakeResp(200 if ok else 404, {}, "" if ok else "unknown partition")
+        if url.endswith("/assignments"):
+            return _FakeResp(200, {})
+        return _FakeResp(200, {})
+
+
+_INST = "http://proxy/consumers/g/instances/i"
+_HJ = {"Content-Type": "x"}
+
+
+def _rest_client():
+    return KafkaRestClient(base_url="http://proxy", auth=("u", "p"), verify_ssl=False)
+
+
+@pytest.mark.asyncio
+async def test_candidate_partitions_configured_override(monkeypatch):
+    monkeypatch.setattr(_settings, "KAFKA_TARGET_PARTITIONS", 5)
+    fake = _FakeProxyClient(existing={0, 1, 2, 3, 4})
+    nums, mode, _reason = await _rest_client()._candidate_partitions(fake, "t", _HJ)
+    assert mode == "configured"
+    assert nums == [0, 1, 2, 3, 4]
+    assert not any(c[0] == "GET" for c in fake.calls)   # override → לא קוראים ל-GET /topics
+
+
+@pytest.mark.asyncio
+async def test_candidate_partitions_describe_ok(monkeypatch):
+    monkeypatch.setattr(_settings, "KAFKA_TARGET_PARTITIONS", None)
+    fake = _FakeProxyClient(existing={0, 1, 2}, describe_status=200, describe_partitions=[2, 0, 1])
+    nums, mode, _reason = await _rest_client()._candidate_partitions(fake, "t", _HJ)
+    assert mode == "describe"
+    assert nums == [0, 1, 2]   # ממוין
+
+
+@pytest.mark.asyncio
+async def test_candidate_partitions_falls_back_to_probe(monkeypatch):
+    monkeypatch.setattr(_settings, "KAFKA_TARGET_PARTITIONS", None)
+    monkeypatch.setattr(_settings, "KAFKA_PARTITION_PROBE_MAX", 16)
+    fake = _FakeProxyClient(existing={0, 1, 2, 3, 4, 5}, describe_status=403)
+    nums, mode, reason = await _rest_client()._candidate_partitions(fake, "t", _HJ)
+    assert mode == "probe"
+    assert nums == list(range(16))
+    assert "403" in reason
+
+
+@pytest.mark.asyncio
+async def test_discover_probe_finds_real_count_without_describe(monkeypatch):
+    """★ התרחיש האמיתי במכבי: אין Describe ACL, ה-topic בעל 6 partitions (0..5).
+    ה-probe מגלה אותם לבד למרות PROBE_MAX=16 → כיסוי מלא (כולל partition 5)."""
+    monkeypatch.setattr(_settings, "KAFKA_TARGET_PARTITIONS", None)
+    monkeypatch.setattr(_settings, "KAFKA_PARTITION_PROBE_MAX", 16)
+    fake = _FakeProxyClient(existing={0, 1, 2, 3, 4, 5}, describe_status=403)
+    info = await _rest_client()._discover_partitions(fake, _INST, "t", _HJ)
+    assert info["mode"] == "probe"
+    assert info["n_partitions"] == 6
+    assert [p["partition"] for p in info["parts"]] == [0, 1, 2, 3, 4, 5]
+
+
+@pytest.mark.asyncio
+async def test_discover_configured_too_large_self_corrects(monkeypatch):
+    """המשתמש אמר 8 אבל קיימים רק 0..4 → batch seek נכשל → per-partition מסנן ל-5.
+    מבטיח שספירה ידנית שגויה לא שוברת כיסוי."""
+    monkeypatch.setattr(_settings, "KAFKA_TARGET_PARTITIONS", 8)
+    fake = _FakeProxyClient(existing={0, 1, 2, 3, 4})
+    info = await _rest_client()._discover_partitions(fake, _INST, "t", _HJ)
+    assert info["mode"] == "configured"
+    assert info["n_partitions"] == 5
+    assert [p["partition"] for p in info["parts"]] == [0, 1, 2, 3, 4]
+
+
+@pytest.mark.asyncio
+async def test_discover_no_partitions_fails_cleanly(monkeypatch):
+    """אף partition לא קיים → n_partitions=0 (ה-caller יחזיר fatal_error, *לא* subscribe חלקי)."""
+    monkeypatch.setattr(_settings, "KAFKA_TARGET_PARTITIONS", None)
+    monkeypatch.setattr(_settings, "KAFKA_PARTITION_PROBE_MAX", 4)
+    fake = _FakeProxyClient(existing=set(), describe_status=403)
+    info = await _rest_client()._discover_partitions(fake, _INST, "t", _HJ)
+    assert info["n_partitions"] == 0
+    assert info["parts"] == []
