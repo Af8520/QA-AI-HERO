@@ -258,18 +258,36 @@ def _scan_records(
     return matched
 
 
-def _get_path(d: Any, path: str) -> Any:
-    """מחלץ ערך לפי dotted path: 'header.mac_correlation_id'. מחזיר sentinel אם לא קיים."""
+_MISSING = object()
+
+
+def _get_path_raw(d: Any, path: str) -> Any:
     cur = d
     for part in path.split("."):
         if isinstance(cur, dict) and part in cur:
             cur = cur[part]
+        elif isinstance(cur, list):
+            try:
+                idx = int(part)
+            except ValueError:
+                return _MISSING
+            if -len(cur) <= idx < len(cur):
+                cur = cur[idx]
+            else:
+                return _MISSING
         else:
             return _MISSING
     return cur
 
 
-_MISSING = object()
+def _get_path(d: Any, path: str) -> Any:
+    """dotted path עם list-index + סובלנות logical↔wire (root.X→X, headers.X→header.X)."""
+    val = _get_path_raw(d, path)
+    if val is _MISSING and path.startswith("root."):
+        val = _get_path_raw(d, path[len("root."):])
+    if val is _MISSING and path.startswith("headers."):
+        val = _get_path_raw(d, "header." + path[len("headers."):])
+    return val
 
 
 def _record_matches(value: Optional[Any], match: Dict[str, Any]) -> bool:

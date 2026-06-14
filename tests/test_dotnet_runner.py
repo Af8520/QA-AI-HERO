@@ -17,6 +17,7 @@ from agents.runner.dotnet_runner import (  # noqa: E402
     DotNetRunner,
     _check_expected_fields,
     _matches,
+    _to_wire_message,
 )
 from models.dotnet_test_case import (  # noqa: E402
     CouchbaseWaitAction,
@@ -38,6 +39,37 @@ def test_check_expected_fields():
     assert _check_expected_fields({"a": 1, "b": 2}, {"a": "1"}) == []
     assert "c (missing)" in _check_expected_fields({"a": 1}, {"c": "x"})
     assert any("≠" in x for x in _check_expected_fields({"a": "x"}, {"a": "y"}))
+
+
+def test_to_wire_message_flattens_root_and_renames_header():
+    logical = {
+        "headers": {"mac_sys_name": "CLICKS"},
+        "root": {"message_id": "x", "action": "create", "entity_type": "referral"},
+        "_data": {"member_details": {"member_id": "555"}},
+    }
+    wire = _to_wire_message(logical)
+    assert "headers" not in wire and "root" not in wire
+    assert wire["header"]["mac_sys_name"] == "CLICKS"     # header (singular)
+    assert wire["action"] == "create"                     # root fields flattened to top level
+    assert wire["entity_type"] == "referral"
+    assert wire["message_id"] == "x"
+    assert wire["_data"]["member_details"]["member_id"] == "555"
+
+
+def test_to_wire_message_idempotent_on_wire_input():
+    wire_in = {"header": {"a": 1}, "action": "create", "_data": {}}
+    out = _to_wire_message(wire_in)
+    assert out is wire_in   # no 'root'/'headers' → returns the same object (no-op)
+
+
+def test_check_expected_fields_tolerates_logical_vs_wire_paths():
+    # message is in WIRE format (action top-level, header singular)
+    wire = {"header": {"mac_sys_name": "worker"}, "action": "create", "_data": {}}
+    # brain emitted LOGICAL paths (root.action, headers.mac_sys_name) → must still resolve
+    assert _check_expected_fields(wire, {"root.action": "create"}) == []
+    assert _check_expected_fields(wire, {"headers.mac_sys_name": "worker"}) == []
+    # plain wire paths also work
+    assert _check_expected_fields(wire, {"action": "create", "header.mac_sys_name": "worker"}) == []
 
 
 def test_check_expected_fields_dotted_and_list():

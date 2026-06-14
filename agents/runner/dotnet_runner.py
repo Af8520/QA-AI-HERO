@@ -129,6 +129,12 @@ class DotNetRunner:
     async def _run_kafka_publish(self, action: KafkaPublishAction, tc_id: str = ""):
         # ★ נרמול topic ל-lowercase (case-sensitive ב-Kafka; ACL בנוי על השם הקטן)
         action.topic = _normalize_topic(action.topic)
+        # ★ נרמול ל-wire format: 'header' (יחיד) + שדות root משוטחים לרמה העליונה (בלי מעטפת 'root').
+        # המסר האמיתי כך בנוי; בלי זה ה-Worker לא מפרסר את המסר שלנו ולא מפיק פלט.
+        wired = _to_wire_message(action.value)
+        if wired is not action.value:
+            self._log("PUBLISH", "info", "נרמל מבנה ל-wire format (header יחיד + שיטוח root)")
+            action.value = wired
         if not settings.kafka_enabled:
             return self._blocked_step(
                 f"PUBLISH topic={action.topic}",
@@ -638,6 +644,33 @@ def _resolve_consumer_group() -> str:
     return f"{settings.KAFKA_CONSUMER_GROUP_PREFIX}-{uuid.uuid4().hex[:8]}"
 
 
+def _to_wire_message(value: Any) -> Any:
+    """ממיר מבנה לוגי (headers/root/_data) למבנה ה-wire האמיתי של ההודעה:
+    - 'header' (יחיד) במקום 'headers'
+    - שדות ה-root משוטחים לרמה העליונה (בלי מעטפת 'root')
+    - '_data' נשאר כפי שהוא
+    אידמפוטנטי: אם אין 'root' ואין 'headers' — מחזיר את אותו אובייקט בדיוק (no-op).
+    """
+    if not isinstance(value, dict):
+        return value
+    if "root" not in value and "headers" not in value:
+        return value  # כבר wire (או אין מה להמיר)
+    out: Dict[str, Any] = {}
+    header = value.get("header", value.get("headers"))
+    if header is not None:
+        out["header"] = header
+    root = value.get("root")
+    if isinstance(root, dict):
+        out.update(root)  # שיטוח שדות ה-root לרמה העליונה
+    for k, v in value.items():
+        if k in ("header", "headers", "root", "_data"):
+            continue
+        out[k] = v
+    if "_data" in value:
+        out["_data"] = value["_data"]
+    return out
+
+
 def _normalize_topic(topic: str) -> str:
     """שמות topics ב-Kafka הם case-sensitive, ובמכבי הקונבנציה היא תמיד אותיות קטנות.
     ה-Payload Builder לפעמים מחזיר אותיות גדולות (Clicks-referral-streaming) → 403/אין ACL.
@@ -675,10 +708,8 @@ def _matches(value: Optional[Dict[str, Any]], match: Dict[str, Any]) -> bool:
 _FIELD_MISSING = object()
 
 
-def _resolve_field_path(obj: Any, path: str) -> Any:
-    """מחלץ ערך לפי dotted path עם תמיכה ב-list index:
-    'header.mac_sys_name', '_data.parameters.0.gender'. מחזיר _FIELD_MISSING אם לא קיים.
-    """
+def _resolve_raw_path(obj: Any, path: str) -> Any:
+    """מחלץ ערך לפי dotted path עם list index. _FIELD_MISSING אם לא קיים."""
     cur = obj
     for part in path.split("."):
         if isinstance(cur, dict):
@@ -698,6 +729,20 @@ def _resolve_field_path(obj: Any, path: str) -> Any:
         else:
             return _FIELD_MISSING
     return cur
+
+
+def _resolve_field_path(obj: Any, path: str) -> Any:
+    """כמו _resolve_raw_path, אבל סובלני להבדל logical↔wire:
+    - 'root.X' שלא נמצא → ננסה 'X' ברמה העליונה (כי root משוטח ב-wire).
+    - 'headers.X' שלא נמצא → ננסה 'header.X' (header יחיד ב-wire).
+    ככה אסרשנים עובדים בין אם המוח פלט root.X/headers.X ובין אם המסר ב-wire format.
+    """
+    val = _resolve_raw_path(obj, path)
+    if val is _FIELD_MISSING and path.startswith("root."):
+        val = _resolve_raw_path(obj, path[len("root."):])
+    if val is _FIELD_MISSING and path.startswith("headers."):
+        val = _resolve_raw_path(obj, "header." + path[len("headers."):])
+    return val
 
 
 def _check_expected_fields(value: Dict[str, Any], expected: Dict[str, Any]) -> List[str]:
