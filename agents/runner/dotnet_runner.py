@@ -62,7 +62,40 @@ class DotNetRunner:
         # ★ run log — נצבר פר TC; ה-pipeline משדר אותו כ-log_line + מתמיד לדיסק.
         self._log_entries = []
 
-        for action in executable.actions:
+        def _record(step: StepResult, action, obs):
+            nonlocal overall_status, error_message
+            step_results.append(step)
+            observations.append({"action": action.model_dump(), "observation": obs})
+            if step.status == TestStatus.FAILED:
+                overall_status = TestStatus.FAILED
+                error_message = error_message or step.error_message
+            elif step.status == TestStatus.BLOCKED and overall_status != TestStatus.FAILED:
+                overall_status = TestStatus.BLOCKED
+                error_message = error_message or step.error_message
+
+        actions = executable.actions
+        i = 0
+        while i < len(actions):
+            action = actions[i]
+            nxt = actions[i + 1] if i + 1 < len(actions) else None
+            # ★ צמד [publish, wait] ב-REST → warm-up: ה-publish רץ אחרי seek-to-end של ה-consumer
+            if (isinstance(action, KafkaPublishAction) and isinstance(nxt, KafkaWaitAction)
+                    and settings.kafka_rest_enabled):
+                try:
+                    pub_step, pub_obs, wait_step, wait_obs = await self._publish_then_wait(
+                        action, nxt, executable.test_case_id)
+                    _record(pub_step, action, pub_obs)
+                    _record(wait_step, nxt, wait_obs)
+                except Exception as e:
+                    log.warning("dotnet_pair_exception", error=str(e))
+                    self._log("ERROR", "error", f"חריגה ב-publish+wait: {str(e)[:200]}")
+                    bad = StepResult(step="publish+wait", expected_result="completes",
+                                     actual_result=f"Exception: {str(e)[:200]}",
+                                     status=TestStatus.BLOCKED, error_message=str(e))
+                    _record(bad, action, {"error": str(e)})
+                i += 2
+                continue
+
             try:
                 if isinstance(action, KafkaPublishAction):
                     step, obs = await self._run_kafka_publish(action, executable.test_case_id)
@@ -90,15 +123,8 @@ class DotNetRunner:
                 )
                 obs = {"error": str(e), "kind": getattr(action, "kind", "?")}
 
-            step_results.append(step)
-            observations.append({"action": action.model_dump(), "observation": obs})
-
-            if step.status == TestStatus.FAILED:
-                overall_status = TestStatus.FAILED
-                error_message = error_message or step.error_message
-            elif step.status == TestStatus.BLOCKED and overall_status != TestStatus.FAILED:
-                overall_status = TestStatus.BLOCKED
-                error_message = error_message or step.error_message
+            _record(step, action, obs)
+            i += 1
 
         duration = time.perf_counter() - started
 
@@ -242,11 +268,39 @@ class DotNetRunner:
         )
         return step, result
 
+    async def _publish_then_wait(self, pub: KafkaPublishAction, wait: KafkaWaitAction, tc_id: str):
+        """★ warm-up: ה-consumer נרשם ועושה seek-to-end, ורק *אחר כך* (ב-on_ready) ה-publish רץ.
+        כך אנחנו ממוקמים על סוף ה-target לפני שה-Worker כותב → תופסים את המסר החדש (ולא ישנים).
+        מחזיר (pub_step, pub_obs, wait_step, wait_obs).
+        """
+        pub_holder: Dict[str, Any] = {}
+
+        async def on_ready():
+            ts_ms = int(time.time() * 1000)
+            pub_holder["step"], pub_holder["obs"] = await self._run_kafka_publish(pub, tc_id)
+            return ts_ms
+
+        wait_step, wait_obs = await self._run_kafka_wait(wait, on_ready=on_ready)
+
+        # אם ה-consumer נכשל לפני ה-publish (on_ready לא רץ) — סמן placeholder ל-publish
+        if "step" not in pub_holder:
+            self._log("PUBLISH", "warn", "ה-publish לא רץ — הקמת ה-consumer נכשלה לפני seek-to-end")
+            pub_step = StepResult(
+                step=f"PUBLISH topic={pub.topic}", expected_result="delivered",
+                actual_result="skipped — consumer setup failed before publish",
+                status=TestStatus.BLOCKED, error_message="consumer setup failed before publish",
+            )
+            pub_obs = {"skipped": True}
+        else:
+            pub_step, pub_obs = pub_holder["step"], pub_holder["obs"]
+
+        return pub_step, pub_obs, wait_step, wait_obs
+
     # ============================================================
     # Kafka wait
     # ============================================================
 
-    async def _run_kafka_wait(self, action: KafkaWaitAction):
+    async def _run_kafka_wait(self, action: KafkaWaitAction, on_ready=None):
         # ★ נרמול topic ל-lowercase (case-sensitive ב-Kafka; ACL בנוי על השם הקטן)
         action.topic = _normalize_topic(action.topic)
         if not settings.kafka_enabled:
@@ -276,6 +330,7 @@ class DotNetRunner:
             rich = await KafkaRestClient().consume(
                 action.topic, action.match, effective_timeout, group,
                 key_equals=action.key_equals, key_contains=action.key_contains,
+                on_ready=on_ready, skew_ms=settings.KAFKA_TIMESTAMP_SKEW_SECONDS * 1000,
             )
             if rich.get("rest_consumer_unavailable"):
                 self._log("CONSUME", "error", "ה-consumer API של ה-REST Proxy לא זמין")
@@ -294,10 +349,16 @@ class DotNetRunner:
             try:
                 from confluent_kafka import Consumer  # type: ignore[import-not-found]
             except ImportError:
+                # native לא זמין — אם יש publish ממתין (on_ready), נריץ אותו כדי לא לדלג עליו
+                if on_ready is not None:
+                    await on_ready()
                 return self._blocked_step(
                     f"WAIT topic={action.topic}",
                     "confluent-kafka package not installed",
                 )
+            # native אין לו seek-to-end warm-up — נפרסם לפני ה-consume (race נשאר; fallback בלבד)
+            if on_ready is not None:
+                await on_ready()
             conf = self._kafka_conf()
             conf.update({
                 "group.id": group,
@@ -333,10 +394,15 @@ class DotNetRunner:
         if breakdown:
             self._log("CONSUME", "info",
                       "breakdown לפי mac_sys_name: " + json.dumps(breakdown, ensure_ascii=False))
+        n_too_old = sum(1 for c in candidates if c.get("too_old"))
+        if n_too_old:
+            self._log("CONSUME", "info",
+                      f"{n_too_old} מסרים נדחו ע\"י timestamp filter (ישנים מ-TC קודם, לפני ה-publish)")
         for c in candidates[:15]:
             sysname = _extract_sys_name(c.get("value_parsed"))
+            old_mark = " ⏱too_old" if c.get("too_old") else ""
             self._log("candidate", "info",
-                      f"offset={c.get('offset')} key={c.get('key')} mac_sys_name={sysname}")
+                      f"offset={c.get('offset')} key={c.get('key')} mac_sys_name={sysname}{old_mark}")
         if len(candidates) == 0:
             self._log("CONSUME", "warn",
                       f"לא הגיע אף מסר ל-target תוך {effective_timeout}s — ייתכן שה-Worker איטי/לא הפיק "

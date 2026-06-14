@@ -210,6 +210,42 @@ def test_scan_no_key_match_returns_none():
 
 
 # ============================================================
+# Timestamp filter — don't accept an old message from a previous TC
+# ============================================================
+
+def test_scan_rejects_old_message_by_timestamp():
+    recs = [
+        {"key": _b64("child_development::0::555"), "value": _b64('{"action":"create"}'),
+         "offset": 1, "timestamp": 1000},   # ישן (לפני ה-publish)
+        {"key": _b64("child_development::0::555"), "value": _b64('{"action":"create"}'),
+         "offset": 2, "timestamp": 5000},   # חדש (אחרי ה-publish)
+    ]
+    cands = []
+    # publish ב-ts=3000 → רק offset 2 (ts=5000) תקף
+    matched = _scan_records(recs, "t", {}, cands, key_contains="555", min_timestamp_ms=3000)
+    assert matched is not None and matched["offset"] == 2
+    # שניהם נאספים כ-candidates, הישן מסומן too_old
+    assert len(cands) == 2
+    assert cands[0].get("too_old") is True
+    assert "too_old" not in cands[1]
+
+
+def test_scan_old_only_returns_none():
+    recs = [{"key": _b64("child_development::0::555"), "value": _b64('{}'),
+             "offset": 1, "timestamp": 1000}]
+    cands = []
+    # כל המסרים ישנים מ-publish (ts=3000) → אין match (זה תרחיש שלילי תקין)
+    assert _scan_records(recs, "t", {}, cands, key_contains="555", min_timestamp_ms=3000) is None
+    assert cands[0].get("too_old") is True
+
+
+def test_decode_includes_timestamp():
+    rec = {"key": _b64("k"), "value": _b64("{}"), "offset": 1, "timestamp": 1718000000000}
+    out = _decode_binary_record(rec, "t")
+    assert out["timestamp"] == 1718000000000
+
+
+# ============================================================
 # Dotted-path matching — match on nested header.mac_correlation_id
 # ============================================================
 

@@ -33,8 +33,9 @@ class Settings(BaseSettings):
     # ★ Token endpoint של סוכן Payload Builder (Copilot Studio) — מקבל את מסמך האפיון ומחזיר
     # templates + field_catalog ל-Compiler. אופציונלי: אם ריק, Compiler עובד במצב regex-only.
     DOTNET_PAYLOAD_COPILOT_TOKEN_ENDPOINT: Optional[str] = None
-    # Timeout להמתנה לתשובה מסוכן Payload Builder (שניות).
-    DOTNET_PAYLOAD_BUILDER_TIMEOUT_SECONDS: int = 180
+    # Timeout להמתנה לתשובה מסוכן Payload Builder (שניות). הסוכן בונה JSON גדול —
+    # נותנים מרווח. אם עדיין נכשל, מקדים את הפלט של הסוכן (להוריד field_catalog).
+    DOTNET_PAYLOAD_BUILDER_TIMEOUT_SECONDS: int = 300
     # WebSocket — אם True, WebChat מתחבר ל-DirectLine ב-WebSocket (סטרימינג אמיתי, מילה-מילה).
     # ברשתות ארגוניות שחוסמות WebSocket — הגדר False וה-WebChat יחזור ל-HTTP polling.
     COPILOT_USE_WEBSOCKET: bool = True
@@ -56,6 +57,9 @@ class Settings(BaseSettings):
     # ★ רצפת timeout ל-kafka_wait — ה-Worker אסינכרוני (כותב ל-target תוך עד דקה-שתיים).
     # ה-wait ימתין לפחות כך הרבה (early-return ברגע שנמצא match).
     KAFKA_WAIT_MIN_SECONDS: int = 150
+    # ★ סטיית clock מותרת בין השעון שלנו לזמן ה-broker, לצורך ה-timestamp filter:
+    # מקבלים מסר target רק אם timestamp >= publish_ts - SKEW (מונע לתפוס מסר ישן מ-TC קודם).
+    KAFKA_TIMESTAMP_SKEW_SECONDS: int = 10
     # ★ Confluent REST Proxy — מסלול מועדף. אם מאוכלס, ה-.NET runner מפרסם/צורך דרך HTTP
     # (httpx, מכבד VERIFY_SSL) במקום הקליינט הנייטיב. עוקף בעיות ACL/cert של librdkafka,
     # כי ה-proxy מפרסם ב-principal פריבילגי משלו ומשתמש ב-Basic-Auth רק בשכבת ה-HTTP.

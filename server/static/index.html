@@ -1787,7 +1787,14 @@ window.closeRunLogsModal = closeRunLogsModal;
 
 // ייעודי ל-bubble של TC detail — בונה DOM ישיר עם <button> אמיתי
 // (ולא innerHTML עם user data, שגרם לבאג של escaping ה-<a>)
-function addTcDetailBubble(tcId, httpStatus) {
+const _STEP_ICON = { passed: '✓', done: '✓', failed: '✗', blocked: '⊘', skipped: '⚠' };
+const _STEP_COLOR = { passed: 'var(--success)', done: 'var(--success)', failed: 'var(--danger)',
+                     blocked: 'var(--text-dim)', skipped: 'var(--warn)' };
+
+function addTcDetailBubble(tcId, response) {
+  response = response || {};
+  const isDotnet = response.kind === 'dotnet';
+  const finalStatus = response.status;
   const row = document.createElement('div');
   row.className = 'row agent';
   const avatar = document.createElement('div');
@@ -1796,9 +1803,36 @@ function addTcDetailBubble(tcId, httpStatus) {
   const bubble = document.createElement('div');
   bubble.className = 'bubble agent';
 
-  const label = document.createElement('span');
-  label.textContent = `📋 ${tcId} → HTTP ${httpStatus != null ? httpStatus : 'err'}`;
-  bubble.appendChild(label);
+  // כותרת: שם ה-TC + סטטוס סופי
+  const head = document.createElement('div');
+  const fin = String(finalStatus || '').toLowerCase();
+  const finIcon = _STEP_ICON[fin] || '•';
+  head.innerHTML = '';
+  const headStrong = document.createElement('strong');
+  headStrong.textContent = `📋 ${tcId} `;
+  head.appendChild(headStrong);
+  const finSpan = document.createElement('span');
+  finSpan.textContent = isDotnet ? `→ ${finIcon} ${finalStatus}` : `→ HTTP ${finalStatus != null ? finalStatus : 'err'}`;
+  finSpan.style.color = _STEP_COLOR[fin] || 'var(--text)';
+  finSpan.style.fontWeight = '600';
+  head.appendChild(finSpan);
+  bubble.appendChild(head);
+
+  // שורות steps (dotnet)
+  const steps = response.steps || [];
+  if (steps.length) {
+    const list = document.createElement('div');
+    list.style.cssText = 'margin-top:6px; font-size:12px; line-height:1.7;';
+    for (const s of steps) {
+      const st = String(s.status || '').toLowerCase();
+      const line = document.createElement('div');
+      line.style.color = _STEP_COLOR[st] || 'var(--text)';
+      const detail = s.error || s.detail || '';
+      line.textContent = `${_STEP_ICON[st] || '•'} ${s.label}${detail ? ' — ' + detail : ''}`;
+      list.appendChild(line);
+    }
+    bubble.appendChild(list);
+  }
 
   const btn = document.createElement('button');
   btn.type = 'button';
@@ -1859,7 +1893,7 @@ function openSSE() {
     const d = JSON.parse(e.data);
     tcDetails[d.test_case_id] = { request: d.request, response: d.response };
     // bubble קליק שיפתח את הפרטים — DOM ישיר (לא innerHTML — בטוח מ-XSS / escaping)
-    addTcDetailBubble(d.test_case_id, d.response && d.response.status);
+    addTcDetailBubble(d.test_case_id, d.response);
   });
   // ★ Run logs — לוג מובנה פר-ריצה
   sse.addEventListener('log_line', (e) => {

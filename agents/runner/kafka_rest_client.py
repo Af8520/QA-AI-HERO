@@ -95,22 +95,21 @@ class KafkaRestClient:
         group: str,
         key_equals: Optional[str] = None,
         key_contains: Optional[str] = None,
+        on_ready=None,
+        skew_ms: int = 0,
     ) -> Optional[Dict[str, Any]]:
-        """יוצר consumer instance, נרשם ל-topic, ועושה polling עד שמסר תואם מגיע או timeout.
+        """יוצר consumer, נרשם, עושה seek-to-end (אם warm-up), ואז polling עד match/timeout.
 
-        group — שם ה-consumer group המדויק (כבר resolved ע"י ה-caller; ACL בנוי עליו).
+        on_ready — async callable שמורץ **אחרי** ה-subscribe + seek-to-end (כאן ה-caller מפרסם),
+          ומחזיר את ה-publish timestamp (ms). אז מסננים רק רשומות עם timestamp >= publish_ts - skew_ms
+          (מונע לתפוס מסר ישן מ-TC קודם).
 
-        מחזיר dict עשיר:
-        - {"matched": <record|None>, "candidates": [...]} — matched הוא הרשומה התואמת (או None),
-          candidates הן כל הרשומות שנראו בחלון (capped) ל-logging.
-        - {"fatal_error": "..."} אם 401/403 (auth/ACL) — מפעיל early-stop בפייפליין
-        - {"rest_consumer_unavailable": True} אם consumer API כבוי (404/501)
+        מחזיר dict עשיר: {matched, candidates} / {fatal_error} / {rest_consumer_unavailable}.
         """
         instance_name = f"qa-{uuid.uuid4().hex[:8]}"
         headers_json = {"Content-Type": _V2_ACCEPT}
 
         async with httpx.AsyncClient(verify=self.verify_ssl, timeout=30.0) as client:
-            # 1. create consumer instance — format=binary (לא json! ה-keys ב-target אינם JSON)
             create_url = f"{self.base}/consumers/{group}"
             create_body = {
                 "name": instance_name,
@@ -127,20 +126,38 @@ class KafkaRestClient:
             if r.status_code >= 400:
                 return {"fatal_error": f"HTTP {r.status_code} on consumer create: {r.text[:200]}"}
 
-            # בונים את ה-instance base בעצמנו — לא סומכים על base_uri המוחזר (host פנימי שגוי מאחורי proxy)
             instance_base = f"{self.base}/consumers/{group}/instances/{instance_name}"
-
+            records_url = f"{instance_base}/records"
+            poll_headers = {"Accept": _BINARY_ACCEPT}
             candidates: List[Dict[str, Any]] = []
             try:
-                # 2. subscribe
+                # subscribe
                 sub_url = f"{instance_base}/subscription"
                 rs = await client.post(sub_url, headers=headers_json, json={"topics": [topic]}, auth=self.auth)
                 if rs.status_code >= 400:
                     return {"fatal_error": f"HTTP {rs.status_code} on subscribe: {rs.text[:200]}"}
 
-                # 3. poll loop — אוסף candidates + מחפש התאמה
-                records_url = f"{instance_base}/records"
-                poll_headers = {"Accept": _BINARY_ACCEPT}
+                # ★ warm-up: poll קצר לטריגר assignment, ואז seek-to-end (חסין offset committed ישן)
+                try:
+                    await client.get(records_url, headers=poll_headers, params={"timeout": 500}, auth=self.auth)
+                    asg = await client.get(f"{instance_base}/assignments", headers=headers_json, auth=self.auth)
+                    if asg.status_code < 400:
+                        parts = (asg.json() or {}).get("partitions") or []
+                        if parts:
+                            await client.post(f"{instance_base}/positions/end",
+                                              headers=headers_json, json={"partitions": parts}, auth=self.auth)
+                            log.info("kafka_rest_seek_end", topic=topic, partitions=len(parts))
+                except httpx.HTTPError as e:
+                    log.warning("kafka_rest_seek_end_failed", error=str(e))  # נמשיך — timestamp filter יגבה
+
+                # ★ ה-publish קורה כאן — אחרי שאנחנו ממוקמים על סוף ה-topic
+                min_timestamp_ms = 0
+                if on_ready is not None:
+                    pub_ts = await on_ready()
+                    if isinstance(pub_ts, int) and pub_ts > 0:
+                        min_timestamp_ms = pub_ts - skew_ms
+
+                # poll loop — אוסף candidates + מחפש התאמה (עם timestamp filter)
                 deadline = time.monotonic() + timeout_seconds
                 while time.monotonic() < deadline:
                     try:
@@ -156,15 +173,14 @@ class KafkaRestClient:
                     except Exception:
                         records = []
                     matched = _scan_records(records, topic, match, candidates,
-                                            key_equals=key_equals, key_contains=key_contains)
+                                            key_equals=key_equals, key_contains=key_contains,
+                                            min_timestamp_ms=min_timestamp_ms)
                     if matched is not None:
                         log.info("kafka_rest_consumed", topic=topic, offset=matched.get("offset"),
                                  candidates_seen=len(candidates))
                         return {"matched": matched, "candidates": candidates}
-                # timeout — אין התאמה, אבל מחזירים את ה-candidates ל-logging
                 return {"matched": None, "candidates": candidates}
             finally:
-                # 4. cleanup — DELETE instance
                 try:
                     await client.delete(instance_base, headers={"Content-Type": _V2_ACCEPT}, auth=self.auth)
                 except Exception as e:
@@ -217,6 +233,7 @@ def _decode_binary_record(rec: Dict[str, Any], topic: str) -> Dict[str, Any]:
         "partition": rec.get("partition"),
         "topic": rec.get("topic") or topic,
         "key": key_str,
+        "timestamp": rec.get("timestamp"),  # ms epoch — ל-temporal correlation
     }
 
 
@@ -237,9 +254,11 @@ def _scan_records(
     candidates: Optional[List[Dict[str, Any]]] = None,
     key_equals: Optional[str] = None,
     key_contains: Optional[str] = None,
+    min_timestamp_ms: int = 0,
 ) -> Optional[Dict[str, Any]]:
-    """מפענח רשומות, מוסיף ל-candidates (capped), ומחזיר את הראשונה שתואמת לכל ה-matchers
-    (key_equals AND key_contains AND value match) — או None."""
+    """מפענח רשומות, מוסיף ל-candidates (capped), ומחזיר את הראשונה שתואמת לכל ה-matchers:
+    timestamp >= min_timestamp_ms AND key_equals AND key_contains AND value match — או None.
+    מסר עם timestamp ישן (מ-TC קודם) ייאסף כ-candidate אך *לא* ייחשב match (מסומן too_old)."""
     if candidates is None:
         candidates = []
     if not isinstance(records, list):
@@ -249,9 +268,14 @@ def _scan_records(
         if not isinstance(rec, dict):
             continue
         decoded = _decode_binary_record(rec, topic)
+        ts = decoded.get("timestamp")
+        too_old = bool(min_timestamp_ms) and isinstance(ts, int) and ts < min_timestamp_ms
+        if too_old:
+            decoded = {**decoded, "too_old": True}
         if len(candidates) < _CANDIDATE_CAP:
             candidates.append(decoded)
         if (matched is None
+                and not too_old
                 and _key_matches(decoded.get("key"), key_equals, key_contains)
                 and _record_matches(decoded["value_parsed"], match)):
             matched = decoded

@@ -236,6 +236,12 @@ async def run_dotnet_pipeline(session: ChatSession) -> PipelineResult:
             }, {
                 "status": r.status.value,
                 "kind": "dotnet",
+                # ★ steps לצ'אט — מה עבר/נכשל פר step
+                "steps": [
+                    {"label": s.step, "status": s.status.value,
+                     "detail": s.actual_result, "error": s.error_message}
+                    for s in (r.step_results or [])
+                ],
                 "observations": (r.api_response or {}).get("observations") or [],
                 "duration_ms": (r.api_response or {}).get("duration_ms"),
                 "error": (r.api_response or {}).get("error"),
