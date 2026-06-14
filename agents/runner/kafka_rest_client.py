@@ -130,6 +130,7 @@ class KafkaRestClient:
             records_url = f"{instance_base}/records"
             poll_headers = {"Accept": _BINARY_ACCEPT}
             candidates: List[Dict[str, Any]] = []
+            assign_info = {"mode": "subscribe", "n_partitions": 0}
             try:
                 # ★ manual assign של *כל* ה-partitions (במקום subscribe) — חיוני!
                 # ה-group הקבוע משותף עם ה-Worker, אז subscribe נותן רק חלק מה-partitions
@@ -149,6 +150,7 @@ class KafkaRestClient:
                                 await client.post(f"{instance_base}/positions/end",
                                                   headers=headers_json, json={"partitions": parts}, auth=self.auth)
                                 assigned = True
+                                assign_info = {"mode": "manual", "n_partitions": len(parts)}
                                 log.info("kafka_rest_assigned_all", topic=topic, partitions=len(parts))
                 except httpx.HTTPError as e:
                     log.warning("kafka_rest_manual_assign_failed", error=str(e))
@@ -165,6 +167,7 @@ class KafkaRestClient:
                         asg = await client.get(f"{instance_base}/assignments", headers=headers_json, auth=self.auth)
                         if asg.status_code < 400:
                             parts = (asg.json() or {}).get("partitions") or []
+                            assign_info = {"mode": "subscribe", "n_partitions": len(parts)}
                             if parts:
                                 await client.post(f"{instance_base}/positions/end",
                                                   headers=headers_json, json={"partitions": parts}, auth=self.auth)
@@ -199,8 +202,8 @@ class KafkaRestClient:
                     if matched is not None:
                         log.info("kafka_rest_consumed", topic=topic, offset=matched.get("offset"),
                                  candidates_seen=len(candidates))
-                        return {"matched": matched, "candidates": candidates}
-                return {"matched": None, "candidates": candidates}
+                        return {"matched": matched, "candidates": candidates, "assign": assign_info}
+                return {"matched": None, "candidates": candidates, "assign": assign_info}
             finally:
                 try:
                     await client.delete(instance_base, headers={"Content-Type": _V2_ACCEPT}, auth=self.auth)

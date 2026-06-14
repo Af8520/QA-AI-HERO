@@ -305,11 +305,15 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
 - ★ זהה את **המזהה שמופיע בתוך ה-KEY** — זה לרוב ה-**member_id (ת.ז)**, **לא** ה-entity_id/
   referral_id! (entity_id הוא מזהה ההפניה — הוא בדרך כלל *לא* בתוך ה-key של ה-target.)
   אם TARGET_EXAMPLE / TARGET_ENTITY_TYPE סופקו — קח מהם את שדה ה-KEY המדויק.
-- key_contains = **אותו ערך** של אותו שדה שהזרקת ל-publish (לדוגמה: אם ה-key בנוי מ-member_id
-  ופרסמת member_id=021769658 → key_contains:"021769658"). **העדף key_contains.**
+- key_contains = **הערך הייחודי** של המזהה שה-key בנוי ממנו (לרוב ה-**member_id** — מספר ארוך
+  וייחודי כמו "021769658"). ★★★ **לעולם אל תשתמש בערך קצר/נפוץ** כמו "0", "1", member_id_code,
+  או ספרה בודדת — הם מופיעים בכל key (verifyhub::0::4242 מכיל "0") וגורמים להתאמה שגויה!
+  אם key_built_from כולל גם member_id וגם member_id_code — קח את ה-**member_id** (הארוך), לא את הקוד.
+- ★★★ **תמיד הוסף ל-match את ה-entity_type של ה-target** (מ-TARGET_ENTITY_TYPE / target message):
+  למשל `"match": {"entity_type": "<target_entity_type>"}`. כך גם אם ה-key תופס מסר זר (verifyhub),
+  ה-match על entity_type ידחה אותו (entity_type שלו שונה) — קורלציה כפולה ועמידה.
 - key_equals = ה-key המלא רק אם הפורמט (כולל הקוד והסדר) ודאי לחלוטין.
-- אל תמציא מזהה ואל תשתמש ב-entity_id/referral_id אם ה-key לא בנוי ממנו — קח את הערך
-  של השדה הנכון מה-publish payload שלך.
+- אל תשתמש ב-entity_id/referral_id אם ה-key לא בנוי מהם.
 
 ★★★ expected_fields — אימות השדות המומרים ב-target ★★★
 מתוך שורות "במסר היעד header/root/_data ודא שדות ...":
@@ -326,7 +330,8 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
   "actions": [
     {"kind": "kafka_publish", "topic": "<SOURCE_TOPIC>", "value": {... template מלא עם דריסות ...}},
     {"kind": "kafka_wait", "topic": "<TARGET_TOPIC>",
-     "key_contains": "<הערך של השדה שה-KEY בנוי ממנו — לרוב member_id, לא entity_id>",
+     "key_contains": "<member_id הייחודי — מספר ארוך, לא '0'/code>",
+     "match": {"entity_type": "<TARGET_ENTITY_TYPE>"},
      "expected_fields": {"header.mac_sys_name":"...", "root.action":"...", "_data.parameters.0.gender":"..."},
      "timeout_seconds": 150, "expect_no_message": false}
   ],

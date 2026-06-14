@@ -322,6 +322,11 @@ class DotNetRunner:
         self._log("CONSUME", "info",
                   f"צורך מ-target '{action.topic}' group={group} (timeout {effective_timeout}s) "
                   f"correlation: {', '.join(corr) or '(אין!)'}")
+        # ★ אזהרה: key_contains קצר/נפוץ (כמו "0") יתאים גם למסרים זרים (verifyhub)
+        if action.key_contains is not None and len(str(action.key_contains).strip()) < 3 and not action.match:
+            self._log("CONSUME", "warn",
+                      f"key_contains='{action.key_contains}' קצר מדי — עלול להתאים למסרים זרים. "
+                      f"מומלץ member_id ייחודי + match על entity_type.")
 
         candidates: List[Dict[str, Any]] = []
         # ★ מסלול REST Proxy (מועדף כשמוגדר)
@@ -345,6 +350,10 @@ class DotNetRunner:
             else:
                 candidates = rich.get("candidates", []) or []
                 observed = rich.get("matched")
+                asg = rich.get("assign") or {}
+                self._log("CONSUME", "info" if asg.get("mode") == "manual" else "warn",
+                          f"assignment: {asg.get('mode', '?')} — {asg.get('n_partitions', 0)} partitions "
+                          + ("(כיסוי מלא)" if asg.get("mode") == "manual" else "(subscribe — כיסוי חלקי!)"))
         else:
             try:
                 from confluent_kafka import Consumer  # type: ignore[import-not-found]
