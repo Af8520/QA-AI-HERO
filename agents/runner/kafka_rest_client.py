@@ -32,6 +32,9 @@ _V2_ACCEPT = "application/vnd.kafka.v2+json"
 _BINARY_ACCEPT = "application/vnd.kafka.binary.v2+json"
 
 _CANDIDATE_CAP = 50  # כמה רשומות לאסוף ל-logging (לא רק את ההתאמה הראשונה)
+# timeout (ms) ל-records-fetch של אימות-קיום partition ב-probe. צריך להיות גדול מספיק
+# שה-broker יספיק להחזיר שגיאת UNKNOWN_PARTITION ל-partition לא-קיים, אך קצר (×N partitions).
+_PROBE_FETCH_TIMEOUT_MS = 200
 
 
 class KafkaRestClient:
@@ -134,9 +137,11 @@ class KafkaRestClient:
                 # ★ manual assign של *כל* ה-partitions (לעולם לא subscribe!) — חיוני.
                 # ה-group הקבוע משותף עם ה-Worker, אז subscribe נותן רק חלק מה-partitions
                 # (rebalancing) ומפספס את ה-partition שעליו נכתב המסר שלנו. _discover_partitions
-                # עוקף את היעדר ה-Describe ACL ע"י probe (0..MAX) + seek-to-end per-partition,
-                # ומגלה את מספר ה-partitions האמיתי בעצמו → כיסוי מלא ללא תלות ב-group.
-                assign_info = await self._discover_partitions(client, instance_base, topic, headers_json)
+                # מאמת קיום partition דרך records-fetch אמיתי (seek-to-end לבדו משקר — ה-proxy
+                # מחזיר 200 גם ל-partition לא-קיים), כדי לא לזהם את ה-assignment ב-partitions
+                # פנטום ששוברים את ה-fetch של librdkafka. כיסוי מלא ללא תלות ב-group/Describe ACL.
+                assign_info = await self._discover_partitions(
+                    client, instance_base, topic, headers_json, poll_headers)
                 log.info("kafka_rest_assigned_all", topic=topic,
                          mode=assign_info.get("mode"), partitions=assign_info.get("n_partitions"))
                 if assign_info.get("n_partitions", 0) <= 0:
@@ -191,7 +196,7 @@ class KafkaRestClient:
         סדר עדיפויות:
           1. KAFKA_TARGET_PARTITIONS (override ידוע) → 0..N-1.
           2. Describe (GET /topics) → רשימה אמיתית (עובד רק עם ACL — במכבי חסום).
-          3. Probe (ברירת מחדל) → 0..PROBE_MAX-1; ה-seek-to-end per-partition יסנן לא-קיימים.
+          3. Probe (ברירת מחדל) → 0..PROBE_MAX-1; records-fetch per-partition יסנן לא-קיימים.
         """
         cfg = settings.KAFKA_TARGET_PARTITIONS
         if cfg and int(cfg) > 0:
@@ -228,21 +233,32 @@ class KafkaRestClient:
         return sk.status_code < 400
 
     async def _validate_individually(self, client, instance_base: str, topic: str,
-                                     candidates: List[int], headers_json: Dict[str, str]) -> List[int]:
-        """מאמת כל partition בנפרד (assign+seek). partition לא-קיים נכשל ונשמט.
-        כך מתגלה מספר ה-partitions האמיתי בלי Describe ACL."""
+                                     candidates: List[int], headers_json: Dict[str, str],
+                                     poll_headers: Dict[str, str]) -> List[int]:
+        """מאמת כל partition בנפרד דרך records-fetch אמיתי. partition לא-קיים → ה-broker
+        מחזיר UNKNOWN_PARTITION (4xx/5xx) ונשמט. seek-to-end לבדו לא מספיק — ה-proxy מחזיר
+        200 גם ל-partition פנטום, וזיהומו ל-assignment שובר את ה-fetch של librdkafka.
+
+        רץ *לפני* ה-publish → אין side-effect על מסר ה-Worker (עדיין לא הופק). כל מסר verifyhub
+        שייקרא כאן מתאפס ע"י ה-seek-to-end הסופי שב-_discover_partitions לפני ה-publish."""
         valid: List[int] = []
+        records_url = f"{instance_base}/records"
         for p in candidates:
             try:
-                ok = await self._assign_and_seek(client, instance_base, topic, [p], headers_json)
+                if not await self._assign_and_seek(client, instance_base, topic, [p], headers_json):
+                    continue
+                rr = await client.get(records_url, headers=poll_headers,
+                                      params={"timeout": _PROBE_FETCH_TIMEOUT_MS}, auth=self.auth)
+                if rr.status_code >= 400:
+                    continue
             except httpx.HTTPError:
-                ok = False
-            if ok:
-                valid.append(p)
+                continue
+            valid.append(p)
         return valid
 
     async def _discover_partitions(self, client, instance_base: str, topic: str,
-                                   headers_json: Dict[str, str]) -> Dict[str, Any]:
+                                   headers_json: Dict[str, str],
+                                   poll_headers: Dict[str, str]) -> Dict[str, Any]:
         """מגלה ומאמת את כל ה-partitions של topic, מבצע manual assign + seek-to-end על כולם.
         מחזיר {mode, n_partitions, parts, reason}. n_partitions==0 → כשל (ה-caller יחזיר fatal_error).
         לעולם לא נופל ל-subscribe (שייתן כיסוי חלקי על ה-group המשותף עם ה-Worker)."""
@@ -250,21 +266,18 @@ class KafkaRestClient:
         if not candidates:
             return {"mode": mode, "n_partitions": 0, "parts": [], "reason": reason}
 
-        if mode == "probe":
-            valid = await self._validate_individually(client, instance_base, topic, candidates, headers_json)
+        if mode == "describe":
+            # רשימה אמיתית ממטא-דאטה — בוטחים בה (אין partitions פנטום).
+            valid = candidates
         else:
-            # describe/configured — בוטחים בקבוצה, אבל מאמתים ב-batch assign+seek;
-            # אם נכשל (למשל המספר המוגדר גדול מהאמיתי) → נופלים לאימות per-partition.
-            try:
-                ok = await self._assign_and_seek(client, instance_base, topic, candidates, headers_json)
-            except httpx.HTTPError:
-                ok = False
-            valid = candidates if ok else \
-                await self._validate_individually(client, instance_base, topic, candidates, headers_json)
+            # configured/probe — מאמתים כל partition דרך records-fetch כדי לא לזהם את
+            # ה-assignment ב-partitions פנטום (גם configured גדול-מדי מתנקה כך לאמיתי).
+            valid = await self._validate_individually(
+                client, instance_base, topic, candidates, headers_json, poll_headers)
 
         if not valid:
             return {"mode": mode, "n_partitions": 0, "parts": [],
-                    "reason": f"{reason}; לא נמצא אף partition תקף"}
+                    "reason": f"{reason}; לא נמצא אף partition תקף (records-fetch נכשל לכולם)"}
 
         # ★ assignment סופי נקי + seek-to-end רק על ה-partitions התקפים (ממש לפני ה-publish)
         final_parts = [{"topic": topic, "partition": p} for p in valid]
