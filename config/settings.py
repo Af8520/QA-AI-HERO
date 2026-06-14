@@ -1,5 +1,5 @@
 from typing import Literal, Optional
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,6 +10,23 @@ class Settings(BaseSettings):
         case_sensitive=True,
         extra="ignore",
     )
+
+    # ★ שדות int אופציונליים: ערך ריק ב-.env (למשל "KAFKA_TARGET_PARTITIONS=") מגיע כ-""
+    # ו-pydantic v2 לא יודע לפרסר "" ל-int → קריסה. ממירים ריק ל-None *לפני* הפרסור.
+    @field_validator("KAFKA_TARGET_PARTITIONS", mode="before")
+    @classmethod
+    def _blank_int_to_none(cls, v):
+        if isinstance(v, str) and v.strip() == "":
+            return None
+        return v
+
+    # שדה int עם default: ערך ריק ב-.env → חוזרים ל-default (במקום קריסה).
+    @field_validator("KAFKA_PARTITION_PROBE_MAX", mode="before")
+    @classmethod
+    def _blank_int_to_default(cls, v):
+        if isinstance(v, str) and v.strip() == "":
+            return 16
+        return v
 
     # Copilot Studio Agent (Phase A) — שדות מובנים לפי microsoft-agents-copilotstudio-client SDK
     COPILOT_ENVIRONMENT_ID: Optional[str] = None       # e.g. Default-f4c80c7c-e1aa-4090-...
