@@ -360,6 +360,15 @@ class DotNetRunner:
                 else:
                     self._log("CONSUME", "error",
                               f"assignment: {mode} — נכשל ({asg.get('reason', '')})")
+                # ★ דיאגנוסטיקת כשל: מה ניתן לקרוא מכל partition (seek-to-beginning) —
+                # מכריע בין "בעיית fetch צד-שרת" (partition מחזיר 0/שגיאה) ל-"בעיית תזמון".
+                diag = rich.get("diag") or {}
+                for p in sorted(diag.keys()):
+                    d = diag[p]
+                    sys_str = json.dumps(d.get("sys", {}), ensure_ascii=False)
+                    self._log("diag", "info",
+                              f"p{p} מההתחלה: status={d.get('status')} count={d.get('count')} "
+                              f"has_key={d.get('has_key')} sys={sys_str}")
         else:
             try:
                 from confluent_kafka import Consumer  # type: ignore[import-not-found]

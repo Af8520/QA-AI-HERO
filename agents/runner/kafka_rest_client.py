@@ -188,10 +188,52 @@ class KafkaRestClient:
                             return {"matched": matched, "candidates": candidates, "assign": assign_info}
                         if time.monotonic() >= deadline:
                             break
-                return {"matched": None, "candidates": candidates, "assign": assign_info}
+                # ★ לא נמצא match — דיאגנוסטיקה מכריעה: האם בכלל אפשר לקרוא מכל partition?
+                diag = await self._diagnose_partitions(
+                    client, consumers, topic, key_contains, headers_json, poll_headers)
+                return {"matched": None, "candidates": candidates, "assign": assign_info, "diag": diag}
             finally:
                 for ib, _p in consumers:
                     await self._safe_delete(client, ib)
+
+    async def _diagnose_partitions(self, client, consumers, topic: str, key_contains,
+                                   headers_json: Dict[str, str], poll_headers: Dict[str, str]):
+        """post-failure בלבד: לכל partition עושה seek-to-BEGINNING וקורא batch — מכריע אם
+        בכלל אפשר לקרוא ממנו (status/count) ומה ה-mac_sys_name שם. אם partition כלשהו מחזיר
+        count=0/שגיאה בעוד אחר מחזיר → בעיית fetch/leader צד-שרת ל-partition הזה."""
+        diag: Dict[int, Dict[str, Any]] = {}
+        for ib, p in consumers:
+            info: Dict[str, Any] = {"status": None, "count": 0, "sys": {}, "has_key": False}
+            try:
+                await client.post(f"{ib}/positions/beginning", headers=headers_json,
+                                  json={"partitions": [{"topic": topic, "partition": p}]}, auth=self.auth)
+                rr = await client.get(f"{ib}/records", headers=poll_headers,
+                                      params={"timeout": 1500}, auth=self.auth)
+                info["status"] = rr.status_code
+                if rr.status_code < 400:
+                    try:
+                        recs = rr.json()
+                    except Exception:
+                        recs = []
+                    if isinstance(recs, list):
+                        info["count"] = len(recs)
+                        for rec in recs:
+                            if not isinstance(rec, dict):
+                                continue
+                            dec = _decode_binary_record(rec, topic)
+                            vp = dec.get("value_parsed")
+                            sn = "?"
+                            if isinstance(vp, dict):
+                                hdr = vp.get("header") or vp.get("headers") or {}
+                                sn = (hdr.get("mac_sys_name") if isinstance(hdr, dict) else None) \
+                                    or vp.get("mac_sys_name") or "?"
+                            info["sys"][sn] = info["sys"].get(sn, 0) + 1
+                            if key_contains and key_contains in (dec.get("key") or ""):
+                                info["has_key"] = True
+            except httpx.HTTPError as e:
+                info["status"] = f"err:{e}"
+            diag[p] = info
+        return diag
 
     # ============================================================
     # Partition discovery — manual assign של *כל* ה-partitions, ללא Describe ACL
