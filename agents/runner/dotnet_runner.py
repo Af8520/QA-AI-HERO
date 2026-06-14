@@ -409,6 +409,15 @@ class DotNetRunner:
         if breakdown:
             self._log("CONSUME", "info",
                       "breakdown לפי mac_sys_name: " + json.dumps(breakdown, ensure_ascii=False))
+        # ★ אילו partitions באמת קראנו — מכריע בין "כיסוי חלקי" ל-"ה-Worker לא הפיק":
+        # אם רואים מספר partitions אבל אפס encryption_child_development_worker → בעיית test-data.
+        parts_seen = sorted({c.get("partition") for c in candidates if c.get("partition") is not None})
+        if parts_seen:
+            self._log("CONSUME", "info", f"partitions עם תעבורה (מתוך הנקראים): {parts_seen}")
+        if "encryption_child_development_worker" not in breakdown and candidates:
+            self._log("CONSUME", "warn",
+                      "ה-Worker (encryption_child_development_worker) לא כתב אף מסר ל-target בחלון ההמתנה "
+                      "— בדוק את ה-payload שפורסם מול חוקי הסינון (type_code / referral_date / member_id).")
         n_too_old = sum(1 for c in candidates if c.get("too_old"))
         if n_too_old:
             self._log("CONSUME", "info",
@@ -417,7 +426,8 @@ class DotNetRunner:
             sysname = _extract_sys_name(c.get("value_parsed"))
             old_mark = " ⏱too_old" if c.get("too_old") else ""
             self._log("candidate", "info",
-                      f"offset={c.get('offset')} key={c.get('key')} mac_sys_name={sysname}{old_mark}")
+                      f"p{c.get('partition')} offset={c.get('offset')} key={c.get('key')} "
+                      f"mac_sys_name={sysname}{old_mark}")
         if len(candidates) == 0:
             self._log("CONSUME", "warn",
                       f"לא הגיע אף מסר ל-target תוך {effective_timeout}s — ייתכן שה-Worker איטי/לא הפיק "
