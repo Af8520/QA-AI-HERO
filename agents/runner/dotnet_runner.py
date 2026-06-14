@@ -360,6 +360,11 @@ class DotNetRunner:
                 else:
                     self._log("CONSUME", "error",
                               f"assignment: {mode} — נכשל ({asg.get('reason', '')})")
+                # ★ כמה records כל partition החזיר בריצה החיה (seek-to-end) — מאתר delivery חסר
+                lc = rich.get("live_counts") or {}
+                if lc:
+                    self._log("CONSUME", "info",
+                              "live records לכל partition: " + json.dumps(lc, ensure_ascii=False))
                 # ★ דיאגנוסטיקת כשל: מה ניתן לקרוא מכל partition (seek-to-beginning) —
                 # מכריע בין "בעיית fetch צד-שרת" (partition מחזיר 0/שגיאה) ל-"בעיית תזמון".
                 diag = rich.get("diag") or {}

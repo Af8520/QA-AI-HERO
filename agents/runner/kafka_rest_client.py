@@ -12,6 +12,7 @@ Consume: Confluent REST Proxy v2 consumer API —
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import time
@@ -163,35 +164,44 @@ class KafkaRestClient:
                     if isinstance(pub_ts, int) and pub_ts > 0:
                         min_timestamp_ms = pub_ts - skew_ms
 
-                # 5. poll loop — סורק את *כל* ה-consumers בכל סיבוב; early-return ב-match
+                # 5. poll loop — סורק את *כל* ה-consumers *במקביל* (gather) בכל סיבוב.
+                # מקבילי + timeout ארוך נותן ל-proxy זמן למשוך partition שקט (seek-to-end על
+                # partition שקט מוסר מסר בודד רק עם מספיק polls/זמן). early-return ב-match.
+                live_counts: Dict[int, int] = {p: 0 for _, p in consumers}
+
+                async def _poll_one(ib, p):
+                    try:
+                        rr = await client.get(f"{ib}/records", headers=poll_headers,
+                                              params={"timeout": 2000}, auth=self.auth)
+                    except httpx.HTTPError as e:
+                        log.warning("kafka_rest_poll_transport_error", error=str(e))
+                        return p, []
+                    if rr.status_code >= 400:
+                        return p, []   # partition בודד נכשל — לא מפיל את כל ה-wait
+                    try:
+                        recs = rr.json()
+                    except Exception:
+                        recs = []
+                    return p, (recs if isinstance(recs, list) else [])
+
                 deadline = time.monotonic() + timeout_seconds
                 while time.monotonic() < deadline:
-                    for ib, p in consumers:
-                        try:
-                            rr = await client.get(f"{ib}/records", headers=poll_headers,
-                                                  params={"timeout": 500}, auth=self.auth)
-                        except httpx.HTTPError as e:
-                            log.warning("kafka_rest_poll_transport_error", error=str(e))
-                            continue
-                        if rr.status_code >= 400:
-                            continue   # partition בודד נכשל — לא מפיל את כל ה-wait
-                        try:
-                            records = rr.json()
-                        except Exception:
-                            records = []
+                    results = await asyncio.gather(*[_poll_one(ib, p) for ib, p in consumers])
+                    for p, records in results:
+                        live_counts[p] = live_counts.get(p, 0) + len(records)
                         matched = _scan_records(records, topic, match, candidates,
                                                 key_equals=key_equals, key_contains=key_contains,
                                                 min_timestamp_ms=min_timestamp_ms)
                         if matched is not None:
                             log.info("kafka_rest_consumed", topic=topic, offset=matched.get("offset"),
                                      partition=matched.get("partition"), candidates_seen=len(candidates))
-                            return {"matched": matched, "candidates": candidates, "assign": assign_info}
-                        if time.monotonic() >= deadline:
-                            break
+                            return {"matched": matched, "candidates": candidates,
+                                    "assign": assign_info, "live_counts": live_counts}
                 # ★ לא נמצא match — דיאגנוסטיקה מכריעה: האם בכלל אפשר לקרוא מכל partition?
                 diag = await self._diagnose_partitions(
                     client, consumers, topic, key_contains, headers_json, poll_headers)
-                return {"matched": None, "candidates": candidates, "assign": assign_info, "diag": diag}
+                return {"matched": None, "candidates": candidates, "assign": assign_info,
+                        "live_counts": live_counts, "diag": diag}
             finally:
                 for ib, _p in consumers:
                     await self._safe_delete(client, ib)
