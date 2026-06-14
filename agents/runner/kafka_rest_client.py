@@ -131,24 +131,45 @@ class KafkaRestClient:
             poll_headers = {"Accept": _BINARY_ACCEPT}
             candidates: List[Dict[str, Any]] = []
             try:
-                # subscribe
-                sub_url = f"{instance_base}/subscription"
-                rs = await client.post(sub_url, headers=headers_json, json={"topics": [topic]}, auth=self.auth)
-                if rs.status_code >= 400:
-                    return {"fatal_error": f"HTTP {rs.status_code} on subscribe: {rs.text[:200]}"}
-
-                # ★ warm-up: poll קצר לטריגר assignment, ואז seek-to-end (חסין offset committed ישן)
+                # ★ manual assign של *כל* ה-partitions (במקום subscribe) — חיוני!
+                # ה-group הקבוע משותף עם ה-Worker, אז subscribe נותן רק חלק מה-partitions
+                # (rebalancing) ומפספס את ה-partition שעליו נכתב המסר שלנו. manual assign
+                # נותן כיסוי מלא, ללא תלות בחלוקת ה-group.
+                assigned = False
                 try:
-                    await client.get(records_url, headers=poll_headers, params={"timeout": 500}, auth=self.auth)
-                    asg = await client.get(f"{instance_base}/assignments", headers=headers_json, auth=self.auth)
-                    if asg.status_code < 400:
-                        parts = (asg.json() or {}).get("partitions") or []
+                    tmeta = await client.get(f"{self.base}/topics/{topic}", headers=headers_json, auth=self.auth)
+                    if tmeta.status_code < 400:
+                        part_nums = [p.get("partition") for p in (tmeta.json() or {}).get("partitions") or []]
+                        parts = [{"topic": topic, "partition": p} for p in part_nums if p is not None]
                         if parts:
-                            await client.post(f"{instance_base}/positions/end",
-                                              headers=headers_json, json={"partitions": parts}, auth=self.auth)
-                            log.info("kafka_rest_seek_end", topic=topic, partitions=len(parts))
+                            asg = await client.post(f"{instance_base}/assignments",
+                                                    headers=headers_json, json={"partitions": parts}, auth=self.auth)
+                            if asg.status_code < 400:
+                                # seek-to-end על כל ה-partitions (חסין offset committed ישן)
+                                await client.post(f"{instance_base}/positions/end",
+                                                  headers=headers_json, json={"partitions": parts}, auth=self.auth)
+                                assigned = True
+                                log.info("kafka_rest_assigned_all", topic=topic, partitions=len(parts))
                 except httpx.HTTPError as e:
-                    log.warning("kafka_rest_seek_end_failed", error=str(e))  # נמשיך — timestamp filter יגבה
+                    log.warning("kafka_rest_manual_assign_failed", error=str(e))
+
+                # fallback: subscribe + seek-to-end (אם manual assign לא עבד — למשל אין Describe ACL)
+                if not assigned:
+                    log.warning("kafka_rest_fallback_subscribe", topic=topic)
+                    rs = await client.post(f"{instance_base}/subscription", headers=headers_json,
+                                           json={"topics": [topic]}, auth=self.auth)
+                    if rs.status_code >= 400:
+                        return {"fatal_error": f"HTTP {rs.status_code} on subscribe: {rs.text[:200]}"}
+                    try:
+                        await client.get(records_url, headers=poll_headers, params={"timeout": 500}, auth=self.auth)
+                        asg = await client.get(f"{instance_base}/assignments", headers=headers_json, auth=self.auth)
+                        if asg.status_code < 400:
+                            parts = (asg.json() or {}).get("partitions") or []
+                            if parts:
+                                await client.post(f"{instance_base}/positions/end",
+                                                  headers=headers_json, json={"partitions": parts}, auth=self.auth)
+                    except httpx.HTTPError as e:
+                        log.warning("kafka_rest_seek_end_failed", error=str(e))
 
                 # ★ ה-publish קורה כאן — אחרי שאנחנו ממוקמים על סוף ה-topic
                 min_timestamp_ms = 0
