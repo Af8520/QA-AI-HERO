@@ -414,21 +414,34 @@ async def test_consume_reads_per_partition_finds_worker_message(monkeypatch):
     def _inst(url):
         return url.split("/instances/")[1].split("/")[0] if "/instances/" in url else None
 
+    _HW5 = 395515   # offset של מסר ה-Worker ב-partition 5
+
     class _PerPartFake(_FakeProxyClient):
         def __init__(self, *a, **k):
             super().__init__(*a, **k)
             self._by_instance = {}   # instance_name → assigned partitions
+            self._pos = {}           # instance_name → current seek offset
 
         async def post(self, url, json=None, **kw):
+            inst = _inst(url)
             if url.endswith("/assignments"):
-                self._by_instance[_inst(url)] = [p["partition"] for p in (json or {}).get("partitions", [])]
+                self._by_instance[inst] = [p["partition"] for p in (json or {}).get("partitions", [])]
+            elif url.endswith("/positions/beginning"):
+                self._pos[inst] = 0
+            elif url.endswith("/positions/end"):
+                self._pos[inst] = 10_000_000        # tip
+            elif url.endswith("/positions"):
+                offs = (json or {}).get("offsets", [])
+                if offs:
+                    self._pos[inst] = offs[0].get("offset", 0)
             return await super().post(url, json=json, **kw)
 
         async def get(self, url, **kw):
             self.calls.append(("GET", url))
             if url.endswith("/records"):
-                # רק ה-consumer המוקצה ל-partition 5 מחזיר את מסר ה-Worker
-                if self._by_instance.get(_inst(url)) == [5]:
+                inst = _inst(url)
+                # רק p5 מכיל את מסר ה-Worker, וקריא רק כשממוקמים *בתוך* ה-data (offset <= HW)
+                if self._by_instance.get(inst) == [5] and self._pos.get(inst, 10_000_000) <= _HW5:
                     return _FakeResp(200, [worker_rec])
                 return _FakeResp(200, [])
             return _FakeResp(200, {})

@@ -148,56 +148,73 @@ class KafkaRestClient:
                                "parts": [{"topic": topic, "partition": p} for _, p in consumers]}
                 log.info("kafka_rest_per_partition_consumers", topic=topic, mode=mode, n=len(consumers))
 
-                # 3. seek-to-end על כל ה-consumers *ממש לפני* ה-publish (מיקום אחיד לסוף)
-                for ib, p in consumers:
-                    try:
-                        await client.post(f"{ib}/positions/end", headers=headers_json,
-                                          json={"partitions": [{"topic": topic, "partition": p}]},
-                                          auth=self.auth)
-                    except httpx.HTTPError:
-                        pass
-
-                # 4. publish (on_ready) + timestamp filter
+                # 3. publish (on_ready) + timestamp filter
                 min_timestamp_ms = 0
                 if on_ready is not None:
                     pub_ts = await on_ready()
                     if isinstance(pub_ts, int) and pub_ts > 0:
                         min_timestamp_ms = pub_ts - skew_ms
 
-                # 5. poll loop — סורק את *כל* ה-consumers *במקביל* (gather) בכל סיבוב.
-                # מקבילי + timeout ארוך נותן ל-proxy זמן למשוך partition שקט (seek-to-end על
-                # partition שקט מוסר מסר בודד רק עם מספיק polls/זמן). early-return ב-match.
+                # 4. ★ קריאה אמינה דרך re-seek לאופסט ספציפי (לא tip-wait).
+                # ה-proxy לא דוחף מסר *בודד* ל-partition שקט בהמתנה בסוף (נצפה: live=0 לכולם
+                # חוץ מ-p1 הפעיל). אבל קריאה מאופסט-data-קיים *כן* אמינה. לכן: binary-search ל-HW
+                # פעם אחת לכל partition, ואז כל סבב re-seek לאופסט + קריאה קדימה — המסר של ה-Worker
+                # נקרא ברגע שהוא קיים בלוג. starts[p] מתקדם כדי לא לקרוא ישנים שוב.
+                starts: Dict[int, Optional[int]] = {p: None for _, p in consumers}
                 live_counts: Dict[int, int] = {p: 0 for _, p in consumers}
 
-                async def _poll_one(ib, p):
+                async def _scan_partition(ib, p):
+                    if starts[p] is None:
+                        end = await self._find_data_end(client, ib, topic, p, headers_json, poll_headers)
+                        starts[p] = max(0, end - 2000)   # התחל מעט לפני ה-HW (timestamp filter דוחה ישנים)
                     try:
-                        rr = await client.get(f"{ib}/records", headers=poll_headers,
-                                              params={"timeout": 2000}, auth=self.auth)
-                    except httpx.HTTPError as e:
-                        log.warning("kafka_rest_poll_transport_error", error=str(e))
-                        return p, []
-                    if rr.status_code >= 400:
-                        return p, []   # partition בודד נכשל — לא מפיל את כל ה-wait
-                    try:
-                        recs = rr.json()
-                    except Exception:
-                        recs = []
-                    return p, (recs if isinstance(recs, list) else [])
+                        await client.post(f"{ib}/positions", headers=headers_json,
+                                          json={"offsets": [{"topic": topic, "partition": p,
+                                                             "offset": starts[p]}]}, auth=self.auth)
+                    except httpx.HTTPError:
+                        return None
+                    for _ in range(8):   # קרא קדימה כמה batches של data קיים
+                        try:
+                            rr = await client.get(f"{ib}/records", headers=poll_headers,
+                                                  params={"timeout": 1000}, auth=self.auth)
+                        except httpx.HTTPError:
+                            break
+                        if rr.status_code >= 400:
+                            break
+                        try:
+                            recs = rr.json()
+                        except Exception:
+                            recs = []
+                        if not isinstance(recs, list) or not recs:
+                            break
+                        live_counts[p] = live_counts.get(p, 0) + len(recs)
+                        maxoff = max((r.get("offset", -1) for r in recs if isinstance(r, dict)), default=-1)
+                        if maxoff >= 0:
+                            starts[p] = maxoff + 1   # התקדם — לא לקרוא שוב את אותם הישנים
+                        m = _scan_records(recs, topic, match, candidates,
+                                          key_equals=key_equals, key_contains=key_contains,
+                                          min_timestamp_ms=min_timestamp_ms)
+                        if m is not None:
+                            return m
+                    return None
 
                 deadline = time.monotonic() + timeout_seconds
-                while time.monotonic() < deadline:
-                    results = await asyncio.gather(*[_poll_one(ib, p) for ib, p in consumers])
-                    for p, records in results:
-                        live_counts[p] = live_counts.get(p, 0) + len(records)
-                        matched = _scan_records(records, topic, match, candidates,
-                                                key_equals=key_equals, key_contains=key_contains,
-                                                min_timestamp_ms=min_timestamp_ms)
-                        if matched is not None:
-                            log.info("kafka_rest_consumed", topic=topic, offset=matched.get("offset"),
-                                     partition=matched.get("partition"), candidates_seen=len(candidates))
-                            return {"matched": matched, "candidates": candidates,
-                                    "assign": assign_info, "live_counts": live_counts}
-                # ★ לא נמצא match — דיאגנוסטיקה מכריעה: האם בכלל אפשר לקרוא מכל partition?
+                matched = None
+                while time.monotonic() < deadline and matched is None:
+                    results = await asyncio.gather(*[_scan_partition(ib, p) for ib, p in consumers])
+                    for m in results:
+                        if m is not None:
+                            matched = m
+                            break
+                    if matched is None and time.monotonic() < deadline:
+                        await asyncio.sleep(6)   # תן ל-Worker זמן לכתוב לפני הסבב הבא
+
+                if matched is not None:
+                    log.info("kafka_rest_consumed", topic=topic, offset=matched.get("offset"),
+                             partition=matched.get("partition"), candidates_seen=len(candidates))
+                    return {"matched": matched, "candidates": candidates,
+                            "assign": assign_info, "live_counts": live_counts}
+                # ★ לא נמצא match — דיאגנוסטיקה מכריעה
                 diag = await self._diagnose_partitions(
                     client, consumers, topic, key_contains, headers_json, poll_headers)
                 return {"matched": None, "candidates": candidates, "assign": assign_info,
@@ -205,6 +222,34 @@ class KafkaRestClient:
             finally:
                 for ib, _p in consumers:
                     await self._safe_delete(client, ib)
+
+    async def _find_data_end(self, client, ib: str, topic: str, p: int,
+                             headers_json: Dict[str, str], poll_headers: Dict[str, str]) -> int:
+        """binary-search לאופסט גבוה שעדיין יש בו data (≈ HW). seek לאופסט עם data → GET
+        מחזיר רשומות (אמין); seek מעבר ל-HW → auto.offset.reset=latest → GET ריק. כך מתכנסים
+        ל-HW בלי תלות ב-tip-wait השבור וללא Describe ACL. מחזיר את ה-lo (אופסט עם data)."""
+        lo, hi = 0, 10_000_000
+        while hi - lo > 2000:
+            mid = (lo + hi) // 2
+            try:
+                await client.post(f"{ib}/positions", headers=headers_json,
+                                  json={"offsets": [{"topic": topic, "partition": p, "offset": mid}]},
+                                  auth=self.auth)
+                rr = await client.get(f"{ib}/records", headers=poll_headers,
+                                      params={"timeout": 800}, auth=self.auth)
+            except httpx.HTTPError:
+                break
+            recs = []
+            if rr.status_code < 400:
+                try:
+                    recs = rr.json()
+                except Exception:
+                    recs = []
+            if isinstance(recs, list) and recs:
+                lo = mid          # יש data ב-mid → ה-HW גבוה יותר
+            else:
+                hi = mid          # ריק → mid >= HW
+        return lo
 
     async def _diagnose_partitions(self, client, consumers, topic: str, key_contains,
                                    headers_json: Dict[str, str], poll_headers: Dict[str, str]):
