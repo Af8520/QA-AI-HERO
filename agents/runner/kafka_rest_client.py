@@ -165,8 +165,9 @@ class KafkaRestClient:
 
                 async def _scan_partition(ib, p):
                     if starts[p] is None:
-                        end = await self._find_data_end(client, ib, topic, p, headers_json, poll_headers)
-                        starts[p] = max(0, end - 2000)   # התחל מעט לפני ה-HW (timestamp filter דוחה ישנים)
+                        # התחל קרוב ל-HW (לא log-start) — מכבד retention ו-out-of-range
+                        starts[p] = await self._find_recent_start(
+                            client, ib, topic, p, headers_json, poll_headers)
                     try:
                         await client.post(f"{ib}/positions", headers=headers_json,
                                           json={"offsets": [{"topic": topic, "partition": p,
@@ -223,12 +224,30 @@ class KafkaRestClient:
                 for ib, _p in consumers:
                     await self._safe_delete(client, ib)
 
-    async def _find_data_end(self, client, ib: str, topic: str, p: int,
-                             headers_json: Dict[str, str], poll_headers: Dict[str, str]) -> int:
-        """binary-search לאופסט גבוה שעדיין יש בו data (≈ HW). seek לאופסט עם data → GET
-        מחזיר רשומות (אמין); seek מעבר ל-HW → auto.offset.reset=latest → GET ריק. כך מתכנסים
-        ל-HW בלי תלות ב-tip-wait השבור וללא Describe ACL. מחזיר את ה-lo (אופסט עם data)."""
-        lo, hi = 0, 10_000_000
+    async def _find_recent_start(self, client, ib: str, topic: str, p: int,
+                                 headers_json: Dict[str, str], poll_headers: Dict[str, str],
+                                 lookback: int = 3000) -> int:
+        """מחזיר אופסט קריאה התחלתי קרוב ל-HW (כדי לא לקרוא את כל ה-retention).
+
+        ★ ה-topic בעל retention → ה-log-start הוא לא 0. seek ל-offset 0 = out-of-range →
+        reset ל-tip (ריק). לכן: (1) /positions/beginning → log-start אמיתי; (2) binary-search
+        בתוך [log_start, ...] ל-HW (seek לאופסט עם data → records; מעבר ל-HW → ריק).
+        מחזיר max(log_start, HW - lookback) — תמיד אופסט תקף (בטווח)."""
+        # 1. log-start דרך /positions/beginning (אמין, להבדיל מ-offset 0)
+        log_start = 0
+        try:
+            await client.post(f"{ib}/positions/beginning", headers=headers_json,
+                              json={"partitions": [{"topic": topic, "partition": p}]}, auth=self.auth)
+            rr = await client.get(f"{ib}/records", headers=poll_headers,
+                                  params={"timeout": 1000}, auth=self.auth)
+            recs = rr.json() if rr.status_code < 400 else []
+            if isinstance(recs, list) and recs:
+                log_start = min((r.get("offset", 0) for r in recs if isinstance(r, dict)), default=0)
+        except (httpx.HTTPError, Exception):
+            pass
+
+        # 2. binary-search ל-HW בתוך [log_start, log_start + רחב] — mid תמיד >= log_start (בטווח)
+        lo, hi = log_start, log_start + 20_000_000
         while hi - lo > 2000:
             mid = (lo + hi) // 2
             try:
@@ -249,7 +268,7 @@ class KafkaRestClient:
                 lo = mid          # יש data ב-mid → ה-HW גבוה יותר
             else:
                 hi = mid          # ריק → mid >= HW
-        return lo
+        return max(log_start, lo - lookback)
 
     async def _diagnose_partitions(self, client, consumers, topic: str, key_contains,
                                    headers_json: Dict[str, str], poll_headers: Dict[str, str]):
