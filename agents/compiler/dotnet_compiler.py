@@ -317,12 +317,20 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
 
 ★★★ expected_fields — אימות השדות המומרים ב-target ★★★
 מתוך שורות "במסר היעד header/root/_data ודא שדות ...":
-- הכנס את ה**ערכים המומרים הקונקרטיים** עם **dotted paths** (כולל index ל-arrays):
-  "header.mac_sys_name":"worker", "root.action":"create", "root.entity_type":"child_development",
-  "_data.parameters.0.gender":"זכר".
+- ★★★ **חובה: כלול את שדה הזהות שלנו** — `_data.parameters.0.member_id` עם ה-**member_id המדויק**
+  מה-publish. זה מה שמאשר שתפסנו את *המסר שלנו* ולא מסר Worker אקראי (ה-assertion הוא ה-correlation
+  האמיתי — אם ה-member_id לא תואם, התסריט נכשל, וזה רצוי).
+- הכנס ערכים מומרים קונקרטיים עם **dotted paths**, ו**תמיד עם index ל-arrays**
+  (`_data.parameters.0.<field>` — לא `_data.parameters.<field>`): למשל
+  "_data.parameters.0.gender":"זכר", "root.action":"create", "root.entity_type":"<TARGET_ENTITY_TYPE>".
+- קח את הערכים מ-TRANSFORMATIONS + TARGET_EXAMPLE/target_templates (שניהם סופקו) ומטקסט התסריט
+  ("ודא ש...") — **אל תמציא** ערכים שאינך יכול לגזור מהם.
 - ה-Worker עושה טרנספורמציה (gender:M → "זכר") — אמת את ה**ערך המומר** הצפוי ב-target, לא ערך המקור.
-- ★ **דלג על שדות דינמיים** — message_id=GUID חדש, תאריכים, timestamps, כל GUID. אל תכניס אותם
-  ל-expected_fields (הם משתנים בכל ריצה).
+- ★★★ **אל תאמת metadata של ה-producer** — `header.mac_sys_name`, `header.mac_producer_name`,
+  `header.mac_app_*`, וכל `header.mac_*`. אינך יודע את ערכיהם (הם של ה-Worker, לא מהתסריט) והם **לא**
+  הטרנספורמציה תחת-בדיקה. **אל תכניס אותם ל-expected_fields.** (התאמת ה-entity_type ב-match כבר מזהה
+  שזה מסר Worker מהסוג הנכון.)
+- ★ **דלג על שדות דינמיים** — message_id=GUID, תאריכים, timestamps, כל GUID — משתנים בכל ריצה.
 
 החזר JSON בלבד:
 {
@@ -332,7 +340,7 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
     {"kind": "kafka_wait", "topic": "<TARGET_TOPIC>",
      "key_contains": "<member_id הייחודי — מספר ארוך, לא '0'/code>",
      "match": {"entity_type": "<TARGET_ENTITY_TYPE>"},
-     "expected_fields": {"header.mac_sys_name":"...", "root.action":"...", "_data.parameters.0.gender":"..."},
+     "expected_fields": {"_data.parameters.0.member_id":"<member_id שלנו>", "root.action":"...", "_data.parameters.0.gender":"<מומר>"},
      "timeout_seconds": 150, "expect_no_message": false}
   ],
   "expected_status": 200,

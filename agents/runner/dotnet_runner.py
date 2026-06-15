@@ -836,30 +836,84 @@ def _resolve_raw_path(obj: Any, path: str) -> Any:
     return cur
 
 
+def _resolve_raw_path_autolist(obj: Any, path: str) -> Any:
+    """כמו _resolve_raw_path, אבל אם segment נוחת על list וה-part הבא אינו index מספרי —
+    צולל אוטומטית ל-[0]. כך '_data.parameters.member_id' פותר ל-'_data.parameters.0.member_id'
+    (ה-LLM נוטה להשמיט את ה-index). _FIELD_MISSING אם לא קיים."""
+    cur = obj
+    for part in path.split("."):
+        if isinstance(cur, list):
+            is_index = True
+            try:
+                int(part)
+            except ValueError:
+                is_index = False
+            if not is_index:          # list + שם-שדה → auto-index ל-[0] ואז המשך
+                if not cur:
+                    return _FIELD_MISSING
+                cur = cur[0]
+        if isinstance(cur, dict):
+            if part in cur:
+                cur = cur[part]
+            else:
+                return _FIELD_MISSING
+        elif isinstance(cur, list):
+            try:
+                idx = int(part)
+            except ValueError:
+                return _FIELD_MISSING
+            if -len(cur) <= idx < len(cur):
+                cur = cur[idx]
+            else:
+                return _FIELD_MISSING
+        else:
+            return _FIELD_MISSING
+    return cur
+
+
 def _resolve_field_path(obj: Any, path: str) -> Any:
-    """כמו _resolve_raw_path, אבל סובלני להבדל logical↔wire:
+    """כמו _resolve_raw_path, אבל סובלני להבדל logical↔wire ול-list ללא index:
     - 'root.X' שלא נמצא → ננסה 'X' ברמה העליונה (כי root משוטח ב-wire).
     - 'headers.X' שלא נמצא → ננסה 'header.X' (header יחיד ב-wire).
-    ככה אסרשנים עובדים בין אם המוח פלט root.X/headers.X ובין אם המסר ב-wire format.
+    - 'a.list.field' (list ללא index) → auto-index ל-[0].
+    ככה אסרשנים עובדים בין אם המוח פלט root.X/headers.X/בלי index ובין אם המסר ב-wire format.
     """
     val = _resolve_raw_path(obj, path)
     if val is _FIELD_MISSING and path.startswith("root."):
         val = _resolve_raw_path(obj, path[len("root."):])
     if val is _FIELD_MISSING and path.startswith("headers."):
         val = _resolve_raw_path(obj, "header." + path[len("headers."):])
+    # ★ סלחנות list — auto-index ל-[0] (וגם בשילוב עם root./headers.)
+    if val is _FIELD_MISSING:
+        val = _resolve_raw_path_autolist(obj, path)
+    if val is _FIELD_MISSING and path.startswith("root."):
+        val = _resolve_raw_path_autolist(obj, path[len("root."):])
+    if val is _FIELD_MISSING and path.startswith("headers."):
+        val = _resolve_raw_path_autolist(obj, "header." + path[len("headers."):])
     return val
+
+
+def _is_producer_metadata_key(k: str) -> bool:
+    """True ל-header.mac_* / headers.mac_* — metadata של ה-producer (mac_sys_name, mac_producer_name,
+    mac_app_*, mac_channel, mac_correlation_id...). אלה *לא* טרנספורמציה תחת-בדיקה, וה-LLM אינו יודע
+    את ערכיהם (הם של ה-Worker) → לא לאמת אותם (rest ביטחון; ה-compiler כבר לא אמור לפלוט אותם)."""
+    kl = k.lower()
+    return kl.startswith("header.mac_") or kl.startswith("headers.mac_")
 
 
 def _check_expected_fields(value: Dict[str, Any], expected: Dict[str, Any]) -> List[str]:
     """מחזיר רשימה של שדות שחסרים / לא תואמים. ריק = הכל בסדר.
-    מפתח עם נקודה ('header.mac_sys_name', '_data.parameters.0.gender') נחשב dotted path מקונן.
+    מפתח עם נקודה ('root.action', '_data.parameters.0.gender') נחשב dotted path מקונן.
+    ★ שדות header.mac_* (metadata של ה-producer) מדולגים — לא הטרנספורמציה הנבדקת.
     """
     issues: List[str] = []
     if not expected:
         return issues
     if not isinstance(value, (dict, list)):
-        return list(expected.keys())
+        return [k for k in expected.keys() if not _is_producer_metadata_key(k)]
     for k, want in expected.items():
+        if _is_producer_metadata_key(k):
+            continue                  # metadata של ה-producer → soft (מדלגים)
         actual = _resolve_field_path(value, k) if "." in k else (
             value.get(k, _FIELD_MISSING) if isinstance(value, dict) else _FIELD_MISSING
         )

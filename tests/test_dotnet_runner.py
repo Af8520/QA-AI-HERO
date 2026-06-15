@@ -88,10 +88,41 @@ def test_check_expected_fields_dotted_and_list():
     # ערך מומר שגוי → issue
     issues = _check_expected_fields(value, {"_data.parameters.0.gender": "M"})
     assert any("gender" in i for i in issues)
-    # path חסר → missing
-    assert any("missing" in i for i in _check_expected_fields(value, {"header.mac_channel": "x"}))
+    # path חסר (לא-metadata) → missing
+    assert any("missing" in i for i in _check_expected_fields(value, {"root.no_such_field": "x"}))
     # list index מחוץ לטווח → missing
     assert any("missing" in i for i in _check_expected_fields(value, {"_data.parameters.5.gender": "x"}))
+
+
+def test_check_expected_fields_auto_list_index():
+    """★ ה-LLM נוטה להשמיט index ל-list: '_data.parameters.member_id' צריך לפתור ל-[0]."""
+    value = {"_data": {"parameters": [{"member_id": "038374476", "gender": "זכר"}]}}
+    # בלי index — אמור לפתור אוטומטית ל-parameters[0]
+    assert _check_expected_fields(value, {"_data.parameters.member_id": "038374476"}) == []
+    assert _check_expected_fields(value, {"_data.parameters.gender": "זכר"}) == []
+    # ערך שגוי עדיין נתפס
+    assert any("≠" in i for i in _check_expected_fields(value, {"_data.parameters.member_id": "999"}))
+    # list ריק → missing (לא קורס)
+    assert any("missing" in i for i in
+               _check_expected_fields({"_data": {"parameters": []}}, {"_data.parameters.member_id": "1"}))
+
+
+def test_check_expected_fields_skips_producer_metadata():
+    """★ header.mac_* = metadata של ה-producer (לא טרנספורמציה) → מדולג, גם אם הערך 'שגוי'.
+    ה-LLM לא יודע את ערך ה-mac_sys_name האמיתי (encryption_child_development_worker)."""
+    value = {"header": {"mac_sys_name": "encryption_child_development_worker"},
+             "action": "create",
+             "_data": {"parameters": [{"member_id": "555"}]}}
+    # mac_sys_name='Worker' שגוי — אבל מדולג (metadata) → אין כשל
+    assert _check_expected_fields(value, {"header.mac_sys_name": "Worker"}) == []
+    assert _check_expected_fields(value, {"headers.mac_producer_name": "Worker"}) == []
+    # שדה דאטה אמיתי עדיין נאכף לצד metadata מדולג
+    issues = _check_expected_fields(value, {
+        "header.mac_sys_name": "Worker",          # מדולג
+        "_data.parameters.0.member_id": "999",    # שגוי → נתפס
+    })
+    assert any("member_id" in i for i in issues)
+    assert not any("mac_sys_name" in i for i in issues)
 
 
 @pytest.mark.asyncio
