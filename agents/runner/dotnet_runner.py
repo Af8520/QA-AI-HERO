@@ -26,6 +26,26 @@ from models.test_case import StepResult, TestCaseResult, TestStatus
 
 log = get_logger(__name__)
 
+# ★ token שה-compiler שם כערך ה-member_id; ה-runner מחליף אותו בערך ייחודי לכל ריצה,
+# כדי שה-key ב-target topic יהיה ייחודי ולא יתנגש עם מסרים של טסטים אחרים/קודמים.
+_UNIQUE_TOKEN = "__UNIQUE_ID__"
+
+
+def _gen_unique_member_id() -> str:
+    """member_id ייחודי (9 ספרות מ-ms timestamp). TCs רצים שניות זה מזה → ייחודי בין טסטים וריצות."""
+    return str(int(time.time() * 1000) % 1_000_000_000).zfill(9)
+
+
+def _substitute_token(obj: Any, token: str, value: str) -> Any:
+    """מחליף רקורסיבית כל מופע של token (כ-substring) בכל המחרוזות בתוך dict/list/str."""
+    if isinstance(obj, dict):
+        return {k: _substitute_token(v, token, value) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_substitute_token(v, token, value) for v in obj]
+    if isinstance(obj, str):
+        return obj.replace(token, value)
+    return obj
+
 
 class DotNetRunner:
     name = "dotnet"
@@ -41,6 +61,34 @@ class DotNetRunner:
             "status": status,   # info | success | warn | error
             "message": message,
         })
+
+    def _apply_unique_id(self, executable: DotNetExecutableTestCase) -> Optional[str]:
+        """מחליף את ה-token __UNIQUE_ID__ בכל ה-actions בערך member_id ייחודי לריצה.
+        publish.value/key + wait.key_contains/key_equals/match/expected_fields — כולם מקבלים
+        את *אותו* ערך, כך שה-Worker מפיק key ייחודי ב-target ואנחנו תופסים בדיוק את המסר שלנו
+        (וטסט שלילי לא תופס מסר של טסט קודם). אם ה-compiler לא השתמש ב-token → no-op."""
+        token, uid, used = _UNIQUE_TOKEN, _gen_unique_member_id(), False
+        for action in executable.actions:
+            if isinstance(action, KafkaPublishAction):
+                new_val = _substitute_token(action.value, token, uid)
+                if new_val != action.value:
+                    action.value, used = new_val, True
+                if action.key and token in action.key:
+                    action.key, used = action.key.replace(token, uid), True
+            elif isinstance(action, KafkaWaitAction):
+                if action.key_contains and token in action.key_contains:
+                    action.key_contains, used = action.key_contains.replace(token, uid), True
+                if action.key_equals and token in action.key_equals:
+                    action.key_equals, used = action.key_equals.replace(token, uid), True
+                new_match = _substitute_token(action.match, token, uid)
+                if new_match != action.match:
+                    action.match, used = new_match, True
+                new_ef = _substitute_token(action.expected_fields, token, uid)
+                if new_ef != action.expected_fields:
+                    action.expected_fields, used = new_ef, True
+        if used:
+            self._log("UNIQUE", "info", f"member_id ייחודי לריצה: {uid}")
+        return uid if used else None
 
     async def execute(self, executable: DotNetExecutableTestCase) -> TestCaseResult:
         """מבצע את רצף ה-actions אחד אחרי השני. status סופי הוא AND של כולם."""
@@ -61,6 +109,8 @@ class DotNetRunner:
         error_message: Optional[str] = None
         # ★ run log — נצבר פר TC; ה-pipeline משדר אותו כ-log_line + מתמיד לדיסק.
         self._log_entries = []
+        # ★ member_id ייחודי לריצה — מחליף __UNIQUE_ID__ ב-publish+wait (key/match/expected_fields)
+        self._apply_unique_id(executable)
 
         def _record(step: StepResult, action, obs):
             nonlocal overall_status, error_message

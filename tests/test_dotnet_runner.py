@@ -17,6 +17,7 @@ from agents.runner.dotnet_runner import (  # noqa: E402
     DotNetRunner,
     _check_expected_fields,
     _matches,
+    _substitute_token,
     _to_wire_message,
 )
 from models.dotnet_test_case import (  # noqa: E402
@@ -26,6 +27,47 @@ from models.dotnet_test_case import (  # noqa: E402
     KafkaWaitAction,
 )
 from models.test_case import TestStatus  # noqa: E402
+
+
+def test_substitute_token():
+    obj = {"a": "__UNIQUE_ID__", "b": {"c": ["x", "__UNIQUE_ID__"]}, "n": 5}
+    out = _substitute_token(obj, "__UNIQUE_ID__", "123456789")
+    assert out["a"] == "123456789"
+    assert out["b"]["c"] == ["x", "123456789"]
+    assert out["n"] == 5   # non-strings untouched
+
+
+def test_apply_unique_id_replaces_consistently():
+    """★ אותו member_id ייחודי מוזרק ל-publish + correlation + expected_fields."""
+    ex = DotNetExecutableTestCase(
+        test_case_id="TC-u",
+        actions=[
+            KafkaPublishAction(topic="src",
+                               value={"_data": {"member_details": {"member_id": "__UNIQUE_ID__"}}}),
+            KafkaWaitAction(topic="tgt", key_contains="__UNIQUE_ID__",
+                            match={"entity_type": "child_development",
+                                   "_data.parameters.0.member_id": "__UNIQUE_ID__"},
+                            expected_fields={"_data.parameters.0.member_id": "__UNIQUE_ID__"}),
+        ],
+    )
+    uid = DotNetRunner()._apply_unique_id(ex)
+    assert uid and uid.isdigit() and uid != "__UNIQUE_ID__"
+    pub, wait = ex.actions
+    assert pub.value["_data"]["member_details"]["member_id"] == uid   # מקור
+    assert wait.key_contains == uid
+    assert wait.match["_data.parameters.0.member_id"] == uid          # correlation
+    assert wait.expected_fields["_data.parameters.0.member_id"] == uid
+    assert wait.match["entity_type"] == "child_development"           # ללא token — נשאר
+
+
+def test_apply_unique_id_noop_without_token():
+    """אם ה-compiler לא השתמש ב-token (member_id קונקרטי) → no-op (degradation graceful)."""
+    ex = DotNetExecutableTestCase(
+        test_case_id="TC-n",
+        actions=[KafkaWaitAction(topic="t", key_contains="555", match={"entity_type": "x"})],
+    )
+    assert DotNetRunner()._apply_unique_id(ex) is None
+    assert ex.actions[0].key_contains == "555"
 
 
 def test_matches_helper():

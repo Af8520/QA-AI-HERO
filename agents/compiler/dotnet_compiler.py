@@ -321,21 +321,29 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
 - אל תשתמש ב-entity_id/referral_id אם ה-key לא בנוי מהם.
 
 ★★★ expected_fields — אימות השדות המומרים ב-target ★★★
-מתוך שורות "במסר היעד header/root/_data ודא שדות ...":
-- ★★★ **חובה: כלול את שדה הזהות שלנו** — `_data.parameters.0.member_id` עם ה-**member_id המדויק**
-  מה-publish. זה מה שמאשר שתפסנו את *המסר שלנו* ולא מסר Worker אקראי (ה-assertion הוא ה-correlation
-  האמיתי — אם ה-member_id לא תואם, התסריט נכשל, וזה רצוי).
-- הכנס ערכים מומרים קונקרטיים עם **dotted paths**, ו**תמיד עם index ל-arrays**
-  (`_data.parameters.0.<field>` — לא `_data.parameters.<field>`): למשל
-  "_data.parameters.0.gender":"זכר", "root.action":"create", "root.entity_type":"<TARGET_ENTITY_TYPE>".
-- קח את הערכים מ-TRANSFORMATIONS + TARGET_EXAMPLE/target_templates (שניהם סופקו) ומטקסט התסריט
-  ("ודא ש...") — **אל תמציא** ערכים שאינך יכול לגזור מהם.
-- ה-Worker עושה טרנספורמציה (gender:M → "זכר") — אמת את ה**ערך המומר** הצפוי ב-target, לא ערך המקור.
+- ★★★ **חובה: כלול את שדה הזהות שלנו** — `_data.parameters.0.member_id` עם ה-member_id מה-publish
+  (ראה גם __UNIQUE_ID__ למטה). זה מאשר שתפסנו את *המסר שלנו*.
+- ★★★ **אסור להמציא שדות.** כלול **רק** paths ש**קיימים בפועל ב-TARGET_EXAMPLE/target_templates**
+  שסופק. אם שדה (למשל "gender") **לא קיים** ב-TARGET_EXAMPLE — **אל תאמת אותו** (תקבל "missing").
+  אם התסריט מזכיר "ודא שדה X" אבל X לא ב-TARGET_EXAMPLE — רשום ב-compiler_notes, אל תכניס ל-expected_fields.
+- מעבר ל-member_id, הוסף **רק** את הטרנספורמציות שמופיעות ב-TRANSFORMATIONS *ושקיימות ב-TARGET_EXAMPLE*,
+  עם dotted path מדויק ו**index ל-arrays** (`_data.parameters.0.<field>`). אמת את ה**ערך המומר**
+  (אם TRANSFORMATIONS אומר gender M→"זכר" *ו*-gender קיים ב-TARGET_EXAMPLE → `"_data.parameters.0.gender":"זכר"`).
+- אם אין טרנספורמציה מפורשת או שאינך בטוח — **השאר את expected_fields עם member_id בלבד** (+root.action).
+  עדיף assertion מינימלי שעובר על assertion מומצא שנכשל.
 - ★★★ **אל תאמת metadata של ה-producer** — `header.mac_sys_name`, `header.mac_producer_name`,
-  `header.mac_app_*`, וכל `header.mac_*`. אינך יודע את ערכיהם (הם של ה-Worker, לא מהתסריט) והם **לא**
-  הטרנספורמציה תחת-בדיקה. **אל תכניס אותם ל-expected_fields.** (התאמת ה-entity_type ב-match כבר מזהה
-  שזה מסר Worker מהסוג הנכון.)
+  `header.mac_app_*`, וכל `header.mac_*`. אינך יודע את ערכיהם (הם של ה-Worker) והם לא הטרנספורמציה
+  הנבדקת. **אל תכניס אותם ל-expected_fields.**
 - ★ **דלג על שדות דינמיים** — message_id=GUID, תאריכים, timestamps, כל GUID — משתנים בכל ריצה.
+
+★★★ __UNIQUE_ID__ — member_id ייחודי בכל ריצה (קריטי) ★★★
+ה-target topic מלא בכפילויות של אותו member_id (555...) → אי-אפשר לזהות את המסר *שלנו* ביחס לטסטים
+אחרים. הפתרון: השתמש ב**token המילולי `__UNIQUE_ID__`** כערך ה-member_id (השדה שה-target KEY בנוי ממנו),
+ב**שני** המקומות — וה-runner יחליף אותו בערך ייחודי לפני ההרצה:
+1. ב-`value` של kafka_publish — בשדה ה-member_id במקור (לפי key_built_from, למשל `_data.member_details.member_id`).
+2. ב-kafka_wait — ב-`key_contains`, ב-`match._data.parameters.0.member_id`, וב-`expected_fields._data.parameters.0.member_id`.
+★ אל תשתמש ב-__UNIQUE_ID__ ל-member_id_code/code — רק לשדה ה-member_id הארוך שבונה את ה-key.
+(אם בכל זאת יש member_id קונקרטי שחובה לפי התסריט — השתמש בו; אחרת __UNIQUE_ID__ עדיף.)
 
 החזר JSON בלבד:
 {
@@ -343,9 +351,9 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
   "actions": [
     {"kind": "kafka_publish", "topic": "<SOURCE_TOPIC>", "value": {... template מלא עם דריסות ...}},
     {"kind": "kafka_wait", "topic": "<TARGET_TOPIC>",
-     "key_contains": "<member_id הייחודי — מספר ארוך, לא '0'/code>",
-     "match": {"entity_type":"<TARGET_ENTITY_TYPE>", "_data.parameters.0.member_id":"<member_id שלנו>", "root.action":"<create/delete>"},
-     "expected_fields": {"_data.parameters.0.member_id":"<member_id שלנו>", "_data.parameters.0.gender":"<מומר>"},
+     "key_contains": "__UNIQUE_ID__",
+     "match": {"entity_type":"<TARGET_ENTITY_TYPE>", "_data.parameters.0.member_id":"__UNIQUE_ID__", "root.action":"<create/delete>"},
+     "expected_fields": {"_data.parameters.0.member_id":"__UNIQUE_ID__"},
      "timeout_seconds": 150, "expect_no_message": false}
   ],
   "expected_status": 200,
