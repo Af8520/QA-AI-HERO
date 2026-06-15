@@ -510,19 +510,58 @@ def _get_path_raw(d: Any, path: str) -> Any:
     return cur
 
 
+def _get_path_raw_autolist(d: Any, path: str) -> Any:
+    """כמו _get_path_raw, אבל אם part נוחת על list וה-part אינו index → צולל אוטומטית ל-[0].
+    כך '_data.parameters.member_id' פותר ל-'_data.parameters.0.member_id'."""
+    cur = d
+    for part in path.split("."):
+        if isinstance(cur, list):
+            is_index = True
+            try:
+                int(part)
+            except ValueError:
+                is_index = False
+            if not is_index:
+                if not cur:
+                    return _MISSING
+                cur = cur[0]
+        if isinstance(cur, dict) and part in cur:
+            cur = cur[part]
+        elif isinstance(cur, list):
+            try:
+                idx = int(part)
+            except ValueError:
+                return _MISSING
+            if -len(cur) <= idx < len(cur):
+                cur = cur[idx]
+            else:
+                return _MISSING
+        else:
+            return _MISSING
+    return cur
+
+
 def _get_path(d: Any, path: str) -> Any:
-    """dotted path עם list-index + סובלנות logical↔wire (root.X→X, headers.X→header.X)."""
+    """dotted path עם list-index + סובלנות logical↔wire (root.X→X, headers.X→header.X) + auto-list-index."""
     val = _get_path_raw(d, path)
     if val is _MISSING and path.startswith("root."):
         val = _get_path_raw(d, path[len("root."):])
     if val is _MISSING and path.startswith("headers."):
         val = _get_path_raw(d, "header." + path[len("headers."):])
+    # ★ סלחנות list — '_data.parameters.member_id' → auto-index [0] (וגם עם root./headers.)
+    if val is _MISSING:
+        val = _get_path_raw_autolist(d, path)
+    if val is _MISSING and path.startswith("root."):
+        val = _get_path_raw_autolist(d, path[len("root."):])
+    if val is _MISSING and path.startswith("headers."):
+        val = _get_path_raw_autolist(d, "header." + path[len("headers."):])
     return val
 
 
 def _record_matches(value: Optional[Any], match: Dict[str, Any]) -> bool:
     """True אם value (dict או JSON string) מכיל את כל ה-pairs ב-match.
-    מפתח עם נקודה ('header.mac_correlation_id') נחשב dotted path מקונן.
+    מפתח עם נקודה ('_data.parameters.0.member_id') נחשב dotted path מקונן.
+    ★ השוואה type-tolerant (str()) — member_id="555" תואם ל-555 ולהפך.
     """
     if not match:
         return True
@@ -535,7 +574,7 @@ def _record_matches(value: Optional[Any], match: Dict[str, Any]) -> bool:
         return False
     for k, expected in match.items():
         actual = _get_path(value, k) if "." in k else value.get(k, _MISSING)
-        if actual is _MISSING or actual != expected:
+        if actual is _MISSING or str(actual) != str(expected):
             return False
     return True
 

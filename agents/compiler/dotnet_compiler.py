@@ -309,9 +309,14 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
   וייחודי כמו "021769658"). ★★★ **לעולם אל תשתמש בערך קצר/נפוץ** כמו "0", "1", member_id_code,
   או ספרה בודדת — הם מופיעים בכל key (verifyhub::0::4242 מכיל "0") וגורמים להתאמה שגויה!
   אם key_built_from כולל גם member_id וגם member_id_code — קח את ה-**member_id** (הארוך), לא את הקוד.
-- ★★★ **תמיד הוסף ל-match את ה-entity_type של ה-target** (מ-TARGET_ENTITY_TYPE / target message):
-  למשל `"match": {"entity_type": "<target_entity_type>"}`. כך גם אם ה-key תופס מסר זר (verifyhub),
-  ה-match על entity_type ידחה אותו (entity_type שלו שונה) — קורלציה כפולה ועמידה.
+- ★★★ **ה-match חייב לזהות את המסר *שלנו* בדיוק** — key_contains לבדו רופף! member_id קצר כמו
+  "55" מתאים גם ל-"243551785" (שמכיל "55") ותופס מסר Worker של member אחר. לכן ה-match חייב
+  לכלול **שלושה** שדות-ערך מדויקים:
+  1. `entity_type` (מ-TARGET_ENTITY_TYPE) — דוחה verifyhub/מסרים זרים.
+  2. `_data.parameters.0.member_id` = ה-**member_id המדויק שלנו** — דוחה מסרי Worker של members אחרים.
+  3. `root.action` = הפעולה שלנו (`create`/`delete`/...) — דוחה מסר create כשציפינו ל-delete.
+  למשל: `"match": {"entity_type":"child_development", "_data.parameters.0.member_id":"<member_id שלנו>", "root.action":"create"}`.
+  כך _scan_records יחזיר *רק* את המסר שלנו ולא מסר Worker אקראי שתפס את ה-key הרופף.
 - key_equals = ה-key המלא רק אם הפורמט (כולל הקוד והסדר) ודאי לחלוטין.
 - אל תשתמש ב-entity_id/referral_id אם ה-key לא בנוי מהם.
 
@@ -339,8 +344,8 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
     {"kind": "kafka_publish", "topic": "<SOURCE_TOPIC>", "value": {... template מלא עם דריסות ...}},
     {"kind": "kafka_wait", "topic": "<TARGET_TOPIC>",
      "key_contains": "<member_id הייחודי — מספר ארוך, לא '0'/code>",
-     "match": {"entity_type": "<TARGET_ENTITY_TYPE>"},
-     "expected_fields": {"_data.parameters.0.member_id":"<member_id שלנו>", "root.action":"...", "_data.parameters.0.gender":"<מומר>"},
+     "match": {"entity_type":"<TARGET_ENTITY_TYPE>", "_data.parameters.0.member_id":"<member_id שלנו>", "root.action":"<create/delete>"},
+     "expected_fields": {"_data.parameters.0.member_id":"<member_id שלנו>", "_data.parameters.0.gender":"<מומר>"},
      "timeout_seconds": 150, "expect_no_message": false}
   ],
   "expected_status": 200,

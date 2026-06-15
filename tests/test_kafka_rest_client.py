@@ -71,6 +71,27 @@ def test_record_matches_json_string():
     assert not _record_matches("not json", {"status": "ok"})
 
 
+def test_record_matches_precise_correlation():
+    """★ correlation מדויק: member_id + action + entity_type — דוחה מסר Worker של member אחר.
+    זה התיקון ל-key_contains הרופף ('55' תפס '243551785')."""
+    ours = {"entity_type": "child_development", "action": "create",
+            "_data": {"parameters": [{"member_id": "555", "gender": "זכר"}]}}
+    other = {"entity_type": "child_development", "action": "create",
+             "_data": {"parameters": [{"member_id": "233848555", "gender": "M"}]}}
+    m = {"entity_type": "child_development", "_data.parameters.0.member_id": "555", "root.action": "create"}
+    assert _record_matches(ours, m)
+    assert not _record_matches(other, m)        # 233848555 מכיל 555 אבל member_id מדויק ≠
+    # action שגוי → לא תואם (create כשרצינו delete)
+    assert not _record_matches(ours, {"_data.parameters.0.member_id": "555", "root.action": "delete"})
+
+
+def test_record_matches_autolist_and_type_tolerant():
+    """match סלחני: list ללא index (parameters.member_id) + השוואת str (555 == '555')."""
+    val = {"_data": {"parameters": [{"member_id": "555"}]}}
+    assert _record_matches(val, {"_data.parameters.member_id": "555"})   # בלי index → auto [0]
+    assert _record_matches(val, {"_data.parameters.0.member_id": 555})   # int vs str → str()-tolerant
+
+
 def test_scan_records_finds_match():
     records = [
         {"value": {"id": 1}, "offset": 10, "partition": 0, "topic": "t"},
