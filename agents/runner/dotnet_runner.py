@@ -47,6 +47,35 @@ def _substitute_token(obj: Any, token: str, value: str) -> Any:
     return obj
 
 
+def _override_nested_member_id(obj: Any, uid: str) -> bool:
+    """דורס *בכל מקום* (רקורסיבית) שדה dict בשם 'member_id' לערך uid — לא 'member_id_code'.
+    זה ההזרקה הדטרמיניסטית למסר המקור (ה-LLM לא אמין בהזרקה לשדה מקונן). מחזיר True אם נמצא."""
+    found = False
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k == "member_id":
+                obj[k] = uid
+                found = True
+            elif _override_nested_member_id(v, uid):
+                found = True
+    elif isinstance(obj, list):
+        for item in obj:
+            if _override_nested_member_id(item, uid):
+                found = True
+    return found
+
+
+def _override_dotted_member_id(d: Dict[str, Any], uid: str) -> bool:
+    """דורס ב-dict שטוח (dotted-path keys) כל key שהסגמנט האחרון שלו 'member_id' לערך uid
+    (לא 'member_id_code'). משמש ל-match/expected_fields של ה-wait. מחזיר True אם נמצא."""
+    found = False
+    for k in list(d.keys()):
+        if k.split(".")[-1] == "member_id":
+            d[k] = uid
+            found = True
+    return found
+
+
 class DotNetRunner:
     name = "dotnet"
 
@@ -63,29 +92,29 @@ class DotNetRunner:
         })
 
     def _apply_unique_id(self, executable: DotNetExecutableTestCase) -> Optional[str]:
-        """מחליף את ה-token __UNIQUE_ID__ בכל ה-actions בערך member_id ייחודי לריצה.
-        publish.value/key + wait.key_contains/key_equals/match/expected_fields — כולם מקבלים
-        את *אותו* ערך, כך שה-Worker מפיק key ייחודי ב-target ואנחנו תופסים בדיוק את המסר שלנו
-        (וטסט שלילי לא תופס מסר של טסט קודם). אם ה-compiler לא השתמש ב-token → no-op."""
+        """מזריק member_id ייחודי לריצה — *באותו ערך* במסר המקור, בקורלציה וב-expected_fields,
+        כך שה-Worker מפיק key ייחודי ב-target ואנחנו תופסים בדיוק את המסר שלנו (וטסט שלילי לא
+        תופס מסר של טסט קודם). דטרמיניסטי לחלוטין — דורס את כל שדות ה-member_id בקוד, בלי תלות
+        בכך שה-LLM שם את ה-token __UNIQUE_ID__ במקום הנכון (הוא לא אמין בהזרקה לשדה מקונן במקור).
+        no-op אם אין שדה member_id בכלל."""
         token, uid, used = _UNIQUE_TOKEN, _gen_unique_member_id(), False
         for action in executable.actions:
             if isinstance(action, KafkaPublishAction):
-                new_val = _substitute_token(action.value, token, uid)
-                if new_val != action.value:
-                    action.value, used = new_val, True
+                action.value = _substitute_token(action.value, token, uid)   # legacy token
+                if _override_nested_member_id(action.value, uid):            # ★ דטרמיניסטי במקור
+                    used = True
                 if action.key and token in action.key:
-                    action.key, used = action.key.replace(token, uid), True
+                    action.key = action.key.replace(token, uid)
             elif isinstance(action, KafkaWaitAction):
-                if action.key_contains and token in action.key_contains:
-                    action.key_contains, used = action.key_contains.replace(token, uid), True
-                if action.key_equals and token in action.key_equals:
-                    action.key_equals, used = action.key_equals.replace(token, uid), True
-                new_match = _substitute_token(action.match, token, uid)
-                if new_match != action.match:
-                    action.match, used = new_match, True
-                new_ef = _substitute_token(action.expected_fields, token, uid)
-                if new_ef != action.expected_fields:
-                    action.expected_fields, used = new_ef, True
+                action.match = _substitute_token(action.match, token, uid)
+                action.expected_fields = _substitute_token(action.expected_fields, token, uid)
+                mid = _override_dotted_member_id(action.match, uid)          # ★ דטרמיניסטי בקורלציה
+                _override_dotted_member_id(action.expected_fields, uid)
+                if mid:
+                    action.key_contains = uid   # ה-target key בנוי מה-member_id → זה ה-substring
+                    used = True
+                elif action.key_contains and token in (action.key_contains or ""):
+                    action.key_contains = uid
         if used:
             self._log("UNIQUE", "info", f"member_id ייחודי לריצה: {uid}")
         return uid if used else None

@@ -336,14 +336,12 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
   הנבדקת. **אל תכניס אותם ל-expected_fields.**
 - ★ **דלג על שדות דינמיים** — message_id=GUID, תאריכים, timestamps, כל GUID — משתנים בכל ריצה.
 
-★★★ __UNIQUE_ID__ — member_id ייחודי בכל ריצה (קריטי) ★★★
-ה-target topic מלא בכפילויות של אותו member_id (555...) → אי-אפשר לזהות את המסר *שלנו* ביחס לטסטים
-אחרים. הפתרון: השתמש ב**token המילולי `__UNIQUE_ID__`** כערך ה-member_id (השדה שה-target KEY בנוי ממנו),
-ב**שני** המקומות — וה-runner יחליף אותו בערך ייחודי לפני ההרצה:
-1. ב-`value` של kafka_publish — בשדה ה-member_id במקור (לפי key_built_from, למשל `_data.member_details.member_id`).
-2. ב-kafka_wait — ב-`key_contains`, ב-`match._data.parameters.0.member_id`, וב-`expected_fields._data.parameters.0.member_id`.
-★ אל תשתמש ב-__UNIQUE_ID__ ל-member_id_code/code — רק לשדה ה-member_id הארוך שבונה את ה-key.
-(אם בכל זאת יש member_id קונקרטי שחובה לפי התסריט — השתמש בו; אחרת __UNIQUE_ID__ עדיף.)
+★★★ member_id ייחודי — אל תדאג לזה (ה-runner מטפל) ★★★
+ה-target topic מלא בכפילויות של אותו member_id → ה-runner **דורס אוטומטית** את כל שדות ה-`member_id`
+בערך ייחודי לכל ריצה (במקור המקונן + ב-key_contains/match/expected_fields), כך שלא תהיה התנגשות.
+מה שנדרש ממך: פשוט **כלול את שדה ה-member_id** מהתבנית במסר המקור (member_details.member_id), וב-wait
+כלול `_data.parameters.0.member_id` ב-match וב-expected_fields. השתמש ב-member_id מה-test data כ-value
+(או placeholder) — ה-runner יחליף אותו. **אל תיגע ב-member_id_code/code** (הוא לא חלק מהזיהוי הייחודי).
 
 החזר JSON בלבד:
 {
@@ -351,9 +349,9 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
   "actions": [
     {"kind": "kafka_publish", "topic": "<SOURCE_TOPIC>", "value": {... template מלא עם דריסות ...}},
     {"kind": "kafka_wait", "topic": "<TARGET_TOPIC>",
-     "key_contains": "__UNIQUE_ID__",
-     "match": {"entity_type":"<TARGET_ENTITY_TYPE>", "_data.parameters.0.member_id":"__UNIQUE_ID__", "root.action":"<create/delete>"},
-     "expected_fields": {"_data.parameters.0.member_id":"__UNIQUE_ID__"},
+     "key_contains": "<member_id מה-test data — ה-runner ידרוס לערך ייחודי>",
+     "match": {"entity_type":"<TARGET_ENTITY_TYPE>", "_data.parameters.0.member_id":"<member_id>", "root.action":"<create/delete>"},
+     "expected_fields": {"_data.parameters.0.member_id":"<member_id>"},
      "timeout_seconds": 150, "expect_no_message": false}
   ],
   "expected_status": 200,

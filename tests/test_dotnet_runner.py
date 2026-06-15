@@ -60,14 +60,39 @@ def test_apply_unique_id_replaces_consistently():
     assert wait.match["entity_type"] == "child_development"           # ללא token — נשאר
 
 
-def test_apply_unique_id_noop_without_token():
-    """אם ה-compiler לא השתמש ב-token (member_id קונקרטי) → no-op (degradation graceful)."""
+def test_apply_unique_id_overrides_concrete_member_id():
+    """★ הבאג מ-TC02: ה-LLM שם member_id קונקרטי (555) במקור (לא token) → ה-runner דורס
+    דטרמיניסטית בכל מקום (מקור מקונן + correlation + expected_fields), בלי תלות ב-token."""
+    ex = DotNetExecutableTestCase(
+        test_case_id="TC-c",
+        actions=[
+            KafkaPublishAction(topic="src",
+                               value={"_data": {"member_details": {"member_id": "555", "member_id_code": "0"}}}),
+            KafkaWaitAction(topic="tgt", key_contains="555",
+                            match={"entity_type": "child_development",
+                                   "_data.parameters.0.member_id": "555", "root.action": "create"},
+                            expected_fields={"_data.parameters.0.member_id": "555"}),
+        ],
+    )
+    uid = DotNetRunner()._apply_unique_id(ex)
+    assert uid and uid != "555"
+    pub, wait = ex.actions
+    assert pub.value["_data"]["member_details"]["member_id"] == uid          # ★ המקור נדרס
+    assert pub.value["_data"]["member_details"]["member_id_code"] == "0"     # code לא נגע
+    assert wait.key_contains == uid
+    assert wait.match["_data.parameters.0.member_id"] == uid
+    assert wait.expected_fields["_data.parameters.0.member_id"] == uid
+    assert wait.match["entity_type"] == "child_development"
+
+
+def test_apply_unique_id_noop_without_member_id():
+    """אין שדה member_id בכלל → no-op (degradation graceful)."""
     ex = DotNetExecutableTestCase(
         test_case_id="TC-n",
-        actions=[KafkaWaitAction(topic="t", key_contains="555", match={"entity_type": "x"})],
+        actions=[KafkaWaitAction(topic="t", key_contains="abc", match={"entity_type": "x"})],
     )
     assert DotNetRunner()._apply_unique_id(ex) is None
-    assert ex.actions[0].key_contains == "555"
+    assert ex.actions[0].key_contains == "abc"
 
 
 def test_matches_helper():
