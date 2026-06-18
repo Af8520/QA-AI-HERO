@@ -1007,6 +1007,37 @@ function debugLog(event, data, kind) {
 
 const _capturedSpecNames = new Set();  // anti-dup: same filename uploaded twice
 
+// ★ מגבלת גודל קובץ אפיון. DirectLine/Copilot Studio דוחה attachment גדול מדי (HTTP 400
+// POST_ACTIVITY_REJECTED). אמפירית: docx של 9MB נדחה, PDF של 1MB עובר. סף שמרני; כוונן לפי הצורך.
+const _SPEC_MAX_MB = 4;
+const _SPEC_MAX_BYTES = _SPEC_MAX_MB * 1024 * 1024;
+const _oversizeWarned = new Set();
+
+function addUploadError(text) {
+  const row = document.createElement('div');
+  row.className = 'row agent';
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble system';
+  bubble.style.cssText = 'border:1px solid var(--danger);color:var(--danger);background:rgba(220,60,60,0.08)';
+  bubble.textContent = text;
+  row.appendChild(bubble);
+  chatEl.appendChild(row);
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+// מחזיר true אם הקובץ גדול מהמותר (ומציג הודעה אדומה פעם אחת לקובץ).
+function _specTooLarge(file) {
+  if (!file || (file.size || 0) <= _SPEC_MAX_BYTES) return false;
+  const mb = ((file.size || 0) / 1024 / 1024).toFixed(1);
+  const key = `${file.name}::${file.size}`;
+  if (!_oversizeWarned.has(key)) {
+    _oversizeWarned.add(key);
+    addUploadError(`❌ הקובץ המצורף "${file.name}" גדול מדי (${mb}MB > ${_SPEC_MAX_MB}MB) ולכן נדחה. ` +
+                   `נסה להעלות אותו כ-PDF — לרוב קטן בהרבה (לעיתים ~1MB).`);
+  }
+  return true;
+}
+
 function captureSpecToServer(files) {
   if (_initialDepartment !== 'dotnet') return;
   if (!sessionId || !files || files.length === 0) return;
@@ -1037,6 +1068,11 @@ function _uploadSpecFile(file) {
   const name = (file && file.name) || '';
   if (!/\.(docx|pdf|txt|doc)$/i.test(name)) {
     debugLog('SPEC_SKIPPED', `${name || '(no name)'} — לא קובץ אפיון`, 'json_no');
+    return;
+  }
+  // ★ גדול מהמותר → הודעה אדומה + דילוג (DirectLine ידחה אותו ב-400 בכל מקרה)
+  if (_specTooLarge(file)) {
+    debugLog('SPEC_TOO_LARGE', `${name} (${(file.size || 0).toLocaleString()} bytes > ${_SPEC_MAX_MB}MB)`, 'err');
     return;
   }
   // anti-duplicate: filename + size כ-key (כדי לא להעלות פעמיים אותו קובץ)
@@ -1141,6 +1177,14 @@ async function initWebChat(tokenEndpoint) {
       }
       if (action.type === 'DIRECT_LINE/CONNECT_REJECTED') {
         debugLog('CONNECT_REJECTED', action.payload, 'err');
+      }
+      // ★ DirectLine דחה את ההודעה (לרוב attachment גדול מדי → 400). הצג הודעה אדומה ברורה
+      // במקום "Send failed" סתום (גיבוי אם הבדיקה היזומה פספסה).
+      if (action.type === 'DIRECT_LINE/POST_ACTIVITY_REJECTED') {
+        stopThinking();
+        debugLog('POST_ACTIVITY_REJECTED', action.payload, 'err');
+        addUploadError(`❌ שליחת ההודעה/הקובץ נדחתה ע"י השרת (DirectLine). אם צירפת קובץ אפיון — ` +
+                       `ייתכן שהוא גדול מ-${_SPEC_MAX_MB}MB. נסה להעלות אותו כ-PDF (לרוב קטן בהרבה).`);
       }
       // מד-זמן: היוזר שולח הודעה → הסוכן חושב
       if (action.type === 'WEB_CHAT/SEND_MESSAGE'
