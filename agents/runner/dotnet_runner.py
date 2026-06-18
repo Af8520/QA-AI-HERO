@@ -97,24 +97,34 @@ class DotNetRunner:
         תופס מסר של טסט קודם). דטרמיניסטי לחלוטין — דורס את כל שדות ה-member_id בקוד, בלי תלות
         בכך שה-LLM שם את ה-token __UNIQUE_ID__ במקום הנכון (הוא לא אמין בהזרקה לשדה מקונן במקור).
         no-op אם אין שדה member_id בכלל."""
-        token, uid, used = _UNIQUE_TOKEN, _gen_unique_member_id(), False
+        token, uid, src_mid = _UNIQUE_TOKEN, _gen_unique_member_id(), False
+        waits: List[KafkaWaitAction] = []
         for action in executable.actions:
             if isinstance(action, KafkaPublishAction):
                 action.value = _substitute_token(action.value, token, uid)   # legacy token
                 if _override_nested_member_id(action.value, uid):            # ★ דטרמיניסטי במקור
-                    used = True
+                    src_mid = True
                 if action.key and token in action.key:
                     action.key = action.key.replace(token, uid)
             elif isinstance(action, KafkaWaitAction):
                 action.match = _substitute_token(action.match, token, uid)
                 action.expected_fields = _substitute_token(action.expected_fields, token, uid)
-                mid = _override_dotted_member_id(action.match, uid)          # ★ דטרמיניסטי בקורלציה
+                _override_dotted_member_id(action.match, uid)               # דורס member_id קיים
                 _override_dotted_member_id(action.expected_fields, uid)
-                if mid:
-                    action.key_contains = uid   # ה-target key בנוי מה-member_id → זה ה-substring
-                    used = True
-                elif action.key_contains and token in (action.key_contains or ""):
-                    action.key_contains = uid
+                waits.append(action)
+        # ★ אם המקור כולל member_id ייחודי — ודא ש*כל* wait מתאם עליו, כולל תרחישים שליליים:
+        # אחרת תרחיש שלילי (match=entity_type בלבד) תופס מסר child_development אקראי ישן ונכשל
+        # בטעות. עם member_id ייחודי בקורלציה — שלילי מחפש את ה-id שלנו (שלא הופק) → timeout → PASS.
+        used = src_mid
+        if src_mid:
+            for w in waits:
+                if not any(k.split(".")[-1] == "member_id" for k in w.match):
+                    w.match["_data.parameters.0.member_id"] = uid    # הזרקת קורלציה
+                w.key_contains = uid
+        else:
+            for w in waits:   # אין member_id במקור — fallback ל-token בלבד
+                if w.key_contains and token in (w.key_contains or ""):
+                    w.key_contains, used = uid, True
         if used:
             self._log("UNIQUE", "info", f"member_id ייחודי לריצה: {uid}")
         return uid if used else None

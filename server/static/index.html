@@ -1665,8 +1665,12 @@ function _renderDotnetSteps(container, response) {
       _tcAddJson(card, '📤 המסר שנשלח ל-source topic:', action.value);
     } else if (action.kind === 'kafka_wait') {
       if (action.expect_no_message) {
-        if (ob && ob.timeout) _tcAddNote(card, '✓ לא הגיע מסר (תרחיש שלילי) — כצפוי', 'var(--success)');
-        else _tcAddNote(card, '✗ הגיע מסר למרות שזה תרחיש שלילי', 'var(--danger)');
+        if (ob && ob.timeout) {
+          _tcAddNote(card, '✓ לא הגיע מסר (תרחיש שלילי) — כצפוי', 'var(--success)');
+        } else {
+          _tcAddNote(card, `✗ הגיע מסר למרות שזה תרחיש שלילי (offset=${ob.offset}, key=${ob.key || ''})`, 'var(--danger)');
+          if (ob && ob.value_parsed) _tcAddJson(card, 'המסר שנתפס (לבדיקה אם הוא באמת שלנו):', ob.value_parsed);
+        }
       } else if (ob && ob.value_parsed) {
         _tcAddNote(card, `📥 התקבל מ-target topic: offset=${ob.offset}, key=${ob.key || ''}`, 'var(--success)');
         const ef = Object.keys(action.expected_fields || {});

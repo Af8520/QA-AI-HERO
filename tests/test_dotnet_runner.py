@@ -85,8 +85,28 @@ def test_apply_unique_id_overrides_concrete_member_id():
     assert wait.match["entity_type"] == "child_development"
 
 
+def test_apply_unique_id_injects_correlation_into_negative_wait():
+    """★ הבאג בתרחיש שלילי: ה-wait (expect_no_message) בלי member_id ב-match → היה תופס מסר
+    child_development אקראי ונכשל. ה-runner מזריק את ה-id הייחודי לקורלציה → השלילי מחפש את
+    ה-id שלנו (שלא הופק) → timeout → PASS נכון."""
+    ex = DotNetExecutableTestCase(
+        test_case_id="TC-neg",
+        actions=[
+            KafkaPublishAction(topic="src", value={"_data": {"member_details": {"member_id": "555"}}}),
+            KafkaWaitAction(topic="tgt", match={"entity_type": "child_development"}, expect_no_message=True),
+        ],
+    )
+    uid = DotNetRunner()._apply_unique_id(ex)
+    assert uid and uid != "555"
+    pub, wait = ex.actions
+    assert pub.value["_data"]["member_details"]["member_id"] == uid
+    assert wait.match["_data.parameters.0.member_id"] == uid     # ★ הוזרק לקורלציה
+    assert wait.match["entity_type"] == "child_development"      # הקיים נשמר
+    assert wait.key_contains == uid
+
+
 def test_apply_unique_id_noop_without_member_id():
-    """אין שדה member_id בכלל → no-op (degradation graceful)."""
+    """אין שדה member_id ואין publish → no-op (degradation graceful)."""
     ex = DotNetExecutableTestCase(
         test_case_id="TC-n",
         actions=[KafkaWaitAction(topic="t", key_contains="abc", match={"entity_type": "x"})],
