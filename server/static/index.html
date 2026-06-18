@@ -624,10 +624,15 @@
   <div class="tc-detail-box">
     <button class="close-btn" onclick="closeTcDetail()">סגור ✕</button>
     <h3 id="tcDetailTitle">פרטי בקשה ותשובה</h3>
-    <h4>Request</h4>
-    <pre id="tcDetailRequest"></pre>
-    <h4>Response</h4>
-    <pre id="tcDetailResponse"></pre>
+    <!-- ★ תצוגת per-step: מה נשלח ל-source / מה התקבל מ-target / מה אומת (.NET) -->
+    <div id="tcDetailSteps"></div>
+    <details id="tcDetailRaw">
+      <summary style="cursor:pointer;color:var(--muted);margin:8px 0">JSON גולמי (Request/Response)</summary>
+      <h4>Request</h4>
+      <pre id="tcDetailRequest"></pre>
+      <h4>Response</h4>
+      <pre id="tcDetailResponse"></pre>
+    </details>
   </div>
 </div>
 
@@ -1617,6 +1622,69 @@ function tlAddTc(idx, total, name, status, httpStatus) {
 // Cache of TC details by test_case_id, opened on click via tl row
 const tcDetails = {};
 
+function _tcAddNote(card, text, color) {
+  const d = document.createElement('div');
+  d.style.cssText = 'font-size:0.85em;margin:2px 0';
+  if (color) d.style.color = color;
+  d.textContent = text;
+  card.appendChild(d);
+}
+function _tcAddJson(card, label, val) {
+  if (label) {
+    const l = document.createElement('div');
+    l.style.cssText = 'color:var(--muted);font-size:0.85em;margin-top:4px';
+    l.textContent = label;
+    card.appendChild(l);
+  }
+  const pre = document.createElement('pre');
+  pre.style.cssText = 'margin:2px 0;max-height:240px;overflow:auto;font-size:0.78em;direction:ltr;text-align:left';
+  try { pre.textContent = JSON.stringify(val, null, 2); } catch (e) { pre.textContent = String(val); }
+  card.appendChild(pre);
+}
+// ★ תצוגת per-action ל-.NET: מה נשלח ל-source, מה התקבל מ-target, ומה אומת
+function _renderDotnetSteps(container, response) {
+  container.innerHTML = '';
+  const obs = (response && response.observations) || [];
+  const steps = (response && response.steps) || [];
+  if (!obs.length) { container.style.display = 'none'; return; }
+  container.style.display = '';
+  obs.forEach((o, i) => {
+    const action = (o && o.action) || {};
+    const ob = (o && o.observation) || {};
+    const stl = String((steps[i] && steps[i].status) || '').toLowerCase();
+    const card = document.createElement('div');
+    card.style.cssText = 'border:1px solid var(--border);border-radius:8px;padding:8px;margin:6px 0';
+    const head = document.createElement('div');
+    head.style.cssText = 'font-weight:600;margin-bottom:4px';
+    head.style.color = _STEP_COLOR[stl] || 'var(--text)';
+    head.textContent = `${_STEP_ICON[stl] || '•'} ${action.kind || 'action'} — ${action.topic || action.bucket || ''}`;
+    card.appendChild(head);
+
+    if (action.kind === 'kafka_publish') {
+      if (ob && ob.offset != null) _tcAddNote(card, `נשלח → partition=${ob.partition} offset=${ob.offset}`);
+      _tcAddJson(card, '📤 המסר שנשלח ל-source topic:', action.value);
+    } else if (action.kind === 'kafka_wait') {
+      if (action.expect_no_message) {
+        if (ob && ob.timeout) _tcAddNote(card, '✓ לא הגיע מסר (תרחיש שלילי) — כצפוי', 'var(--success)');
+        else _tcAddNote(card, '✗ הגיע מסר למרות שזה תרחיש שלילי', 'var(--danger)');
+      } else if (ob && ob.value_parsed) {
+        _tcAddNote(card, `📥 התקבל מ-target topic: offset=${ob.offset}, key=${ob.key || ''}`, 'var(--success)');
+        const ef = Object.keys(action.expected_fields || {});
+        if (ef.length) _tcAddNote(card, '✓ שדות שאומתו במסר היעד: ' + ef.join(', '), 'var(--success)');
+        _tcAddJson(card, 'המסר שהתקבל מ-target topic:', ob.value_parsed);
+      } else {
+        const n = (ob && ob.candidates) ? ob.candidates.length : 0;
+        _tcAddNote(card, `✗ לא נמצא מסר תואם ב-target (נצרכו ${n} מסרים זרים)`, 'var(--danger)');
+      }
+    } else if (action.kind === 'couchbase_wait') {
+      if (ob && ob.value_parsed) { _tcAddNote(card, '📥 נמצא מסמך ב-Couchbase', 'var(--success)'); _tcAddJson(card, '', ob.value_parsed); }
+      else _tcAddNote(card, (steps[i] && (steps[i].detail || steps[i].error)) || 'no document');
+    }
+    if (steps[i] && steps[i].error) _tcAddNote(card, '⚠ ' + steps[i].error, 'var(--danger)');
+    container.appendChild(card);
+  });
+}
+
 function showTcDetail(tcId) {
   const d = tcDetails[tcId];
   if (!d) { alert('אין פרטים זמינים ל-' + tcId); return; }
@@ -1624,14 +1692,19 @@ function showTcDetail(tcId) {
   // בדוק אם זה .NET (יש kind=dotnet) או HTTP רגיל
   const isDotnet = (d.request && d.request.kind === 'dotnet')
     || (d.response && d.response.kind === 'dotnet');
-  // עדכן את התוויות מעל ה-pre blocks
+  const stepsEl = document.getElementById('tcDetailSteps');
+  const rawEl = document.getElementById('tcDetailRaw');
   const headings = document.querySelectorAll('#tcDetailModal h4');
   if (isDotnet) {
     if (headings[0]) headings[0].textContent = 'Actions';
     if (headings[1]) headings[1].textContent = 'Observations';
+    _renderDotnetSteps(stepsEl, d.response);   // ★ תצוגה מובנית per-step
+    if (rawEl) rawEl.open = false;             // ה-JSON הגולמי מקופל כברירת מחדל
   } else {
     if (headings[0]) headings[0].textContent = 'Request';
     if (headings[1]) headings[1].textContent = 'Response';
+    if (stepsEl) stepsEl.style.display = 'none';
+    if (rawEl) rawEl.open = true;              // HTTP — להציג ישר את ה-JSON
   }
   document.getElementById('tcDetailRequest').textContent = JSON.stringify(d.request, null, 2);
   document.getElementById('tcDetailResponse').textContent = JSON.stringify(d.response, null, 2);

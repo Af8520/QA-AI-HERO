@@ -266,6 +266,9 @@ SYSTEM_PROMPT_DOTNET = """אתה QA Test Compiler עבור מחלקת אינטג
 - ★ תרחיש שלילי (negative test): אם התסריט בודק ש**לא** עובר מסר ל-target (type_code שגוי, תאריך
   ישן, סינון), קבע expect_no_message=true על KafkaWaitAction. אז timeout = PASS,
   ומסר שיגיע = FAIL.
+- ★★★ **ודא לוג / Elastic / "לוג הצלחה/שגיאה"**: אין תמיכה ב-.NET כרגע. **אל תיצור action**
+  עבור צעד כזה — ובמיוחד **אל תיצור kafka_wait מזויף** (הוא יעבור על מסר אקראי וייתן PASS שקרי).
+  דלג על הצעד ורשום ב-compiler_notes ("דילגנו על אימות לוג — לא נתמך ב-.NET").
 - אם תסריט מעורפל — החזר actions ריק + compiler_notes מסביר.
 - החזר JSON תקני בלבד, ללא טקסט נלווה.
 """
@@ -359,6 +362,9 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
 }
 
 כללי כתיבה חשובים:
+- ★★★ **ודא לוג / Elastic / "לוג הצלחה/שגיאה"**: אין תמיכה ב-.NET כרגע. **אל תיצור action** לצעד
+  כזה, ובמיוחד **אל תיצור kafka_wait מזויף** (הוא יעבור על מסר אקראי וייתן PASS שקרי). דלג עליו
+  ורשום ב-compiler_notes ("דילגנו על אימות לוג — לא נתמך ב-.NET").
 - ★ אל תקצר את ה-template. ה-value של kafka_publish חייב להכיל את **כל** השדות
   שמופיעים ב-template (headers + root + _data), עם דריסות בלבד היכן שהתסריט אומר.
 - שמור על מבנה ה-template (nested objects) כפי שהוא.
