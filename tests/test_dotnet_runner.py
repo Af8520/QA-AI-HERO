@@ -177,8 +177,29 @@ def test_check_expected_fields_dotted_and_list():
     assert any("gender" in i for i in issues)
     # path חסר (לא-metadata) → missing
     assert any("missing" in i for i in _check_expected_fields(value, {"root.no_such_field": "x"}))
-    # list index מחוץ לטווח → missing
-    assert any("missing" in i for i in _check_expected_fields(value, {"_data.parameters.5.gender": "x"}))
+
+
+def test_check_expected_fields_leaf_name_fallback():
+    """★ נתיב שגוי של ה-LLM (resource_type תחת _data אבל נכתב parameters.0.resource_type) —
+    fallback גורף לפי שם-השדה האחרון מוצא אותו בכל מקום ב-tree."""
+    value = {"_data": {"resource_type": "parameters", "parameters": [{"member_id": "555"}]}}
+    assert _check_expected_fields(value, {"_data.parameters.0.resource_type": "parameters"}) == []
+    # שם-שדה שלא קיים בשום מקום → missing
+    assert any("missing" in i for i in _check_expected_fields(value, {"_data.x.no_field": "y"}))
+
+
+def test_check_expected_fields_present_marker():
+    """★ ערך דינמי/מוצפן → __PRESENT__ בודק נוכחות (קיים ולא-ריק), לא שוויון."""
+    value = {"_data": {"parameters": [{"pdf_link": "FVbtGX...encrypted...", "member_id": "555"}]}}
+    assert _check_expected_fields(value, {"_data.parameters.0.pdf_link": "__PRESENT__"}) == []
+    # ריק → missing/empty
+    assert any("missing/empty" in i for i in
+               _check_expected_fields({"_data": {"parameters": [{"pdf_link": ""}]}},
+                                      {"_data.parameters.0.pdf_link": "__PRESENT__"}))
+    # חסר לגמרי → missing/empty
+    assert any("missing/empty" in i for i in
+               _check_expected_fields({"_data": {"parameters": [{}]}},
+                                      {"_data.parameters.0.pdf_link": "__PRESENT__"}))
 
 
 def test_check_expected_fields_auto_list_index():

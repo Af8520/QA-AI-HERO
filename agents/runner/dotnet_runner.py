@@ -960,12 +960,32 @@ def _resolve_raw_path_autolist(obj: Any, path: str) -> Any:
     return cur
 
 
+def _find_by_leaf_name(obj: Any, name: str) -> Any:
+    """חיפוש גורף: מחזיר את הערך של ה-dict-key הראשון ששמו == name, בכל עומק.
+    fallback אחרון כשה-LLM שם נתיב שגוי (למשל '_data.parameters.0.resource_type' במקום
+    '_data.resource_type') — מוצא את השדה לפי שמו בלי תלות במבנה המדויק. _FIELD_MISSING אם אין."""
+    if isinstance(obj, dict):
+        if name in obj:
+            return obj[name]
+        for v in obj.values():
+            r = _find_by_leaf_name(v, name)
+            if r is not _FIELD_MISSING:
+                return r
+    elif isinstance(obj, list):
+        for item in obj:
+            r = _find_by_leaf_name(item, name)
+            if r is not _FIELD_MISSING:
+                return r
+    return _FIELD_MISSING
+
+
 def _resolve_field_path(obj: Any, path: str) -> Any:
-    """כמו _resolve_raw_path, אבל סובלני להבדל logical↔wire ול-list ללא index:
+    """כמו _resolve_raw_path, אבל סובלני להבדל logical↔wire, ל-list ללא index, ולנתיב שגוי:
     - 'root.X' שלא נמצא → ננסה 'X' ברמה העליונה (כי root משוטח ב-wire).
     - 'headers.X' שלא נמצא → ננסה 'header.X' (header יחיד ב-wire).
     - 'a.list.field' (list ללא index) → auto-index ל-[0].
-    ככה אסרשנים עובדים בין אם המוח פלט root.X/headers.X/בלי index ובין אם המסר ב-wire format.
+    - נתיב שלא נמצא בכלל → fallback גורף לפי שם-השדה האחרון בכל מקום ב-tree.
+    ככה אסרשנים עובדים גם כשה-LLM טועה בנתיב המדויק.
     """
     val = _resolve_raw_path(obj, path)
     if val is _FIELD_MISSING and path.startswith("root."):
@@ -979,7 +999,15 @@ def _resolve_field_path(obj: Any, path: str) -> Any:
         val = _resolve_raw_path_autolist(obj, path[len("root."):])
     if val is _FIELD_MISSING and path.startswith("headers."):
         val = _resolve_raw_path_autolist(obj, "header." + path[len("headers."):])
+    # ★ fallback גורף — חיפוש שם-השדה האחרון בכל מקום (טעות-נתיב של ה-LLM)
+    if val is _FIELD_MISSING and "." in path:
+        val = _find_by_leaf_name(obj, path.split(".")[-1])
     return val
+
+
+# ★ marker גורף לאימות *נוכחות* (לא שוויון) — לשדות דינמיים: ערך מוצפן/RSA/GUID/timestamp
+# שאי-אפשר לחזות. ה-compiler שם marker כזה כ-value; ה-validator בודק שהשדה קיים ולא-ריק.
+_PRESENT_MARKERS = {"__PRESENT__", "__NOT_EMPTY__", "__ANY__", "__ENCRYPTED__"}
 
 
 def _is_producer_metadata_key(k: str) -> bool:
@@ -1006,6 +1034,11 @@ def _check_expected_fields(value: Dict[str, Any], expected: Dict[str, Any]) -> L
         actual = _resolve_field_path(value, k) if "." in k else (
             value.get(k, _FIELD_MISSING) if isinstance(value, dict) else _FIELD_MISSING
         )
+        # ★ אימות נוכחות (ערך דינמי) — קיים ולא-ריק, ללא בדיקת שוויון
+        if isinstance(want, str) and want in _PRESENT_MARKERS:
+            if actual is _FIELD_MISSING or str(actual).strip() == "":
+                issues.append(f"{k} (missing/empty)")
+            continue
         if actual is _FIELD_MISSING:
             issues.append(f"{k} (missing)")
             continue

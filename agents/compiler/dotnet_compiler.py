@@ -332,11 +332,17 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
   - נתיב מדויק עם **index ל-arrays** (`_data.parameters.0.X`), case-sensitive.
   אל תסתפק ב-member_id בלבד אם התסריט ביקש לאמת שדות נוספים — זה מחמיץ את עיקר הבדיקה!
 - ★★★ **תנאי קיום: רק שדות שקיימים בפועל ב-TARGET_EXAMPLE/target_templates.** אם התסריט מבקש
-  לאמת שדה שאינו קיים ב-TARGET_EXAMPLE — **אל תכניס אותו** (יחזיר "missing"); רשום ב-compiler_notes
-  ("התסריט מבקש לאמת X אך אינו ב-target"). כך לא ממציאים שדות (gender לא קיים → לא מאמתים).
-- ★★★ **אל תאמת metadata של ה-producer** — `header.mac_*` (mac_sys_name/mac_producer_name/...).
-  אינך יודע את ערכיהם והם לא הטרנספורמציה הנבדקת.
-- ★ **דלג על שדות דינמיים** — message_id=GUID, תאריכים, timestamps — משתנים בכל ריצה.
+  לאמת שדה שאינו קיים ב-TARGET_EXAMPLE — **אל תכניס אותו** (יחזיר "missing"); רשום ב-compiler_notes.
+- ★★★ **אל תאמת `entity_id` / ה-KEY / `entity_type` כשדה ערך** — אלה ה-**correlation** שכבר מאמת
+  ב-match לפי ה-key. אימותם ב-expected_fields הוא כפילות מיותרת ושביר (ה-entity_id מכיל את
+  ה-member_id שה-runner דורס לערך ייחודי). זהו ב-match בלבד, לא ב-expected_fields.
+- ★★★ **ערך דינמי / מוצפן / לא-צפוי** (pdf_link מוצפן/RSA, ערך מוצפן, GUID, hash, timestamp) —
+  **אל תאמת שוויון לערך מסוים.** במקום זה שים את ה-value המיוחד `"__PRESENT__"` — ה-validator
+  יבדוק שהשדה **קיים ולא-ריק** (לא ערך ספציפי). למשל: `"_data.parameters.0.pdf_link":"__PRESENT__"`.
+- ★★★ **נתיב מדויק לפי TARGET_EXAMPLE.** קח את הנתיב המדויק מ-TARGET_EXAMPLE (למשל אם
+  `resource_type` יושב תחת `_data` ולא תחת `_data.parameters` — כתוב `_data.resource_type`).
+- ★★★ **אל תאמת metadata של ה-producer** — `header.mac_*`. אינך יודע את ערכיהם.
+- ★ **דלג על שדות דינמיים** — message_id=GUID, תאריכים, timestamps (או השתמש ב-__PRESENT__).
 
 ★★★ member_id ייחודי — אל תדאג לזה (ה-runner מטפל) ★★★
 ה-target topic מלא בכפילויות של אותו member_id → ה-runner **דורס אוטומטית** את כל שדות ה-`member_id`
