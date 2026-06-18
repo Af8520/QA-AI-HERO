@@ -53,7 +53,8 @@ def test_apply_unique_id_replaces_consistently():
     uid = DotNetRunner()._apply_unique_id(ex)   # מחזיר את ה-form הנקי (יעד)
     assert uid and uid.isdigit() and uid != "__UNIQUE_ID__"
     pub, wait = ex.actions
-    assert pub.value["_data"]["member_details"]["member_id"] == uid.zfill(9)   # מקור עם אפסים
+    # ה-member_id המקורי (token) בלי אפסים מובילים → מקור=נקי (לא מוסיפים אפסים שלא נדרשו)
+    assert pub.value["_data"]["member_details"]["member_id"] == uid
     assert wait.key_contains == uid
     assert wait.match["_data.parameters.0.member_id"] == uid          # correlation (form נקי)
     assert wait.expected_fields["_data.parameters.0.member_id"] == uid
@@ -77,24 +78,25 @@ def test_apply_unique_id_overrides_concrete_member_id():
     uid = DotNetRunner()._apply_unique_id(ex)
     assert uid and uid != "555"
     pub, wait = ex.actions
-    assert pub.value["_data"]["member_details"]["member_id"] == uid.zfill(9)  # ★ מקור עם אפסים
+    # member_id מקורי "555" בלי אפסים → מקור=נקי (תלוי-בקשה, לא ממציאים בדיקת אפסים)
+    assert pub.value["_data"]["member_details"]["member_id"] == uid
     assert pub.value["_data"]["member_details"]["member_id_code"] == "0"     # code לא נגע
     assert wait.key_contains == uid
-    assert wait.match["_data.parameters.0.member_id"] == uid                 # יעד ללא אפסים
+    assert wait.match["_data.parameters.0.member_id"] == uid
     assert wait.expected_fields["_data.parameters.0.member_id"] == uid
     assert wait.match["entity_type"] == "child_development"
 
 
-def test_apply_unique_id_leading_zeros_source_stripped_target():
-    """★ member_id במקור עם אפסים מובילים (9 ספרות) וביעד/קורלציה ללא אפסים — מאפשר לבדוק
-    שה-Worker מסיר אפסים מובילים (ת.ז)."""
+def test_apply_unique_id_leading_zeros_conditional():
+    """★ תלוי-בקשה: רק כשה-member_id *בתסריט* מתחיל באפסים (000555) — המקור נשלח עם אפסים
+    מובילים (9 ספרות) והיעד נקי, לבדיקת הסרת אפסים. (אם רגיל — ראה הטסט הקודם: בלי אפסים.)"""
     ex = DotNetExecutableTestCase(
         test_case_id="TC-z",
         actions=[
-            KafkaPublishAction(topic="src", value={"_data": {"member_details": {"member_id": "555"}}}),
+            KafkaPublishAction(topic="src", value={"_data": {"member_details": {"member_id": "000555"}}}),
             KafkaWaitAction(topic="tgt",
-                            match={"entity_type": "child_development", "_data.parameters.0.member_id": "555"},
-                            expected_fields={"_data.parameters.0.member_id": "555"}),
+                            match={"entity_type": "child_development", "_data.parameters.0.member_id": "000555"},
+                            expected_fields={"_data.parameters.0.member_id": "000555"}),
         ],
     )
     uid = DotNetRunner()._apply_unique_id(ex)
@@ -119,7 +121,7 @@ def test_apply_unique_id_injects_correlation_into_negative_wait():
     uid = DotNetRunner()._apply_unique_id(ex)
     assert uid and uid != "555"
     pub, wait = ex.actions
-    assert pub.value["_data"]["member_details"]["member_id"] == uid.zfill(9)
+    assert pub.value["_data"]["member_details"]["member_id"] == uid   # "555" בלי אפסים → מקור נקי
     assert wait.match["_data.parameters.0.member_id"] == uid     # ★ הוזרק לקורלציה (form נקי)
     assert wait.match["entity_type"] == "child_development"      # הקיים נשמר
     assert wait.key_contains == uid

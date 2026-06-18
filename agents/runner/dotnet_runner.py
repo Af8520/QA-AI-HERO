@@ -78,6 +78,23 @@ def _override_dotted_member_id(d: Dict[str, Any], uid: str) -> bool:
     return found
 
 
+def _get_nested_member_id(obj: Any) -> Optional[str]:
+    """מחזיר את ערך ה-member_id הראשון (כ-str) במקור, בלי לשנות. None אם אין."""
+    if isinstance(obj, dict):
+        if "member_id" in obj:
+            return str(obj["member_id"])
+        for v in obj.values():
+            r = _get_nested_member_id(v)
+            if r is not None:
+                return r
+    elif isinstance(obj, list):
+        for item in obj:
+            r = _get_nested_member_id(item)
+            if r is not None:
+                return r
+    return None
+
+
 class DotNetRunner:
     name = "dotnet"
 
@@ -101,7 +118,13 @@ class DotNetRunner:
         no-op אם אין שדה member_id בכלל."""
         token = _UNIQUE_TOKEN
         uid_target = _gen_unique_member_id()          # ה-form הנקי (ללא אפסים) — מה שה-Worker מפיק
-        uid_source = uid_target.zfill(9)              # ★ מקור: 9 ספרות עם אפסים מובילים (בדיקת הסרה)
+        # ★ תלוי-בקשה: רק אם ה-member_id *בתסריט* מתחיל באפסים (התסריט בודק הסרת אפסים) —
+        # נשלח במקור עם אפסים מובילים. אחרת id רגיל בלי אפסים (לא ממציאים בדיקה שלא נדרשה).
+        orig_mid = next((_get_nested_member_id(a.value) for a in executable.actions
+                         if isinstance(a, KafkaPublishAction)
+                         and _get_nested_member_id(a.value) is not None), None)
+        wants_leading_zeros = bool(orig_mid) and len(orig_mid) > 1 and orig_mid[0] == "0"
+        uid_source = uid_target.zfill(9) if wants_leading_zeros else uid_target
         src_mid = False
         waits: List[KafkaWaitAction] = []
         for action in executable.actions:
@@ -131,8 +154,11 @@ class DotNetRunner:
                 if w.key_contains and token in (w.key_contains or ""):
                     w.key_contains, used = uid_target, True
         if used:
-            self._log("UNIQUE", "info",
-                      f"member_id: מקור={uid_source} (עם אפסים), יעד צפוי={uid_target} (ללא אפסים)")
+            if wants_leading_zeros:
+                self._log("UNIQUE", "info", f"member_id: מקור={uid_source} (עם אפסים מובילים — "
+                                            f"בדיקת הסרה), יעד צפוי={uid_target} (ללא אפסים)")
+            else:
+                self._log("UNIQUE", "info", f"member_id ייחודי לריצה: {uid_target}")
         return uid_target if used else None
 
     async def execute(self, executable: DotNetExecutableTestCase) -> TestCaseResult:
