@@ -32,8 +32,10 @@ _UNIQUE_TOKEN = "__UNIQUE_ID__"
 
 
 def _gen_unique_member_id() -> str:
-    """member_id ייחודי (9 ספרות מ-ms timestamp). TCs רצים שניות זה מזה → ייחודי בין טסטים וריצות."""
-    return str(int(time.time() * 1000) % 1_000_000_000).zfill(9)
+    """ה-form ה'נקי' של member_id (ללא אפסים מובילים) — מה שה-Worker מפיק ב-target.
+    עד 8 ספרות כך ש-zfill(9) במקור מוסיף לפחות אפס מוביל אחד (כדי לבדוק הסרת אפסים ביעד).
+    TCs רצים שניות זה מזה → ייחודי בין טסטים."""
+    return str((int(time.time() * 1000) % 99_999_999) + 1)
 
 
 def _substitute_token(obj: Any, token: str, value: str) -> Any:
@@ -97,20 +99,23 @@ class DotNetRunner:
         תופס מסר של טסט קודם). דטרמיניסטי לחלוטין — דורס את כל שדות ה-member_id בקוד, בלי תלות
         בכך שה-LLM שם את ה-token __UNIQUE_ID__ במקום הנכון (הוא לא אמין בהזרקה לשדה מקונן במקור).
         no-op אם אין שדה member_id בכלל."""
-        token, uid, src_mid = _UNIQUE_TOKEN, _gen_unique_member_id(), False
+        token = _UNIQUE_TOKEN
+        uid_target = _gen_unique_member_id()          # ה-form הנקי (ללא אפסים) — מה שה-Worker מפיק
+        uid_source = uid_target.zfill(9)              # ★ מקור: 9 ספרות עם אפסים מובילים (בדיקת הסרה)
+        src_mid = False
         waits: List[KafkaWaitAction] = []
         for action in executable.actions:
             if isinstance(action, KafkaPublishAction):
-                action.value = _substitute_token(action.value, token, uid)   # legacy token
-                if _override_nested_member_id(action.value, uid):            # ★ דטרמיניסטי במקור
+                action.value = _substitute_token(action.value, token, uid_source)   # legacy token
+                if _override_nested_member_id(action.value, uid_source):            # מקור: עם אפסים
                     src_mid = True
                 if action.key and token in action.key:
-                    action.key = action.key.replace(token, uid)
+                    action.key = action.key.replace(token, uid_source)
             elif isinstance(action, KafkaWaitAction):
-                action.match = _substitute_token(action.match, token, uid)
-                action.expected_fields = _substitute_token(action.expected_fields, token, uid)
-                _override_dotted_member_id(action.match, uid)               # דורס member_id קיים
-                _override_dotted_member_id(action.expected_fields, uid)
+                action.match = _substitute_token(action.match, token, uid_target)
+                action.expected_fields = _substitute_token(action.expected_fields, token, uid_target)
+                _override_dotted_member_id(action.match, uid_target)               # יעד: ללא אפסים
+                _override_dotted_member_id(action.expected_fields, uid_target)
                 waits.append(action)
         # ★ אם המקור כולל member_id ייחודי — ודא ש*כל* wait מתאם עליו, כולל תרחישים שליליים:
         # אחרת תרחיש שלילי (match=entity_type בלבד) תופס מסר child_development אקראי ישן ונכשל
@@ -119,15 +124,16 @@ class DotNetRunner:
         if src_mid:
             for w in waits:
                 if not any(k.split(".")[-1] == "member_id" for k in w.match):
-                    w.match["_data.parameters.0.member_id"] = uid    # הזרקת קורלציה
-                w.key_contains = uid
+                    w.match["_data.parameters.0.member_id"] = uid_target    # הזרקת קורלציה (form נקי)
+                w.key_contains = uid_target
         else:
             for w in waits:   # אין member_id במקור — fallback ל-token בלבד
                 if w.key_contains and token in (w.key_contains or ""):
-                    w.key_contains, used = uid, True
+                    w.key_contains, used = uid_target, True
         if used:
-            self._log("UNIQUE", "info", f"member_id ייחודי לריצה: {uid}")
-        return uid if used else None
+            self._log("UNIQUE", "info",
+                      f"member_id: מקור={uid_source} (עם אפסים), יעד צפוי={uid_target} (ללא אפסים)")
+        return uid_target if used else None
 
     async def execute(self, executable: DotNetExecutableTestCase) -> TestCaseResult:
         """מבצע את רצף ה-actions אחד אחרי השני. status סופי הוא AND של כולם."""

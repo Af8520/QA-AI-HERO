@@ -558,10 +558,20 @@ def _get_path(d: Any, path: str) -> Any:
     return val
 
 
+def _numeric_eq(a: Any, b: Any) -> bool:
+    """True אם a ו-b שווים כמספרים שלמים — סובלני לאפסים מובילים ('000123456' ≈ '123456')
+    ולסוג (555 ≈ '555'). False אם אינם מספריים."""
+    try:
+        return int(a) == int(b)
+    except (TypeError, ValueError):
+        return False
+
+
 def _record_matches(value: Optional[Any], match: Dict[str, Any]) -> bool:
     """True אם value (dict או JSON string) מכיל את כל ה-pairs ב-match.
     מפתח עם נקודה ('_data.parameters.0.member_id') נחשב dotted path מקונן.
-    ★ השוואה type-tolerant (str()) — member_id="555" תואם ל-555 ולהפך.
+    ★ השוואה type-tolerant (str()) + numeric-tolerant (אפסים מובילים: ה-Worker מסיר אותם
+    מ-member_id, אז '000123456' במקור תואם ל-'123456' ביעד — וכך הקורלציה תופסת בכל מקרה).
     """
     if not match:
         return True
@@ -574,8 +584,11 @@ def _record_matches(value: Optional[Any], match: Dict[str, Any]) -> bool:
         return False
     for k, expected in match.items():
         actual = _get_path(value, k) if "." in k else value.get(k, _MISSING)
-        if actual is _MISSING or str(actual) != str(expected):
+        if actual is _MISSING:
             return False
+        if str(actual) == str(expected) or _numeric_eq(actual, expected):
+            continue
+        return False
     return True
 
 

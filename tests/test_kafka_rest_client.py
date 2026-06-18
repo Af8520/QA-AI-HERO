@@ -92,6 +92,19 @@ def test_record_matches_autolist_and_type_tolerant():
     assert _record_matches(val, {"_data.parameters.0.member_id": 555})   # int vs str → str()-tolerant
 
 
+def test_record_matches_numeric_tolerant_leading_zeros():
+    """★ ה-Worker מסיר אפסים מובילים מ-member_id (ת.ז) → '000123456' במקור = '123456' ביעד.
+    הקורלציה int-tolerant תופסת בכל מקרה (גם אם ה-Worker מסיר וגם אם לא)."""
+    m = {"entity_type": "child_development", "_data.parameters.0.member_id": "123456"}
+    stripped = {"entity_type": "child_development", "_data": {"parameters": [{"member_id": "123456"}]}}
+    unstripped = {"entity_type": "child_development", "_data": {"parameters": [{"member_id": "000123456"}]}}
+    assert _record_matches(stripped, m)
+    assert _record_matches(unstripped, m)    # 000123456 == 123456 (int-tolerant)
+    # מספר אחר עדיין נדחה
+    assert not _record_matches({"_data": {"parameters": [{"member_id": "999"}]}},
+                               {"_data.parameters.0.member_id": "123456"})
+
+
 def test_scan_records_finds_match():
     records = [
         {"value": {"id": 1}, "offset": 10, "partition": 0, "topic": "t"},
