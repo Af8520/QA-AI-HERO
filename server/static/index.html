@@ -493,6 +493,8 @@
       <span class="label">💬 WebChat ישיר עם הסוכן — תומך 📎 קבצים. JSON של test cases יזוהה אוטומטית ויפעיל Phase B</span>
       <button id="canvasUploadPm">📎 Postman Collection</button>
       <span class="label" id="canvasPmStatus"></span>
+      <button id="canvasUploadSample" title="יש לך מסרי דוגמה מהטופיק מקור? (JSON/JSONL) — עוזר לדיוק ה-publish. אופציונלי.">📥 מסרי דוגמה מקור</button>
+      <span class="label" id="canvasSampleStatus"></span>
       <span class="label" id="canvasJsonWatch" style="margin-right:auto;"></span>
     </div>
     <div class="debug-log" id="debugLog" title="לוג ניפוי שגיאות — כל הודעה מ-Copilot Studio + תוצאת זיהוי JSON. גם נשלח לטרמינל של ה-server."></div>
@@ -567,6 +569,7 @@
         </div>
       </div>
       <input type="file" id="fileInput" hidden />
+      <input type="file" id="sampleMessagesInput" accept=".json,.jsonl,.txt" hidden />
       <textarea id="msgInput" placeholder="כתוב הודעה לסוכן..." rows="1"></textarea>
       <button id="sendBtn" class="send-btn">שלח</button>
     </div>
@@ -1370,6 +1373,37 @@ canvasUploadPm && canvasUploadPm.addEventListener('click', () => {
   fileInput.accept = '.json';
   fileInput.click();
 });
+
+// ★ Canvas: העלאת מסרי-דוגמה מהטופיק מקור (אופציונלי) — בסיס publish format-agnostic
+const canvasUploadSample = document.getElementById('canvasUploadSample');
+const sampleMessagesInput = document.getElementById('sampleMessagesInput');
+canvasUploadSample && canvasUploadSample.addEventListener('click', () => sampleMessagesInput.click());
+sampleMessagesInput && sampleMessagesInput.addEventListener('change', (e) => {
+  const f = e.target.files && e.target.files[0];
+  if (f) uploadSampleMessages(f);
+  e.target.value = '';
+});
+
+function uploadSampleMessages(file) {
+  if (!sessionId) { addUploadError('⚠ אין session פעיל'); return; }
+  if (_specTooLarge(file)) return;   // אותו סף גודל
+  const statusEl = document.getElementById('canvasSampleStatus');
+  if (statusEl) statusEl.textContent = '⏳ מעלה...';
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('session_id', sessionId);
+  debugLog('SAMPLE_MESSAGES_UPLOADING', `${file.name} (${(file.size||0).toLocaleString()} bytes)`, 'bot');
+  fetch('/upload-sample-messages', { method: 'POST', body: fd, headers: { 'X-Session-ID': sessionId } })
+    .then(r => r.ok ? r.json() : r.json().then(j => Promise.reject(new Error(j.detail || ('HTTP ' + r.status)))))
+    .then(data => {
+      debugLog('SAMPLE_MESSAGES_UPLOADED', { count: data.messages_count, file: data.sample_file }, 'json_yes');
+      if (statusEl) statusEl.innerHTML = `<span style="color:var(--success)">✓ ${data.messages_count} מסרי דוגמה</span>`;
+    })
+    .catch(err => {
+      debugLog('SAMPLE_MESSAGES_FAILED', String(err.message || err), 'err');
+      if (statusEl) statusEl.innerHTML = `<span style="color:var(--danger)">✗ ${String(err.message||err)}</span>`;
+    });
+}
 
 // Embed mode: לחיצה על "התחל Phase B" עם suite_id ידני
 startPhaseBBtn.addEventListener('click', async () => {

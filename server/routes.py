@@ -184,6 +184,86 @@ async def extract_spec(
     }
 
 
+def _parse_messages_json(text: str):
+    """מפרסר מסרי-דוגמה מטקסט: JSON array / object בודד / JSONL (object לכל שורה) / fenced ```json```.
+    מחזיר List[dict] או None."""
+    import re
+    text = (text or "").strip()
+    if not text:
+        return None
+    # fenced ```json ... ```
+    m = re.search(r"```(?:json)?\s*(\[[\s\S]*?\]|\{[\s\S]*?\})\s*```", text)
+    candidates = [m.group(1)] if m else []
+    candidates.append(text)
+    for cand in candidates:
+        cand = cand.strip()
+        try:
+            obj = json.loads(cand)
+            if isinstance(obj, list):
+                return [o for o in obj if isinstance(o, dict)] or None
+            if isinstance(obj, dict):
+                return [obj]
+        except json.JSONDecodeError:
+            pass
+    # JSONL — object לכל שורה
+    msgs = []
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            o = json.loads(line)
+            if isinstance(o, dict):
+                msgs.append(o)
+        except json.JSONDecodeError:
+            pass
+    return msgs or None
+
+
+def _persist_sample_messages(session_id: str, messages: list) -> str:
+    """שומר מסרי-דוגמה ל-logs/sample_messages/<ts>_<sid>.json (כמו _persist_payloads)."""
+    import datetime
+    from pathlib import Path
+    logs_dir = Path("logs") / "sample_messages"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_sid = (session_id or "anon")[:12]
+    fpath = logs_dir / f"{ts}_{safe_sid}.json"
+    try:
+        fpath.write_text(json.dumps(messages, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        log.warning("sample_messages_persist_failed", error=str(e))
+    return str(fpath)
+
+
+@router.post("/upload-sample-messages")
+async def upload_sample_messages(
+    request: Request,
+    file: UploadFile = File(...),
+    session_id: Optional[str] = Form(None),
+):
+    """מעלה מסרי-דוגמה אמיתיים מהטופיק מקור (JSON array / JSONL / object). נשמרים על ה-session
+    ומשמשים כבסיס ה-publish (format-agnostic) — מדויק יותר מ-template של ה-Payload Builder."""
+    sid = _resolve_session_id(request, session_id)
+    session = await store.get_or_create(sid)
+    raw = await file.read()
+    text = _extract_text(file.filename or "messages.json", raw)
+    messages = _parse_messages_json(text)
+    if not messages:
+        raise HTTPException(400, "לא נמצאו מסרי JSON תקניים בקובץ (array / JSONL / object).")
+    session.sample_source_messages = messages
+    session.sample_messages_file = _persist_sample_messages(sid, messages)
+    session.touch()
+    log.info("sample_messages_uploaded", session_id=sid, filename=file.filename, count=len(messages))
+    return {
+        "session_id": session.session_id,
+        "filename": file.filename,
+        "messages_count": len(messages),
+        "sample_file": session.sample_messages_file,
+        "preview": messages[:2],
+    }
+
+
 @router.post("/direct-json")
 async def direct_json(request: Request, payload: dict):
     """Cross-origin workaround: היוזר מעתיק JSON של test cases מה-iframe ומדביק כאן.

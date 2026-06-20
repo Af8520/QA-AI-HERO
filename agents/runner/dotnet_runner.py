@@ -49,50 +49,63 @@ def _substitute_token(obj: Any, token: str, value: str) -> Any:
     return obj
 
 
-def _override_nested_member_id(obj: Any, uid: str) -> bool:
-    """דורס *בכל מקום* (רקורסיבית) שדה dict בשם 'member_id' לערך uid — לא 'member_id_code'.
-    זה ההזרקה הדטרמיניסטית למסר המקור (ה-LLM לא אמין בהזרקה לשדה מקונן). מחזיר True אם נמצא."""
+def _override_nested_field(obj: Any, name: str, uid: str) -> bool:
+    """דורס *בכל מקום* (רקורסיבית) שדה dict בשם `name` לערך uid. format-agnostic:
+    שם-השדה מגיע מ-key_built_from (member_id/entity_id/...). מחזיר True אם נמצא."""
     found = False
     if isinstance(obj, dict):
         for k, v in obj.items():
-            if k == "member_id":
+            if k == name:
                 obj[k] = uid
                 found = True
-            elif _override_nested_member_id(v, uid):
+            elif _override_nested_field(v, name, uid):
                 found = True
     elif isinstance(obj, list):
         for item in obj:
-            if _override_nested_member_id(item, uid):
+            if _override_nested_field(item, name, uid):
                 found = True
     return found
 
 
-def _override_dotted_member_id(d: Dict[str, Any], uid: str) -> bool:
-    """דורס ב-dict שטוח (dotted-path keys) כל key שהסגמנט האחרון שלו 'member_id' לערך uid
-    (לא 'member_id_code'). משמש ל-match/expected_fields של ה-wait. מחזיר True אם נמצא."""
+def _override_dotted_field(d: Dict[str, Any], name: str, uid: str) -> bool:
+    """דורס ב-dict שטוח (dotted-path keys) כל key שהסגמנט האחרון שלו == `name` לערך uid.
+    משמש ל-match/expected_fields של ה-wait. מחזיר True אם נמצא."""
     found = False
     for k in list(d.keys()):
-        if k.split(".")[-1] == "member_id":
+        if k.split(".")[-1] == name:
             d[k] = uid
             found = True
     return found
 
 
-def _get_nested_member_id(obj: Any) -> Optional[str]:
-    """מחזיר את ערך ה-member_id הראשון (כ-str) במקור, בלי לשנות. None אם אין."""
+def _get_nested_field(obj: Any, name: str) -> Optional[str]:
+    """מחזיר את ערך השדה `name` הראשון (כ-str) במבנה מקונן, בלי לשנות. None אם אין."""
     if isinstance(obj, dict):
-        if "member_id" in obj:
-            return str(obj["member_id"])
+        if name in obj:
+            return str(obj[name])
         for v in obj.values():
-            r = _get_nested_member_id(v)
+            r = _get_nested_field(v, name)
             if r is not None:
                 return r
     elif isinstance(obj, list):
         for item in obj:
-            r = _get_nested_member_id(item)
+            r = _get_nested_field(item, name)
             if r is not None:
                 return r
     return None
+
+
+def _primary_id_field(key_built_from: Optional[List[str]]) -> Optional[str]:
+    """מ-key_built_from (נתיבי-מקור שה-target KEY בנוי מהם) בוחר את השדה הראשי — הסגמנט האחרון
+    של הנתיב הראשון שאינו *_code/code (הקוד הוא לא המזהה הייחודי). None → אין → fallback ל-member_id.
+    דוגמה: ['_data.member_details.member_id','_data.member_details.member_id_code'] → 'member_id'."""
+    if not key_built_from:
+        return None
+    for path in key_built_from:
+        seg = str(path).split(".")[-1]
+        if seg and not (seg.endswith("_code") or seg == "code"):
+            return seg
+    return str(key_built_from[0]).split(".")[-1] or None
 
 
 class DotNetRunner:
@@ -117,48 +130,47 @@ class DotNetRunner:
         בכך שה-LLM שם את ה-token __UNIQUE_ID__ במקום הנכון (הוא לא אמין בהזרקה לשדה מקונן במקור).
         no-op אם אין שדה member_id בכלל."""
         token = _UNIQUE_TOKEN
+        # ★ format-agnostic: שם-שדה המזהה מ-key_built_from (entity_id/member_id/...); fallback member_id
+        id_name = _primary_id_field(executable.key_built_from) or "member_id"
         uid_target = _gen_unique_member_id()          # ה-form הנקי (ללא אפסים) — מה שה-Worker מפיק
-        # ★ תלוי-בקשה: רק אם ה-member_id *בתסריט* מתחיל באפסים (התסריט בודק הסרת אפסים) —
-        # נשלח במקור עם אפסים מובילים. אחרת id רגיל בלי אפסים (לא ממציאים בדיקה שלא נדרשה).
-        orig_mid = next((_get_nested_member_id(a.value) for a in executable.actions
-                         if isinstance(a, KafkaPublishAction)
-                         and _get_nested_member_id(a.value) is not None), None)
-        wants_leading_zeros = bool(orig_mid) and len(orig_mid) > 1 and orig_mid[0] == "0"
+        # ★ תלוי-בקשה: רק אם ה-id *בתסריט* מתחיל באפסים (התסריט בודק הסרת אפסים) — נשלח במקור עם
+        # אפסים מובילים. אחרת id רגיל (לא ממציאים בדיקה שלא נדרשה).
+        orig_id = next((_get_nested_field(a.value, id_name) for a in executable.actions
+                        if isinstance(a, KafkaPublishAction)
+                        and _get_nested_field(a.value, id_name) is not None), None)
+        wants_leading_zeros = bool(orig_id) and len(orig_id) > 1 and orig_id[0] == "0"
         uid_source = uid_target.zfill(9) if wants_leading_zeros else uid_target
-        src_mid = False
+        src_set = False
         waits: List[KafkaWaitAction] = []
         for action in executable.actions:
             if isinstance(action, KafkaPublishAction):
                 action.value = _substitute_token(action.value, token, uid_source)   # legacy token
-                if _override_nested_member_id(action.value, uid_source):            # מקור: עם אפסים
-                    src_mid = True
+                if _override_nested_field(action.value, id_name, uid_source):       # מקור (form עם אפסים)
+                    src_set = True
                 if action.key and token in action.key:
                     action.key = action.key.replace(token, uid_source)
             elif isinstance(action, KafkaWaitAction):
                 action.match = _substitute_token(action.match, token, uid_target)
                 action.expected_fields = _substitute_token(action.expected_fields, token, uid_target)
-                _override_dotted_member_id(action.match, uid_target)               # יעד: ללא אפסים
-                _override_dotted_member_id(action.expected_fields, uid_target)
+                _override_dotted_field(action.match, id_name, uid_target)           # יעד (form נקי)
+                _override_dotted_field(action.expected_fields, id_name, uid_target)
                 waits.append(action)
-        # ★ אם המקור כולל member_id ייחודי — ודא ש*כל* wait מתאם עליו, כולל תרחישים שליליים:
-        # אחרת תרחיש שלילי (match=entity_type בלבד) תופס מסר child_development אקראי ישן ונכשל
-        # בטעות. עם member_id ייחודי בקורלציה — שלילי מחפש את ה-id שלנו (שלא הופק) → timeout → PASS.
-        used = src_mid
-        if src_mid:
+        # ★ ה-target KEY בנוי מה-id → key_contains=uid הוא קורלציה מדויקת (ה-id ייחודי, אף מסר אחר
+        # לא מכיל אותו). כך גם תרחיש שלילי מחפש את ה-id שלנו (שלא הופק) → timeout → PASS נכון.
+        used = src_set
+        if src_set:
             for w in waits:
-                if not any(k.split(".")[-1] == "member_id" for k in w.match):
-                    w.match["_data.parameters.0.member_id"] = uid_target    # הזרקת קורלציה (form נקי)
                 w.key_contains = uid_target
         else:
-            for w in waits:   # אין member_id במקור — fallback ל-token בלבד
+            for w in waits:   # אין id במקור — fallback ל-token בלבד
                 if w.key_contains and token in (w.key_contains or ""):
                     w.key_contains, used = uid_target, True
         if used:
             if wants_leading_zeros:
-                self._log("UNIQUE", "info", f"member_id: מקור={uid_source} (עם אפסים מובילים — "
+                self._log("UNIQUE", "info", f"{id_name}: מקור={uid_source} (עם אפסים מובילים — "
                                             f"בדיקת הסרה), יעד צפוי={uid_target} (ללא אפסים)")
             else:
-                self._log("UNIQUE", "info", f"member_id ייחודי לריצה: {uid_target}")
+                self._log("UNIQUE", "info", f"{id_name} ייחודי לריצה: {uid_target}")
         return uid_target if used else None
 
     async def execute(self, executable: DotNetExecutableTestCase) -> TestCaseResult:

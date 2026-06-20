@@ -129,13 +129,19 @@ async def run_dotnet_pipeline(session: ChatSession) -> PipelineResult:
     # שלב 3 — DotNet Compiler
     await tl_step(3, "active", f"Compile (0/{len(raw_cases)})")
     await emit(f"שלב 3/{TOTAL_STAGES} — מהדר {len(raw_cases)} תסריטים ל-actions...")
-    compiler = DotNetCompiler(spec_md=spec_md, payload_templates=payload_templates)
+    # ★ מסרי-דוגמה אמיתיים מהמקור (אם היוזר העלה) → בסיס publish format-agnostic
+    sample_messages = getattr(session, "sample_source_messages", None)
+    compiler = DotNetCompiler(spec_md=spec_md, payload_templates=payload_templates,
+                              sample_messages=sample_messages)
+    # ★ key_built_from (נתיבי-מקור של ה-target KEY) → unique-id format-agnostic ב-runner
+    key_built_from = _extract_key_built_from(payload_templates)
     executables: List[DotNetExecutableTestCase] = []
     compile_failures = 0
     for raw in raw_cases:
         tc_label = raw.get("title") or f"TC-{raw.get('id')}"
         try:
             ex = await compiler.compile(raw)
+            ex.key_built_from = key_built_from
             executables.append(ex)
             kinds = [a.kind for a in ex.actions] or ["(empty)"]
             await emit(f"  ✓ {ex.test_case_id} → actions: {', '.join(kinds)}")
@@ -415,6 +421,25 @@ async def _build_payloads(session: ChatSession, spec_text, emit):
     session.payload_templates = result
     session.payload_templates_file = _persist_payloads(session.session_id, result)
     return result
+
+
+def _extract_key_built_from(payload_templates):
+    """מחלץ key_built_from (נתיבי-מקור שה-target KEY בנוי מהם) מתשובת ה-Payload Builder.
+    מחפש ב-target_templates[<action>].key_built_from, או key_built_from ברמה העליונה. None אם אין.
+    משמש ל-unique-id format-agnostic ב-runner (לא קשיח ל-member_id)."""
+    if not isinstance(payload_templates, dict):
+        return None
+    top = payload_templates.get("key_built_from")
+    if isinstance(top, list) and top:
+        return top
+    tt = payload_templates.get("target_templates") or {}
+    if isinstance(tt, dict):
+        for tmpl in tt.values():
+            if isinstance(tmpl, dict):
+                kbf = tmpl.get("key_built_from")
+                if isinstance(kbf, list) and kbf:
+                    return kbf
+    return None
 
 
 def _persist_payloads(session_id, payloads):

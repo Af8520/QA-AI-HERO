@@ -107,10 +107,10 @@ def test_apply_unique_id_leading_zeros_conditional():
     assert wait.expected_fields["_data.parameters.0.member_id"] == uid   # יעד ללא אפסים → בודק הסרה
 
 
-def test_apply_unique_id_injects_correlation_into_negative_wait():
-    """★ הבאג בתרחיש שלילי: ה-wait (expect_no_message) בלי member_id ב-match → היה תופס מסר
-    child_development אקראי ונכשל. ה-runner מזריק את ה-id הייחודי לקורלציה → השלילי מחפש את
-    ה-id שלנו (שלא הופק) → timeout → PASS נכון."""
+def test_apply_unique_id_negative_correlates_via_key_contains():
+    """★ תרחיש שלילי: ה-wait (expect_no_message) בלי member_id ב-match → הקורלציה היא
+    key_contains=uid (ה-target key מכיל את ה-id הייחודי). השלילי מחפש את ה-id שלנו (שלא הופק)
+    → timeout → PASS נכון. (לא מזריקים נתיב MACKAF קשיח — format-agnostic.)"""
     ex = DotNetExecutableTestCase(
         test_case_id="TC-neg",
         actions=[
@@ -122,8 +122,31 @@ def test_apply_unique_id_injects_correlation_into_negative_wait():
     assert uid and uid != "555"
     pub, wait = ex.actions
     assert pub.value["_data"]["member_details"]["member_id"] == uid   # "555" בלי אפסים → מקור נקי
-    assert wait.match["_data.parameters.0.member_id"] == uid     # ★ הוזרק לקורלציה (form נקי)
+    assert wait.key_contains == uid                              # ★ קורלציה על ה-id הייחודי ב-key
+    assert "_data.parameters.0.member_id" not in wait.match      # לא מזריקים נתיב קשיח
     assert wait.match["entity_type"] == "child_development"      # הקיים נשמר
+
+
+def test_apply_unique_id_format_agnostic_via_key_built_from():
+    """★ format-agnostic: key_built_from מצביע על entity_id (לא member_id, פורמט FHIR ללא
+    header/_data) → ה-runner דורס entity_id ושומר על מבנה הדוגמה."""
+    ex = DotNetExecutableTestCase(
+        test_case_id="TC-fhir",
+        key_built_from=["root.entity_id", "root.entity_id_code"],
+        actions=[
+            KafkaPublishAction(topic="src",
+                               value={"resourceType": "Bundle", "entity_id": "777", "entity_id_code": "0"}),
+            KafkaWaitAction(topic="tgt", match={"entity_type": "lab", "_data.0.entity_id": "777"},
+                            expected_fields={"_data.0.entity_id": "777"}),
+        ],
+    )
+    uid = DotNetRunner()._apply_unique_id(ex)
+    assert uid and uid != "777"
+    pub, wait = ex.actions
+    assert pub.value["entity_id"] == uid             # ★ entity_id נדרס (לא member_id)
+    assert pub.value["entity_id_code"] == "0"        # ה-code לא נגע
+    assert pub.value["resourceType"] == "Bundle"     # מבנה FHIR נשמר (בלי header/_data)
+    assert wait.match["_data.0.entity_id"] == uid    # יעד: entity_id נדרס
     assert wait.key_contains == uid
 
 

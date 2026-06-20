@@ -80,3 +80,6 @@ class DotNetExecutableTestCase(BaseModel):
     expected_status: int = 200  # סטטוס סינתטי לשמור compat עם הסטטיסטיקה של הריפורטר
     source_text: Optional[str] = None
     compiler_notes: Optional[str] = None
+    # ★ נתיבי-המקור שה-target KEY בנוי מהם (מ-Payload Builder key_built_from). ה-runner מזריק
+    # לפיהם member_id/entity_id ייחודי — format-agnostic, לא קשיח ל-member_id. ריק → fallback ל-member_id.
+    key_built_from: Optional[List[str]] = None

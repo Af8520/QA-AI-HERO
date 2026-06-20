@@ -40,6 +40,9 @@ class ChatSession:
     #    "field_catalog": {...}}
     payload_templates: Optional[Dict[str, Any]] = None
     payload_templates_file: Optional[str] = None  # נתיב לקובץ ב-logs/payload_builder/
+    # ★ מסרי-דוגמה אמיתיים מהטופיק מקור (אם היוזר העלה) — בסיס publish format-agnostic
+    sample_source_messages: Optional[List[Dict[str, Any]]] = None
+    sample_messages_file: Optional[str] = None  # נתיב ל-logs/sample_messages/
     # מזהה ריצה — נוצר בתחילת Phase B; לוגים נשמרים ב-logs/runs/<run_id>.jsonl
     run_id: Optional[str] = None
     pending_bugs: List[BugReport] = field(default_factory=list)

@@ -282,21 +282,27 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
 
 קלט:
 1. TEST_CASE — תסריט בעברית. מתאר אילו שדות לשנות ולאיזה ערך, מה הצפוי בתוצאה.
-2. PAYLOAD_TEMPLATES — JSON templates מלאים פר action_type (create, delete, update, ...).
-   ★ אלה מבני ה-payload המלאים שצריך לשלוח. הם כוללים headers + root + _data וכל
-   השדות הנדרשים. השתמש בהם כבסיס ואל תשמיט שדות.
-3. FIELD_CATALOG — מילון שדות עם type/format/required/notes. השתמש לאימות התסריט.
-4. SOURCE_TOPIC + TARGET_TOPIC — שמות ה-topics לפרסום וקבלה.
-5. TARGET_ENTITY_TYPE + TARGET_EXAMPLE (אופציונלי) — מבנה מסר ה-target הצפוי + ה-KEY format
-   והשדות המומרים. אם סופקו — הסתמך עליהם לזיהוי שדה ה-KEY ולבניית expected_fields.
-6. TRANSFORMATIONS (אופציונלי) — מיפוי שדות source→target (לדוגמה gender M→"זכר").
+2. ★★★ SOURCE_SAMPLE (אם סופק — **קודם לכל השאר!**) — מסר אמיתי מהטופיק מקור, **בדיוק** כפי
+   שהוא בטופיק. אם SOURCE_SAMPLE לא null → השתמש בו כבסיס ה-`value` של kafka_publish **כפי שהוא**,
+   format-agnostic (FHIR Bundle / כל מבנה). **אל תעטוף ב-headers/root/_data, אל תוסיף/תוריד שדות,
+   אל תשנה מבנה.** החל **רק** את הדריסות שהתסריט מציין. זה מדויק יותר מ-PAYLOAD_TEMPLATES.
+3. PAYLOAD_TEMPLATES — JSON templates פר action_type. **בשימוש רק כש-SOURCE_SAMPLE הוא null.**
+   (פורמט MACKAF: headers + root + _data.)
+4. FIELD_CATALOG — מילון שדות עם type/format/required/notes. לאימות.
+5. SOURCE_TOPIC + TARGET_TOPIC — שמות ה-topics לפרסום וקבלה.
+6. TARGET_ENTITY_TYPE + TARGET_EXAMPLE (אופציונלי) — מבנה מסר ה-target + ה-KEY format והשדות המומרים.
+   הסתמך עליהם לזיהוי שדה ה-KEY ולבניית match/expected_fields.
+7. KEY_BUILT_FROM (אופציונלי) — נתיבי-המקור שה-target KEY בנוי מהם (entity_id/member_id). השדה
+   המזהה הייחודי. (ה-runner מזריק לו ערך ייחודי אוטומטית — אתה רק כלול אותו ב-correlation/expected.)
+8. TRANSFORMATIONS (אופציונלי) — מיפוי שדות source→target (gender M→"זכר").
 
 תפקידך לכל test case:
 1. זהה את action_type מהתסריט ("פתח", "create", "מחק", "delete" וכדומה).
-2. קח את הtemplate המתאים מ-PAYLOAD_TEMPLATES — זה הבסיס המלא.
+2. ★ קח את הבסיס ל-`value`: **אם SOURCE_SAMPLE סופק → הוא הבסיס (כפי שהוא).** אחרת — ה-template
+   המתאים מ-PAYLOAD_TEMPLATES.
 3. ★ זהה אילו שדות התסריט אומר לדרוס (לדוגמה "type_code=99918", "referral_date=2024-01-01").
-   החל את הדריסות **רק על השדות שהתסריט מציין**. כל שאר השדות נשארים מה-template.
-4. צור KafkaPublishAction עם topic=SOURCE_TOPIC, value=ה-template אחרי הדריסות (JSON מלא).
+   החל את הדריסות **רק על השדות שהתסריט מציין**. כל שאר השדות נשארים מהבסיס.
+4. צור KafkaPublishAction עם topic=SOURCE_TOPIC, value=הבסיס אחרי הדריסות (JSON מלא).
 5. צור KafkaWaitAction עם topic=TARGET_TOPIC (או CouchbaseWaitAction אם התסריט מזכיר Couchbase).
 6. אם התסריט הוא תרחיש שלילי (הערך שגוי, תאריך ישן, סינון, "אין להפיץ", "לא יגיע") —
    קבע expect_no_message=true על ה-wait. אז timeout = PASS.
@@ -370,9 +376,9 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
 - ★★★ **ודא לוג / Elastic / "לוג הצלחה/שגיאה"**: אין תמיכה ב-.NET כרגע. **אל תיצור action** לצעד
   כזה, ובמיוחד **אל תיצור kafka_wait מזויף** (הוא יעבור על מסר אקראי וייתן PASS שקרי). דלג עליו
   ורשום ב-compiler_notes ("דילגנו על אימות לוג — לא נתמך ב-.NET").
-- ★ אל תקצר את ה-template. ה-value של kafka_publish חייב להכיל את **כל** השדות
-  שמופיעים ב-template (headers + root + _data), עם דריסות בלבד היכן שהתסריט אומר.
-- שמור על מבנה ה-template (nested objects) כפי שהוא.
+- ★ אל תקצר את הבסיס (SOURCE_SAMPLE או template). ה-value של kafka_publish חייב להכיל את **כל**
+  השדות שבבסיס, עם דריסות בלבד היכן שהתסריט אומר. **שמור על המבנה המדויק כפי שהוא** (אם הבסיס הוא
+  SOURCE_SAMPLE בפורמט FHIR/אחר — אל תוסיף headers/root/_data; אם הוא template MACKAF — שמור headers+root+_data).
 - אם התסריט אומר "ערך לא תקין" / "שדה ריק" — הכנס את הערך הלא תקין בדיוק (גם אם זה
   string במקום int) כדי לבדוק validation בצד ה-Worker.
 - שמור על case-sensitive בשמות topics ו-fields.
@@ -393,6 +399,19 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
 """
 
 
+def _extract_kbf(pt: Dict[str, Any]) -> Optional[List[str]]:
+    """מחלץ key_built_from מתשובת ה-Payload Builder (top-level או target_templates[*])."""
+    if not isinstance(pt, dict):
+        return None
+    top = pt.get("key_built_from")
+    if isinstance(top, list) and top:
+        return top
+    for tmpl in (pt.get("target_templates") or {}).values():
+        if isinstance(tmpl, dict) and isinstance(tmpl.get("key_built_from"), list) and tmpl["key_built_from"]:
+            return tmpl["key_built_from"]
+    return None
+
+
 class DotNetCompiler:
     """מהדר תסריט .NET → DotNetExecutableTestCase עם רצף actions.
 
@@ -406,9 +425,12 @@ class DotNetCompiler:
         self,
         spec_md: Optional[str] = None,
         payload_templates: Optional[Dict[str, Any]] = None,
+        sample_messages: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         self.spec_md = spec_md or ""
         self.payload_templates = payload_templates  # full Payload Builder response
+        # ★ מסרי-דוגמה אמיתיים מהטופיק מקור (אם היוזר העלה) — בסיס publish format-agnostic
+        self.sample_messages = sample_messages or []
 
     @property
     def has_templates(self) -> bool:
@@ -485,6 +507,10 @@ class DotNetCompiler:
             "TARGET_ENTITY_TYPE": pt.get("target_entity_type"),
             "TARGET_EXAMPLE": pt.get("target_example") or pt.get("target_templates"),
             "TRANSFORMATIONS": pt.get("transformations"),
+            # ★ מסר-דוגמה אמיתי מהמקור (אם היוזר העלה) — בסיס ה-publish כפי-שהוא (format-agnostic)
+            "SOURCE_SAMPLE": (self.sample_messages[0] if self.sample_messages else None),
+            "SOURCE_SAMPLES_COUNT": len(self.sample_messages),
+            "KEY_BUILT_FROM": _extract_kbf(pt),
         }
 
         try:
