@@ -128,21 +128,21 @@ _GENERIC_LEAVES = {"value", "code", "id", "status", "name", "text", "system", "d
 
 
 def _override_path_anywhere(obj: Any, parts: List[str], value: Any) -> bool:
-    """דורס בכל מקום ב-tree שבו הנתיב היחסי `parts` נפתר (החל מאותו node). מחזיר True אם נמצא
-    לפחות מופע אחד. ★ ה-key_built_from של FHIR הוא נתיב *לוגי* (ResourceType.field.subfield) ולא
-    נתיב-JSON ליטרלי, ולכן מנסים סיומות (identifier.value) במקום הנתיב המלא."""
-    found = False
+    """דורס את **המופע הראשון** ב-tree שבו הנתיב היחסי `parts` נפתר (החל מאותו node). מחזיר True
+    אם נמצא ונדרס. ★ single-match בכוונה: ה-key_built_from של FHIR הוא נתיב לוגי וסיומת כמו
+    'identifier.value' מופיעה ב-*כל* resource — דריסת כולם תשחית את המסר (request_num/institute/...
+    היו הופכים ל-uid). דורסים אחד בלבד; ה-token (__UNIQUE_ID__) הוא המנגנון המדויק המועדף."""
     if _override_by_path(obj, ".".join(parts), value):
-        found = True
+        return True
     if isinstance(obj, dict):
         for v in obj.values():
             if _override_path_anywhere(v, parts, value):
-                found = True
+                return True
     elif isinstance(obj, list):
         for it in obj:
             if _override_path_anywhere(it, parts, value):
-                found = True
-    return found
+                return True
+    return False
 
 
 def _override_field_smart(obj: Any, path: str, value: Any) -> bool:
@@ -282,11 +282,13 @@ class DotNetRunner:
         waits: List[KafkaWaitAction] = []
         for action in executable.actions:
             if isinstance(action, KafkaPublishAction):
-                if _contains_token(action.value, token):                            # ה-LLM שם __UNIQUE_ID__ בשדה ה-id
+                had_token = _contains_token(action.value, token)                    # ה-LLM שם __UNIQUE_ID__ בשדה ה-id
+                if had_token:
                     token_seen = True
-                action.value = _substitute_token(action.value, token, uid_source)   # token → uid (path-free, אמין)
-                # ★ הזרקה בטוחה מ-leaf גנרי: נתיב/סיומת קודם, ואז leaf רק לשם ספציפי (לא value/code)
-                if _inject_source_id(action.value, id_path, id_name, uid_source):    # מקור (form עם אפסים)
+                action.value = _substitute_token(action.value, token, uid_source)   # token → uid (path-free, מדויק)
+                # ★ הזרקת נתיב **רק כשאין token** — ה-token כבר מיקם את ה-uid בשדה אחד מדויק; הזרקת
+                # נתיב/סיומת עלולה לדרוס יותר מדי (כל identifier.value ב-Bundle) ולהשחית את המסר.
+                if not had_token and _inject_source_id(action.value, id_path, id_name, uid_source):
                     src_set = True
                 if action.key and token in action.key:
                     action.key = action.key.replace(token, uid_source)

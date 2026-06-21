@@ -457,6 +457,51 @@ def test_apply_unique_id_token_in_source_sets_value_contains():
     assert pub.value["entry"][0]["resource"]["identifier"][0]["system"] == "x"
 
 
+def test_apply_unique_id_token_does_not_overinject_other_identifiers():
+    """★ regression: ה-Bundle מלא ב-identifier.value (request/institute/practitioner). כשה-LLM
+    שם __UNIQUE_ID__ בשדה אחד — ה-runner מזריק רק שם, ולא דורס את כל ה-identifier.value (29 הבאג)."""
+    fhir = {"resourceType": "Bundle",
+            "identifier": {"value": "260000548"},                      # message id — לא לגעת
+            "entry": [
+                {"resource": {"resourceType": "Patient",
+                              "identifier": [{"value": "__UNIQUE_ID__"}]}},   # ה-member id (token)
+                {"resource": {"resourceType": "ServiceRequest",
+                              "identifier": [{"value": "REQ-12345"}]}},       # request — לא לגעת
+                {"resource": {"resourceType": "Practitioner",
+                              "identifier": [{"value": "LIC-999"}]}},          # practitioner — לא לגעת
+            ]}
+    ex = DotNetExecutableTestCase(
+        test_case_id="TC-no-overinject",
+        key_built_from=["ServiceRequest.identifier.value"],
+        actions=[KafkaPublishAction(topic="src", value=fhir),
+                 KafkaWaitAction(topic="tgt", match={"entity_type": "lab"})],
+    )
+    uid = DotNetRunner()._apply_unique_id(ex)
+    val = ex.actions[0].value
+    assert val["entry"][0]["resource"]["identifier"][0]["value"] == uid        # רק ה-token הוזרק
+    assert val["identifier"]["value"] == "260000548"                           # message id נשמר
+    assert val["entry"][1]["resource"]["identifier"][0]["value"] == "REQ-12345"  # request נשמר
+    assert val["entry"][2]["resource"]["identifier"][0]["value"] == "LIC-999"   # practitioner נשמר
+
+
+def test_apply_unique_id_no_token_single_match_only():
+    """★ ללא token (fallback path-based) — מזריקים מופע **אחד** של identifier.value, לא את כולם."""
+    fhir = {"resourceType": "Bundle",
+            "entry": [{"resource": {"identifier": [{"value": "AAA"}]}},
+                      {"resource": {"identifier": [{"value": "BBB"}]}}]}
+    ex = DotNetExecutableTestCase(
+        test_case_id="TC-single",
+        key_built_from=["ServiceRequest.identifier.value"],
+        actions=[KafkaPublishAction(topic="src", value=fhir),
+                 KafkaWaitAction(topic="tgt", match={"entity_type": "lab"})],
+    )
+    uid = DotNetRunner()._apply_unique_id(ex)
+    val = ex.actions[0].value
+    vals = [val["entry"][0]["resource"]["identifier"][0]["value"],
+            val["entry"][1]["resource"]["identifier"][0]["value"]]
+    assert vals.count(uid) == 1                      # בדיוק אחד נדרס (לא שניהם)
+
+
 def test_apply_unique_id_path_fallback_to_leaf_when_path_missing():
     """key_built_from עם נתיב שלא קיים במבנה בפועל → fallback ל-leaf-override (תאימות עם הטסט
     הקיים test_apply_unique_id_format_agnostic_via_key_built_from)."""

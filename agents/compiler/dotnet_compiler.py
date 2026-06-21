@@ -324,15 +324,19 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
   ב-TARGET_EXAMPLE. ה-uid הייחודי כבר מצוי ב-KEY → ה-match הוא רק סינון משני של פורמט המסר.
 - key_equals = ה-key המלא רק אם הפורמט (כולל הקוד והסדר) ודאי לחלוטין.
 
-★★★ expected_fields — אמת בדיוק את מה שהתסריט מבקש ★★★
-- ★★★ **אמת כל שדה שהתסריט מבקש לוודא.** לכל "ודא שדה X" / "ודא ש-X=Y" / "ודא טרנספורמציה X"
-  בתסריט — **הוסף את X ל-expected_fields** עם הערך הצפוי ב-target:
-  - אם X מומר (מופיע ב-TRANSFORMATIONS) → השתמש ב**ערך המומר** לפי ה-rule (למשל gender M→"זכר").
+★★★ expected_fields — אמת **רק** את מה שהתסריט מבקש במפורש (לא את כל המסר!) ★★★
+- ★★★★ **אסור בתכלית האיסור לאמת את כל שדות TARGET_EXAMPLE.** TARGET_EXAMPLE הוא רק כדי לדעת את
+  **הנתיב המדויק** של שדה ולוודא שהוא **קיים** — הוא **אינו** רשימת שדות לאימות. אם תכניס עשרות
+  שדות (member_name/request_num/institute/practitioner/...) שהתסריט לא ביקש — הבדיקה תיכשל על ערכים
+  לא רלוונטיים. **expected_fields חייב להכיל רק את השדות מצעדי ה"ודא/בדוק" של התסריט — בד"כ 1-4 שדות.**
+- ★★★ לכל צעד "ודא שדה X" / "בדוק ש-X=Y" / "ודא טרנספורמציה X" **בלבד** — הוסף את X ל-expected_fields:
+  - אם X מומר (מופיע ב-TRANSFORMATIONS) → השתמש ב**ערך המומר** לפי ה-rule (למשל M_PAT_HPV→1, gender M→"זכר").
   - אם התסריט נותן ערך מפורש → השתמש בו.
   - נתיב מדויק לפי TARGET_EXAMPLE, case-sensitive (עם index ל-arrays אם רלוונטי).
-- ★★★ **תנאי קיום: רק שדות שקיימים בפועל ב-TARGET_EXAMPLE/target_templates.** אם התסריט מבקש
-  לאמת שדה שאינו קיים ב-TARGET_EXAMPLE — **אל תכניס אותו** (יחזיר "missing"); רשום ב-compiler_notes.
-  אם אין TARGET_EXAMPLE כלל — השאר `expected_fields` ריק והסתמך על ה-KEY לזיהוי.
+- ★★★ **אל תאמת member_id / member_name / request_num / institute / practitioner / תאריכים / scc_message_id /
+  member_id_code** אלא אם התסריט ביקש זאת **מפורשות**. ה-member_id במיוחד נדרס לערך ייחודי — אסור לאמת אותו.
+- ★★★ **אם התסריט מבקש לאמת שדה שאינו קיים ב-TARGET_EXAMPLE** — אל תכניס אותו; רשום ב-compiler_notes.
+  אם אין צעדי "ודא" כלל — השאר `expected_fields` ריק והסתמך על הקורלציה.
 - ★★★ **אל תאמת `entity_id` / ה-KEY / `entity_type` כשדה ערך** — אלה ה-**correlation** שכבר מאמת
   ב-match לפי ה-key. אימותם ב-expected_fields הוא כפילות מיותרת ושביר (ה-entity_id מכיל את
   ה-member_id שה-runner דורס לערך ייחודי). זהו ב-match בלבד, לא ב-expected_fields.
