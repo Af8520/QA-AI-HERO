@@ -105,6 +105,29 @@ def test_record_matches_numeric_tolerant_leading_zeros():
                                {"_data.parameters.0.member_id": "123456"})
 
 
+def test_record_matches_leaf_fallback_fhir():
+    """★ format-agnostic: כשהנתיב המדויק לא קיים (FHIR ללא _data.parameters) — fallback ל-leaf
+    בכל מקום ב-tree. additive: רץ רק כשהנתיב המדויק מחזיר _MISSING.
+    בטוח מ-false-match כי key_contains=uid כבר מצמצם ל-candidate בודד לפני בדיקת ה-value."""
+    fhir = {"resourceType": "Bundle",
+            "entry": [{"resource": {"resourceType": "DiagnosticReport",
+                                    "examination_type_code": "1"}}]}
+    # נתיב MACKAF קשיח לא קיים ב-FHIR, אבל ה-leaf 'examination_type_code' קיים עמוק ב-tree
+    assert _record_matches(fhir, {"_data.parameters.0.examination_type_code": "1"})
+    # ערך שגוי עדיין נדחה
+    assert not _record_matches(fhir, {"_data.parameters.0.examination_type_code": "9"})
+    # leaf שלא קיים בכלל → _MISSING → False
+    assert not _record_matches(fhir, {"_data.parameters.0.nonexistent": "1"})
+
+
+def test_record_matches_exact_path_wins_over_leaf():
+    """★ ה-leaf-fallback הוא additive — נתיב מדויק שקיים גובר (לא מדלגים אליו). מסר Worker
+    של member אחר עדיין נדחה (regression ל-precise_correlation)."""
+    other = {"_data": {"parameters": [{"member_id": "233848555"}]}}
+    # הנתיב קיים (233848555) → אין fallback; ערך ≠ 555 → לא תואם
+    assert not _record_matches(other, {"_data.parameters.0.member_id": "555"})
+
+
 def test_scan_records_finds_match():
     records = [
         {"value": {"id": 1}, "offset": 10, "partition": 0, "topic": "t"},

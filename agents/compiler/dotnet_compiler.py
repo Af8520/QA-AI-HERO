@@ -307,38 +307,31 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
 6. אם התסריט הוא תרחיש שלילי (הערך שגוי, תאריך ישן, סינון, "אין להפיץ", "לא יגיע") —
    קבע expect_no_message=true על ה-wait. אז timeout = PASS.
 
-★★★ זיהוי המסר שלנו ב-target (correlation) — קריטי ★★★
+★★★ זיהוי המסר שלנו ב-target (correlation) — קריטי, format-agnostic ★★★
 ה-target topic משותף — הרבה מסרים לא קשורים (verifyhub, user_login_status...). חייבים לזהות
-את *המסר שלנו* לפי ה-KEY של מסר ה-target:
-- התסריט אומר "ודא שמסר נכתב לטופיק X עם KEY בפורמט: <entity>::<מזהה>::<קוד>".
-- ★ זהה את **המזהה שמופיע בתוך ה-KEY** — זה לרוב ה-**member_id (ת.ז)**, **לא** ה-entity_id/
-  referral_id! (entity_id הוא מזהה ההפניה — הוא בדרך כלל *לא* בתוך ה-key של ה-target.)
-  אם TARGET_EXAMPLE / TARGET_ENTITY_TYPE סופקו — קח מהם את שדה ה-KEY המדויק.
-- key_contains = **הערך הייחודי** של המזהה שה-key בנוי ממנו (לרוב ה-**member_id** — מספר ארוך
-  וייחודי כמו "021769658"). ★★★ **לעולם אל תשתמש בערך קצר/נפוץ** כמו "0", "1", member_id_code,
-  או ספרה בודדת — הם מופיעים בכל key (verifyhub::0::4242 מכיל "0") וגורמים להתאמה שגויה!
-  אם key_built_from כולל גם member_id וגם member_id_code — קח את ה-**member_id** (הארוך), לא את הקוד.
-- ★★★ **ה-match חייב לזהות את המסר *שלנו* בדיוק** — key_contains לבדו רופף! member_id קצר כמו
-  "55" מתאים גם ל-"243551785" (שמכיל "55") ותופס מסר Worker של member אחר. לכן ה-match חייב
-  לכלול **שלושה** שדות-ערך מדויקים:
+את *המסר שלנו*. ★ ה-correlation הראשי הוא ה-**KEY**: ה-runner מזריק **ערך ייחודי לריצה** לשדה
+ה-`KEY_BUILT_FROM` (במקור) וממלא אוטומטית `key_contains` בערך הזה. ה-target KEY שה-Worker מפיק
+בנוי מאותו שדה → ה-uid הייחודי מופיע ב-key של *המסר שלנו בלבד*. **אינך צריך למלא key_contains** —
+ה-runner עושה זאת. זה עובד בכל פורמט (FHIR/MACKAF) כי הוא נשען על KEY_BUILT_FROM ולא על נתיב קשיח.
+- ★★★ **match — רק שדות שקיימים בפועל ב-TARGET_EXAMPLE.** אל תוסיף נתיב שאינו ב-TARGET_EXAMPLE —
+  הוא יגרום ל-timeout (המסר לא יימצא). שדות מומלצים אם הם קיימים ב-TARGET_EXAMPLE:
   1. `entity_type` (מ-TARGET_ENTITY_TYPE) — דוחה verifyhub/מסרים זרים.
-  2. `_data.parameters.0.member_id` = ה-**member_id המדויק שלנו** — דוחה מסרי Worker של members אחרים.
-  3. `root.action` = הפעולה שלנו (`create`/`delete`/...) — דוחה מסר create כשציפינו ל-delete.
-  למשל: `"match": {"entity_type":"child_development", "_data.parameters.0.member_id":"<member_id שלנו>", "root.action":"create"}`.
-  כך _scan_records יחזיר *רק* את המסר שלנו ולא מסר Worker אקראי שתפס את ה-key הרופף.
+  2. `action` / `root.action` (אם קיים ב-TARGET_EXAMPLE) — דוחה create כשציפינו ל-delete.
+  למשל (MACKAF): `"match": {"entity_type":"child_development", "root.action":"create"}`.
+  אם TARGET_EXAMPLE ריק או לא ידוע — השאר `match` ריק והסתמך על ה-KEY (key_contains שה-runner ממלא).
+- ★★★ **אל תכניס נתיב member_id קשיח** כמו `_data.parameters.0.member_id` אלא אם הוא **קיים בפועל**
+  ב-TARGET_EXAMPLE. ה-uid הייחודי כבר מצוי ב-KEY → ה-match הוא רק סינון משני של פורמט המסר.
 - key_equals = ה-key המלא רק אם הפורמט (כולל הקוד והסדר) ודאי לחלוטין.
-- אל תשתמש ב-entity_id/referral_id אם ה-key לא בנוי מהם.
 
 ★★★ expected_fields — אמת בדיוק את מה שהתסריט מבקש ★★★
-- ★★★ **חובה: `_data.parameters.0.member_id`** (זהות — מאשר שתפסנו את *המסר שלנו*).
 - ★★★ **אמת כל שדה שהתסריט מבקש לוודא.** לכל "ודא שדה X" / "ודא ש-X=Y" / "ודא טרנספורמציה X"
   בתסריט — **הוסף את X ל-expected_fields** עם הערך הצפוי ב-target:
   - אם X מומר (מופיע ב-TRANSFORMATIONS) → השתמש ב**ערך המומר** לפי ה-rule (למשל gender M→"זכר").
   - אם התסריט נותן ערך מפורש → השתמש בו.
-  - נתיב מדויק עם **index ל-arrays** (`_data.parameters.0.X`), case-sensitive.
-  אל תסתפק ב-member_id בלבד אם התסריט ביקש לאמת שדות נוספים — זה מחמיץ את עיקר הבדיקה!
+  - נתיב מדויק לפי TARGET_EXAMPLE, case-sensitive (עם index ל-arrays אם רלוונטי).
 - ★★★ **תנאי קיום: רק שדות שקיימים בפועל ב-TARGET_EXAMPLE/target_templates.** אם התסריט מבקש
   לאמת שדה שאינו קיים ב-TARGET_EXAMPLE — **אל תכניס אותו** (יחזיר "missing"); רשום ב-compiler_notes.
+  אם אין TARGET_EXAMPLE כלל — השאר `expected_fields` ריק והסתמך על ה-KEY לזיהוי.
 - ★★★ **אל תאמת `entity_id` / ה-KEY / `entity_type` כשדה ערך** — אלה ה-**correlation** שכבר מאמת
   ב-match לפי ה-key. אימותם ב-expected_fields הוא כפילות מיותרת ושביר (ה-entity_id מכיל את
   ה-member_id שה-runner דורס לערך ייחודי). זהו ב-match בלבד, לא ב-expected_fields.
@@ -350,27 +343,26 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
 - ★★★ **אל תאמת metadata של ה-producer** — `header.mac_*`. אינך יודע את ערכיהם.
 - ★ **דלג על שדות דינמיים** — message_id=GUID, תאריכים, timestamps (או השתמש ב-__PRESENT__).
 
-★★★ member_id ייחודי — אל תדאג לזה (ה-runner מטפל) ★★★
-ה-target topic מלא בכפילויות של אותו member_id → ה-runner **דורס אוטומטית** את כל שדות ה-`member_id`
-בערך ייחודי לכל ריצה (במקור המקונן + ב-key_contains/match/expected_fields), כך שלא תהיה התנגשות.
-מה שנדרש ממך: פשוט **כלול את שדה ה-member_id** מהתבנית במסר המקור (member_details.member_id), וב-wait
-כלול `_data.parameters.0.member_id` ב-match וב-expected_fields. השתמש ב-member_id מה-test data כ-value
-(או placeholder) — ה-runner יחליף אותו. **אל תיגע ב-member_id_code/code** (הוא לא חלק מהזיהוי הייחודי).
+★★★ מזהה ייחודי — אל תדאג לזה (ה-runner מטפל) ★★★
+ה-target topic מלא בכפילויות → ה-runner **מזריק אוטומטית** ערך ייחודי לכל ריצה לשדה ה-`KEY_BUILT_FROM`
+(במקור) וממלא `key_contains` בערך הזה. **אינך צריך למלא key_contains, ואל תכניס נתיבי member_id קשיחים**
+(`_data.parameters.0.member_id` וכו') אלא אם הם קיימים בפועל ב-TARGET_EXAMPLE. פשוט שמור את מבנה ה-source
+כפי שהוא (כולל שדה ה-KEY_BUILT_FROM) — ה-runner ידרוס בו את הערך הייחודי.
 
 החזר JSON בלבד:
 {
   "test_case_id": "string",
   "actions": [
-    {"kind": "kafka_publish", "topic": "<SOURCE_TOPIC>", "value": {... template מלא עם דריסות ...}},
+    {"kind": "kafka_publish", "topic": "<SOURCE_TOPIC>", "value": {... template/sample מלא עם דריסות ...}},
     {"kind": "kafka_wait", "topic": "<TARGET_TOPIC>",
-     "key_contains": "<member_id מה-test data — ה-runner ידרוס לערך ייחודי>",
-     "match": {"entity_type":"<TARGET_ENTITY_TYPE>", "_data.parameters.0.member_id":"<member_id>", "root.action":"<create/delete>"},
-     "expected_fields": {"_data.parameters.0.member_id":"<member_id>"},
+     "match": {"entity_type":"<TARGET_ENTITY_TYPE אם קיים ב-TARGET_EXAMPLE>", "root.action":"<create/delete אם קיים>"},
+     "expected_fields": {"<נתיב שקיים ב-TARGET_EXAMPLE>":"<ערך מומר/צפוי>"},
      "timeout_seconds": 150, "expect_no_message": false}
   ],
   "expected_status": 200,
-  "compiler_notes": "string קצר — אילו דריסות הוחלו, ולפי איזה מזהה תופסים את ה-target"
+  "compiler_notes": "string קצר — אילו דריסות הוחלו, ואילו שדות אומתו ב-target"
 }
+(key_contains מושמט בכוונה — ה-runner ממלא אותו מ-KEY_BUILT_FROM. match/expected_fields — רק שדות מ-TARGET_EXAMPLE.)
 
 כללי כתיבה חשובים:
 - ★★★ **ודא לוג / Elastic / "לוג הצלחה/שגיאה"**: אין תמיכה ב-.NET כרגע. **אל תיצור action** לצעד
