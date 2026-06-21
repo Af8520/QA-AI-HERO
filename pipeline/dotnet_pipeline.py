@@ -142,6 +142,10 @@ async def run_dotnet_pipeline(session: ChatSession) -> PipelineResult:
         try:
             ex = await compiler.compile(raw)
             ex.key_built_from = key_built_from
+            # ★ הגנתי: גם אם ה-compiler לא חתם source_sample (regex-only / נתיב ישן) — אם היוזר
+            # העלה מסר-דוגמה, נשתמש בו כבסיס publish דטרמיניסטי ברנר (format-agnostic).
+            if sample_messages and not ex.source_sample:
+                ex.source_sample = sample_messages[0]
             executables.append(ex)
             kinds = [a.kind for a in ex.actions] or ["(empty)"]
             await emit(f"  ✓ {ex.test_case_id} → actions: {', '.join(kinds)}")
