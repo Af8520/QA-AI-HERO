@@ -199,21 +199,46 @@ def _override_path_anywhere(obj: Any, parts: List[str], value: Any) -> bool:
     return False
 
 
+def _fhir_resources_of_type(bundle: Any, rtype: str) -> List[Dict[str, Any]]:
+    """מחזיר את כל ה-resources ב-Bundle.entry[].resource עם resourceType==rtype (FHIR). [] אם אין."""
+    out: List[Dict[str, Any]] = []
+    if isinstance(bundle, dict) and isinstance(bundle.get("entry"), list):
+        for e in bundle["entry"]:
+            res = e.get("resource") if isinstance(e, dict) else None
+            if isinstance(res, dict) and res.get("resourceType") == rtype:
+                out.append(res)
+    return out
+
+
 def _override_field_smart(obj: Any, path: str, value: Any) -> bool:
     """דריסת שדה format-agnostic ובטוחה מ-leaf גנרי. ה-paths מ-key_built_from/source_overrides
     הם לוגיים (ResourceType.field.subfield) ולא נתיבי-JSON ליטרליים, לכן:
-    1. מנסה סיומות הולכות ומתקצרות (אורך 2+, parent.leaf) בכל מקום ב-tree.
-    2. fallback ל-leaf בודד — **רק** לשם ספציפי (member_id/category_code), לא גנרי (value/code/id).
-    כך 'ServiceRequest.identifier.value' דורס רק identifier.value, ולא valueQuantity.value אחים."""
+    1. ★ ResourceType-aware: אם הסגמנט הראשון הוא resourceType ב-Bundle → מנווט ל-resource הנכון
+       ומחיל את שאר הנתיב שם (כך 'DiagnosticReport.category[0].coding[0].code' פוגע ב-DiagnosticReport,
+       לא ב-category הראשון האקראי — Observation/ServiceRequest יכולים גם הם להחזיק category).
+    2. סיומות הולכות ומתקצרות (אורך 2+, parent.leaf) בכל מקום ב-tree.
+    3. fallback ל-leaf בודד — **רק** לשם ספציפי (member_id/...), לא גנרי (value/code/id)."""
     parts = _split_path_segments(path)           # bracket-aware (לא שובר JSONPath filter)
-    for i in range(len(parts) - 1):              # מהארוך לקצר, מינימום 2 סגמנטים
+    if not parts:
+        return False
+    # 1) ResourceType-aware
+    rtype = re.sub(r"\[[^\]]*\]", "", parts[0])
+    rest = ".".join(parts[1:])
+    resources = _fhir_resources_of_type(obj, rtype) if rest else []
+    if resources:
+        for res in resources:
+            if _override_by_path(res, rest, value):
+                return True
+        # התאמת resourceType אך הנתיב לא נפתר באף resource → ננסה suffix כ-fallback
+    # 2) סיומות
+    for i in range(len(parts) - 1):
         sub = parts[i:]
         if len(sub) < 2:
             break
         if _override_path_anywhere(obj, sub, value):
             return True
-    # leaf בודד — שם-השדה האחרון (בלי ברקטים). רק לשם ספציפי (לא value/code גנרי).
-    leaf = re.sub(r"\[[^\]]*\]", "", parts[-1]) if parts else ""
+    # 3) leaf בודד — שם-השדה האחרון (בלי ברקטים). רק לשם ספציפי (לא value/code גנרי).
+    leaf = re.sub(r"\[[^\]]*\]", "", parts[-1])
     if leaf and leaf not in _GENERIC_LEAVES:
         return _override_nested_field(obj, leaf, value)
     return False

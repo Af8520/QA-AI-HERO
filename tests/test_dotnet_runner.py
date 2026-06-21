@@ -351,6 +351,22 @@ def test_override_field_smart_resourcetype_prefixed_bracket_path():
     assert bundle["entry"][0]["resource"]["category"][0]["coding"][0]["code"] == "M_PAT_HPV"
 
 
+def test_override_field_smart_resourcetype_aware_picks_right_resource():
+    """★★★ הבאג מהריצה: Observation עם category מופיע *לפני* DiagnosticReport. ה-ResourceType-aware
+    מוודא שהדריסה פוגעת ב-DiagnosticReport.category (מה שה-Worker קורא), לא ב-category הראשון האקראי."""
+    bundle = {"resourceType": "Bundle", "entry": [
+        {"resource": {"resourceType": "Observation",                      # decoy: category ראשון
+                      "category": [{"coding": [{"code": "OBS"}]}]}},
+        {"resource": {"resourceType": "DiagnosticReport",
+                      "category": [{"coding": [{"system": "ICD", "code": "M_PAT_HIST"}]}],
+                      "code": {"coding": [{"code": "other"}]}}},
+    ]}
+    assert _override_field_smart(bundle, "DiagnosticReport.category[0].coding[0].code", "M_PAT_HPV")
+    assert bundle["entry"][1]["resource"]["category"][0]["coding"][0]["code"] == "M_PAT_HPV"  # ה-DiagnosticReport
+    assert bundle["entry"][0]["resource"]["category"][0]["coding"][0]["code"] == "OBS"        # ה-decoy לא נגע
+    assert bundle["entry"][1]["resource"]["code"]["coding"][0]["code"] == "other"             # שדה אחר לא נגע
+
+
 def test_override_by_path_index_tolerates_object_vs_array():
     """★ הבאג מהריצה: ה-PB מייצר 'category[0].coding[0].code' (מניח מערך), אבל ב-sample האמיתי
     category/coding הם אובייקט בודד. אינדקס על אובייקט → מתייחס לאובייקט כאלמנט (לא נכשל)."""
