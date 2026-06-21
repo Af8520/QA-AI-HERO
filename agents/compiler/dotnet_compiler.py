@@ -282,10 +282,11 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
 
 קלט:
 1. TEST_CASE — תסריט בעברית. מתאר אילו שדות לשנות ולאיזה ערך, מה הצפוי בתוצאה.
-2. ★★★ SOURCE_SAMPLE (אם סופק — **קודם לכל השאר!**) — מסר אמיתי מהטופיק מקור, **בדיוק** כפי
-   שהוא בטופיק. אם SOURCE_SAMPLE לא null → השתמש בו כבסיס ה-`value` של kafka_publish **כפי שהוא**,
-   format-agnostic (FHIR Bundle / כל מבנה). **אל תעטוף ב-headers/root/_data, אל תוסיף/תוריד שדות,
-   אל תשנה מבנה.** החל **רק** את הדריסות שהתסריט מציין. זה מדויק יותר מ-PAYLOAD_TEMPLATES.
+2. ★★★ SOURCE_SAMPLE (אם סופק — **קודם לכל השאר!**) — מסר אמיתי מהטופיק מקור (FHIR Bundle / כל מבנה).
+   ★★★ **אם SOURCE_SAMPLE לא null → אל תשחזר אותו! ה-runner ישתמש בו כבסיס כפי-שהוא.** אתה מחזיר
+   רק `source_overrides` — מפה קטנה של הדריסות שהתסריט מציין: `{"<נתיב מלא או שם-שדה>": <ערך>}`.
+   ה-`value` של ה-kafka_publish יכול להיות `{}` (הרנר ממלא אותו מהדוגמה ומחיל את הדריסות).
+   זה מונע שחזור שגוי/חתוך של מסר ענק (14KB).
 3. PAYLOAD_TEMPLATES — JSON templates פר action_type. **בשימוש רק כש-SOURCE_SAMPLE הוא null.**
    (פורמט MACKAF: headers + root + _data.)
 4. FIELD_CATALOG — מילון שדות עם type/format/required/notes. לאימות.
@@ -298,11 +299,11 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
 
 תפקידך לכל test case:
 1. זהה את action_type מהתסריט ("פתח", "create", "מחק", "delete" וכדומה).
-2. ★ קח את הבסיס ל-`value`: **אם SOURCE_SAMPLE סופק → הוא הבסיס (כפי שהוא).** אחרת — ה-template
-   המתאים מ-PAYLOAD_TEMPLATES.
-3. ★ זהה אילו שדות התסריט אומר לדרוס (לדוגמה "type_code=99918", "referral_date=2024-01-01").
-   החל את הדריסות **רק על השדות שהתסריט מציין**. כל שאר השדות נשארים מהבסיס.
-4. צור KafkaPublishAction עם topic=SOURCE_TOPIC, value=הבסיס אחרי הדריסות (JSON מלא).
+2. ★ זהה אילו שדות התסריט אומר לדרוס (לדוגמה "type_code=99918", "category.coding.code=M_PAT_HPV").
+3. ★ **אם SOURCE_SAMPLE סופק** → החזר את הדריסות כ-`source_overrides` (מפה: נתיב→ערך) **ו-`value:{}`**.
+   הרנר בונה את המסר מהדוגמה + הדריסות. **אם SOURCE_SAMPLE הוא null** → קח את ה-template המתאים
+   מ-PAYLOAD_TEMPLATES, החל עליו את הדריסות, ושים אותו ב-`value` המלא (כמו קודם).
+4. צור KafkaPublishAction עם topic=SOURCE_TOPIC (value מלא במצב template, או {} + source_overrides במצב sample).
 5. צור KafkaWaitAction עם topic=TARGET_TOPIC (או CouchbaseWaitAction אם התסריט מזכיר Couchbase).
 6. אם התסריט הוא תרחיש שלילי (הערך שגוי, תאריך ישן, סינון, "אין להפיץ", "לא יגיע") —
    קבע expect_no_message=true על ה-wait. אז timeout = PASS.
@@ -352,8 +353,9 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
 החזר JSON בלבד:
 {
   "test_case_id": "string",
+  "source_overrides": {"<path/leaf>": "<value>"},   // ★ רק כש-SOURCE_SAMPLE סופק (אחרת השמט)
   "actions": [
-    {"kind": "kafka_publish", "topic": "<SOURCE_TOPIC>", "value": {... template/sample מלא עם דריסות ...}},
+    {"kind": "kafka_publish", "topic": "<SOURCE_TOPIC>", "value": {}},  // sample → {}; template → value מלא עם דריסות
     {"kind": "kafka_wait", "topic": "<TARGET_TOPIC>",
      "match": {"entity_type":"<TARGET_ENTITY_TYPE אם קיים ב-TARGET_EXAMPLE>", "root.action":"<create/delete אם קיים>"},
      "expected_fields": {"<נתיב שקיים ב-TARGET_EXAMPLE>":"<ערך מומר/צפוי>"},
@@ -362,15 +364,16 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
   "expected_status": 200,
   "compiler_notes": "string קצר — אילו דריסות הוחלו, ואילו שדות אומתו ב-target"
 }
-(key_contains מושמט בכוונה — ה-runner ממלא אותו מ-KEY_BUILT_FROM. match/expected_fields — רק שדות מ-TARGET_EXAMPLE.)
+(key_contains מושמט בכוונה — ה-runner ממלא אותו מ-KEY_BUILT_FROM. match/expected_fields — רק שדות מ-TARGET_EXAMPLE.
+SOURCE_SAMPLE → value:{} + source_overrides; אחרת value מלא + השמט source_overrides.)
 
 כללי כתיבה חשובים:
 - ★★★ **ודא לוג / Elastic / "לוג הצלחה/שגיאה"**: אין תמיכה ב-.NET כרגע. **אל תיצור action** לצעד
   כזה, ובמיוחד **אל תיצור kafka_wait מזויף** (הוא יעבור על מסר אקראי וייתן PASS שקרי). דלג עליו
   ורשום ב-compiler_notes ("דילגנו על אימות לוג — לא נתמך ב-.NET").
-- ★ אל תקצר את הבסיס (SOURCE_SAMPLE או template). ה-value של kafka_publish חייב להכיל את **כל**
-  השדות שבבסיס, עם דריסות בלבד היכן שהתסריט אומר. **שמור על המבנה המדויק כפי שהוא** (אם הבסיס הוא
-  SOURCE_SAMPLE בפורמט FHIR/אחר — אל תוסיף headers/root/_data; אם הוא template MACKAF — שמור headers+root+_data).
+- ★ **מצב SOURCE_SAMPLE**: אל תשחזר את הדוגמה ל-`value` — החזר `value:{}` + `source_overrides`. הרנר
+  בונה את המסר מהדוגמה כפי-שהיא (format-agnostic). **מצב template (אין sample)**: ה-`value` חייב להכיל
+  את **כל** שדות ה-template עם דריסות בלבד, ולשמור headers+root+_data (MACKAF).
 - אם התסריט אומר "ערך לא תקין" / "שדה ריק" — הכנס את הערך הלא תקין בדיוק (גם אם זה
   string במקום int) כדי לבדוק validation בצד ה-Worker.
 - שמור על case-sensitive בשמות topics ו-fields.
@@ -590,7 +593,7 @@ class DotNetCompiler:
         if not parsed_actions:
             return None
 
-        return DotNetExecutableTestCase(
+        executable = DotNetExecutableTestCase(
             test_case_id=test_case_id,
             ado_test_case_id=ado_id,
             actions=parsed_actions,
@@ -598,3 +601,10 @@ class DotNetCompiler:
             source_text=text,
             compiler_notes=data.get("compiler_notes") or f"extracted via {source_label}",
         )
+        # ★ מסר-דוגמה אמיתי → בסיס publish דטרמיניסטי ברנר (ה-LLM מחזיר רק source_overrides קטן,
+        # לא משחזר את ה-14KB). אם ה-LLM כן החזיר value מלא — הרנר עדיין דורס בו את הדריסות.
+        if self.sample_messages:
+            executable.source_sample = self.sample_messages[0]
+            ov = data.get("source_overrides")
+            executable.source_overrides = ov if isinstance(ov, dict) else {}
+        return executable

@@ -85,3 +85,31 @@ async def test_expected_fields_captured_after_wait():
     wait = next(a for a in ex.actions if a.kind == "kafka_wait")
     assert wait.expected_fields.get("status") == "enriched"
     assert wait.expected_fields.get("priority") == "high"
+
+
+def test_parse_llm_response_stamps_sample_and_overrides():
+    """★ Phase 2: כשיש sample_messages → ה-executable מקבל source_sample + source_overrides
+    מתשובת ה-LLM (הרנר יבנה מהם את ה-publish דטרמיניסטית)."""
+    sample = {"resourceType": "Bundle", "identifier": {"value": "999"}}
+    compiler = DotNetCompiler(spec_md=None, sample_messages=[sample])
+    data = {
+        "source_overrides": {"category.coding.code": "M_PAT_HPV"},
+        "actions": [
+            {"kind": "kafka_publish", "topic": "src", "value": {}},
+            {"kind": "kafka_wait", "topic": "tgt", "match": {"entity_type": "lab"}},
+        ],
+    }
+    ex = compiler._parse_llm_response("TC-fhir", None, "text", data, source_label="templates")
+    assert ex is not None
+    assert ex.source_sample == sample
+    assert ex.source_overrides == {"category.coding.code": "M_PAT_HPV"}
+
+
+def test_parse_llm_response_no_sample_leaves_fields_empty():
+    """★ תאימות לאחור: אין sample_messages → source_sample=None, source_overrides={} (מסלול MACKAF)."""
+    compiler = DotNetCompiler(spec_md=None)
+    data = {"actions": [{"kind": "kafka_publish", "topic": "src", "value": {"a": 1}}]}
+    ex = compiler._parse_llm_response("TC-mackaf", None, "text", data, source_label="templates")
+    assert ex is not None
+    assert ex.source_sample is None
+    assert ex.source_overrides == {}

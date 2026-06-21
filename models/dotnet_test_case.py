@@ -83,3 +83,8 @@ class DotNetExecutableTestCase(BaseModel):
     # ★ נתיבי-המקור שה-target KEY בנוי מהם (מ-Payload Builder key_built_from). ה-runner מזריק
     # לפיהם member_id/entity_id ייחודי — format-agnostic, לא קשיח ל-member_id. ריק → fallback ל-member_id.
     key_built_from: Optional[List[str]] = None
+    # ★ מסר-דוגמה אמיתי מהמקור (אם היוזר העלה) — בסיס ה-publish הדטרמיניסטי. ה-runner לוקח אותו
+    # כפי-שהוא ומחיל מעליו את source_overrides + ה-id הייחודי בקוד (LLM לא אמין לשחזר 14KB מקונן).
+    source_sample: Optional[Dict[str, Any]] = None
+    # ★ דריסות התסריט על מסר-הדוגמה: מפת "<path/leaf>": value (למשל {"category.coding.code":"M_PAT_HPV"}).
+    source_overrides: Dict[str, Any] = Field(default_factory=dict)

@@ -17,6 +17,7 @@ from agents.runner.dotnet_runner import (  # noqa: E402
     DotNetRunner,
     _check_expected_fields,
     _matches,
+    _override_by_path,
     _substitute_token,
     _to_wire_message,
 )
@@ -313,3 +314,75 @@ async def test_runner_blocked_when_couchbase_not_configured():
     r = await runner.execute(ex)
     assert r.status == TestStatus.BLOCKED
     assert "Couchbase not configured" in (r.step_results[0].error_message or "")
+
+
+# ============================================================
+# Phase 2 — _override_by_path + _apply_source_sample (FHIR sample base)
+# ============================================================
+
+def test_override_by_path_nested_and_list_autoindex():
+    """דריסה לפי נתיב מלא: dict מקונן + auto-index [0] לרשימה כשהסגמנט אינו מספר."""
+    obj = {"category": {"coding": {"code": "OLD"}},
+           "entry": [{"resource": {"id": "a"}}]}
+    assert _override_by_path(obj, "category.coding.code", "M_PAT_HPV")
+    assert obj["category"]["coding"]["code"] == "M_PAT_HPV"
+    # list ללא index → auto [0]
+    assert _override_by_path(obj, "entry.resource.id", "b")
+    assert obj["entry"][0]["resource"]["id"] == "b"
+    # נתיב לא קיים → False (ה-caller יפול ל-leaf)
+    assert not _override_by_path(obj, "category.coding.nope", "x")
+
+
+def test_override_by_path_does_not_touch_sibling_value_leaves():
+    """★ בטיחות FHIR: דריסה לפי נתיב מדויק לא נוגעת בשדות `value` אחים (הסיכון של leaf גנרי)."""
+    fhir = {"identifier": {"value": "ID-TARGET"},
+            "entry": [{"resource": {"valueQuantity": {"value": "99.9"}}},
+                      {"resource": {"code": {"value": "KEEP"}}}]}
+    assert _override_by_path(fhir, "identifier.value", "33245649")
+    assert fhir["identifier"]["value"] == "33245649"
+    # שאר ה-`value` לא נגעו
+    assert fhir["entry"][0]["resource"]["valueQuantity"]["value"] == "99.9"
+    assert fhir["entry"][1]["resource"]["code"]["value"] == "KEEP"
+
+
+def test_apply_source_sample_builds_publish_from_sample_plus_overrides():
+    """★ הרנר בונה את ה-publish מהדוגמה האמיתית + דריסות התסריט (לא מ-value של ה-LLM)."""
+    sample = {"resourceType": "Bundle",
+              "entry": [{"resource": {"resourceType": "DiagnosticReport",
+                                      "category": {"coding": {"code": "OLD"}}}}],
+              "identifier": {"value": "999"}}
+    ex = DotNetExecutableTestCase(
+        test_case_id="TC-fhir-sample",
+        source_sample=sample,
+        source_overrides={"entry.resource.category.coding.code": "M_PAT_HPV"},
+        actions=[KafkaPublishAction(topic="src", value={})],   # ה-LLM החזיר {} בכוונה
+    )
+    assert DotNetRunner()._apply_source_sample(ex) is True
+    pub = ex.actions[0]
+    assert pub.value["resourceType"] == "Bundle"               # בסיס מהדוגמה
+    assert pub.value["entry"][0]["resource"]["category"]["coding"]["code"] == "M_PAT_HPV"  # דריסה הוחלה
+    # deepcopy — המקור לא מושפע
+    assert sample["entry"][0]["resource"]["category"]["coding"]["code"] == "OLD"
+
+
+def test_apply_source_sample_leaf_fallback_when_path_missing():
+    """דריסה לפי שם-שדה (leaf) כשהנתיב המדויק לא נמצא — תאימות עם נתיב חלקי של ה-LLM."""
+    sample = {"resourceType": "Bundle", "entry": [{"resource": {"code": "OLD"}}]}
+    ex = DotNetExecutableTestCase(
+        test_case_id="TC-leaf",
+        source_sample=sample,
+        source_overrides={"code": "NEW"},                      # leaf בלבד
+        actions=[KafkaPublishAction(topic="src", value={})],
+    )
+    assert DotNetRunner()._apply_source_sample(ex) is True
+    assert ex.actions[0].value["entry"][0]["resource"]["code"] == "NEW"
+
+
+def test_apply_source_sample_noop_without_sample():
+    """★ אין source_sample → no-op (False) → המסלול הישן (value מה-LLM) ללא שינוי. תאימות MACKAF."""
+    ex = DotNetExecutableTestCase(
+        test_case_id="TC-mackaf",
+        actions=[KafkaPublishAction(topic="src", value={"_data": {"member_id": "555"}})],
+    )
+    assert DotNetRunner()._apply_source_sample(ex) is False
+    assert ex.actions[0].value == {"_data": {"member_id": "555"}}   # ללא שינוי

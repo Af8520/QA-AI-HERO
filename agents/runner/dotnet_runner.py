@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import datetime
 import json
 import re
@@ -78,6 +79,38 @@ def _override_dotted_field(d: Dict[str, Any], name: str, uid: str) -> bool:
     return found
 
 
+def _override_by_path(obj: Any, path: str, value: Any) -> bool:
+    """דורס שדה **לפי נתיב מלא** (dotted). list → auto-index [0] כשהסגמנט אינו מספר, או index
+    מפורש כשהוא מספר. דורס *רק* את השדה בנתיב — מתקן את סיכון ה-leaf הגנרי (FHIR מלא ב-`value`,
+    `code`...). מחזיר True אם הנתיב נמצא ונדרס, False אחרת (→ ה-caller יכול ליפול ל-leaf-override)."""
+    parts = path.split(".")
+    cur = obj
+    for i, part in enumerate(parts):
+        last = i == len(parts) - 1
+        if isinstance(cur, list):
+            if part.lstrip("-").isdigit():
+                idx = int(part)
+                if not (-len(cur) <= idx < len(cur)):
+                    return False
+                if last:
+                    cur[idx] = value
+                    return True
+                cur = cur[idx]
+                continue
+            # סגמנט לא-מספרי על list → auto-index [0]
+            if not cur:
+                return False
+            cur = cur[0]
+        if isinstance(cur, dict) and part in cur:
+            if last:
+                cur[part] = value
+                return True
+            cur = cur[part]
+        else:
+            return False
+    return False
+
+
 def _get_nested_field(obj: Any, name: str) -> Optional[str]:
     """מחזיר את ערך השדה `name` הראשון (כ-str) במבנה מקונן, בלי לשנות. None אם אין."""
     if isinstance(obj, dict):
@@ -122,6 +155,30 @@ class DotNetRunner:
             "status": status,   # info | success | warn | error
             "message": message,
         })
+
+    def _apply_source_sample(self, executable: DotNetExecutableTestCase) -> bool:
+        """★ בונה את מסר ה-publish דטרמיניסטית מתוך מסר-הדוגמה האמיתי + דריסות התסריט.
+        סיבה: ה-LLM לא אמין לשחזר מסר ענק (FHIR Bundle 14KB) עם הזרקה לשדה מקונן — הוא מחזיר את
+        הדוגמה כפי-שהיא בלי הדריסות. לכן הרנר לוקח את הדוגמה כבסיס ומחיל את source_overrides בקוד.
+        no-op (False) אם אין source_sample → המסלול הישן (value מה-LLM) ללא שינוי."""
+        sample = executable.source_sample
+        if not sample:
+            return False
+        pub = next((a for a in executable.actions if isinstance(a, KafkaPublishAction)), None)
+        if pub is None:
+            return False
+        pub.value = copy.deepcopy(sample)
+        overrides = executable.source_overrides or {}
+        for path, val in overrides.items():
+            if _override_by_path(pub.value, path, val):
+                self._log("SOURCE", "info", f"דריסה {path}={val}")
+            elif _override_nested_field(pub.value, str(path).split(".")[-1], val):
+                self._log("SOURCE", "info", f"דריסה {path}={val} (leaf fallback)")
+            else:
+                self._log("SOURCE", "warn", f"דריסה {path}={val} — השדה לא נמצא במסר-הדוגמה")
+        self._log("SOURCE", "success",
+                  f"בסיס publish ממסר-דוגמה אמיתי + {len(overrides)} דריסות מהתסריט")
+        return True
 
     def _apply_unique_id(self, executable: DotNetExecutableTestCase) -> Optional[str]:
         """מזריק member_id ייחודי לריצה — *באותו ערך* במסר המקור, בקורלציה וב-expected_fields,
@@ -192,6 +249,8 @@ class DotNetRunner:
         error_message: Optional[str] = None
         # ★ run log — נצבר פר TC; ה-pipeline משדר אותו כ-log_line + מתמיד לדיסק.
         self._log_entries = []
+        # ★ בסיס publish מ-source_sample + דריסות התסריט (דטרמיניסטי) — *לפני* ה-id, כי ה-id נדרס מעל.
+        self._apply_source_sample(executable)
         # ★ member_id ייחודי לריצה — מחליף __UNIQUE_ID__ ב-publish+wait (key/match/expected_fields)
         self._apply_unique_id(executable)
 
