@@ -50,6 +50,17 @@ def _substitute_token(obj: Any, token: str, value: str) -> Any:
     return obj
 
 
+def _contains_token(obj: Any, token: str) -> bool:
+    """True אם token מופיע באיזושהי מחרוזת בתוך המבנה (dict/list/str)."""
+    if isinstance(obj, dict):
+        return any(_contains_token(v, token) for v in obj.values())
+    if isinstance(obj, list):
+        return any(_contains_token(v, token) for v in obj)
+    if isinstance(obj, str):
+        return token in obj
+    return False
+
+
 def _override_nested_field(obj: Any, name: str, uid: str) -> bool:
     """דורס *בכל מקום* (רקורסיבית) שדה dict בשם `name` לערך uid. format-agnostic:
     שם-השדה מגיע מ-key_built_from (member_id/entity_id/...). מחזיר True אם נמצא."""
@@ -267,10 +278,13 @@ class DotNetRunner:
         wants_leading_zeros = bool(orig_id) and len(orig_id) > 1 and orig_id[0] == "0"
         uid_source = uid_target.zfill(9) if wants_leading_zeros else uid_target
         src_set = False
+        token_seen = False
         waits: List[KafkaWaitAction] = []
         for action in executable.actions:
             if isinstance(action, KafkaPublishAction):
-                action.value = _substitute_token(action.value, token, uid_source)   # legacy token
+                if _contains_token(action.value, token):                            # ה-LLM שם __UNIQUE_ID__ בשדה ה-id
+                    token_seen = True
+                action.value = _substitute_token(action.value, token, uid_source)   # token → uid (path-free, אמין)
                 # ★ הזרקה בטוחה מ-leaf גנרי: נתיב/סיומת קודם, ואז leaf רק לשם ספציפי (לא value/code)
                 if _inject_source_id(action.value, id_path, id_name, uid_source):    # מקור (form עם אפסים)
                     src_set = True
@@ -280,27 +294,32 @@ class DotNetRunner:
                 action.match = _substitute_token(action.match, token, uid_target)
                 action.expected_fields = _substitute_token(action.expected_fields, token, uid_target)
                 # ★ דריסת ה-id ב-match/expected רק לשם ספציפי — לשם גנרי (value/code) מסתמכים על
-                # key_contains בלבד (לא דורסים שדה assert לגיטימי שמסתיים ב-'value').
+                # value_contains בלבד (לא דורסים שדה assert לגיטימי שמסתיים ב-'value').
                 if id_name not in _GENERIC_LEAVES:
                     _override_dotted_field(action.match, id_name, uid_target)       # יעד (form נקי)
                     _override_dotted_field(action.expected_fields, id_name, uid_target)
                 waits.append(action)
-        # ★ ה-target KEY בנוי מה-id → key_contains=uid הוא קורלציה מדויקת (ה-id ייחודי, אף מסר אחר
-        # לא מכיל אותו). כך גם תרחיש שלילי מחפש את ה-id שלנו (שלא הופק) → timeout → PASS נכון.
-        used = src_set
-        if src_set:
-            for w in waits:
-                w.key_contains = uid_target
-        else:
-            for w in waits:   # אין id במקור — fallback ל-token בלבד
-                if w.key_contains and token in (w.key_contains or ""):
-                    w.key_contains, used = uid_target, True
+        # ★ קורלציה ראשית = value_contains: ה-uid הייחודי מופיע ב-target *בכל מקום* (KEY או גוף).
+        # זה format-agnostic — ה-target KEY של FHIR הוא scc_message_id (לא ה-id שלנו), אבל ה-uid
+        # יושב ב-_data.member_id בגוף → value_contains תופס בדיוק את המסר שלנו ולא מסר זר/ישן.
+        # תרחיש שלילי: ה-uid לא הופק → אף מסר לא מכילו → timeout → PASS נכון.
+        used = src_set or token_seen
+        # legacy: token בתוך key_contains שה-LLM מילא
+        for w in waits:
+            if w.key_contains and token in (w.key_contains or ""):
+                w.key_contains, used = uid_target, True
         if used:
+            for w in waits:
+                w.value_contains = uid_target          # ★ הקורלציה הייחודית (KEY או גוף)
             if wants_leading_zeros:
                 self._log("UNIQUE", "info", f"{id_name}: מקור={uid_source} (עם אפסים מובילים — "
                                             f"בדיקת הסרה), יעד צפוי={uid_target} (ללא אפסים)")
             else:
-                self._log("UNIQUE", "info", f"{id_name} ייחודי לריצה: {uid_target}")
+                self._log("UNIQUE", "info", f"{id_name} ייחודי לריצה: {uid_target} (קורלציה: ה-id מופיע ב-target)")
+        else:
+            self._log("UNIQUE", "warn", "לא הוזרק id ייחודי (אין שדה id במקור / לא זוהה __UNIQUE_ID__) — "
+                                        "הקורלציה תתבסס על match בלבד ועלולה לתפוס מסר זר. ודא ש-key_built_from "
+                                        "מצביע על שדה ה-id, או שהתסריט משתמש ב-__UNIQUE_ID__.")
         return uid_target if used else None
 
     async def execute(self, executable: DotNetExecutableTestCase) -> TestCaseResult:
@@ -580,6 +599,8 @@ class DotNetRunner:
             corr.append(f"key={action.key_equals}")
         if action.key_contains:
             corr.append(f"key⊇{action.key_contains}")
+        if action.value_contains:
+            corr.append(f"uid⊇{action.value_contains} (ב-key או בגוף)")
         if action.match:
             corr.append(f"fields={json.dumps(action.match, ensure_ascii=False)}")
         # ★ רצפת timeout — ה-Worker אסינכרוני (עד דקה-שתיים). early-return כשנמצא match.
@@ -600,6 +621,7 @@ class DotNetRunner:
             rich = await KafkaRestClient().consume(
                 action.topic, action.match, effective_timeout, group,
                 key_equals=action.key_equals, key_contains=action.key_contains,
+                value_contains=action.value_contains,
                 on_ready=on_ready, skew_ms=settings.KAFKA_TIMESTAMP_SKEW_SECONDS * 1000,
             )
             if rich.get("rest_consumer_unavailable"):
@@ -736,7 +758,8 @@ class DotNetRunner:
             return step, {**observed, "candidates": candidates}
 
         # ★ אין שום matcher (לא key ולא value) → לא ניתן לקבוע איזה מסר הוא שלנו → inconclusive
-        if not action.match and not action.key_equals and not action.key_contains:
+        if (not action.match and not action.key_equals and not action.key_contains
+                and not action.value_contains):
             self._log("MATCH", "warn",
                       f"אין correlation (key/match) — לא ניתן לזהות איזה מ-{len(candidates)} המסרים הוא התגובה שלנו. "
                       f"בחר correlation מהלוגים והגדר אותו.")
@@ -751,8 +774,13 @@ class DotNetRunner:
             return step, {"inconclusive": True, "candidates": candidates, "match": {}}
 
         if observed is None:
+            corr_desc = json.dumps(action.match, ensure_ascii=False)
+            if action.value_contains:
+                corr_desc = f"uid={action.value_contains} (ב-key/גוף) + {corr_desc}"
             self._log("MATCH", "error",
-                      f"לא נמצא מסר תואם ל-{json.dumps(action.match, ensure_ascii=False)} מתוך {len(candidates)} מסרים")
+                      f"לא נמצא מסר תואם ל-{corr_desc} מתוך {len(candidates)} מסרים. "
+                      f"אם ה-uid לא הופק ב-target — בדוק שה-__UNIQUE_ID__ הוזרק בשדה ה-id הנכון במקור "
+                      f"(\"פתח פרטים\" → 📤 נשלח ל-source).")
             step = StepResult(
                 step=f"WAIT topic={action.topic} (timeout {action.timeout_seconds}s)",
                 expected_result="message arrived matching " + json.dumps(action.match, ensure_ascii=False),

@@ -99,6 +99,7 @@ class KafkaRestClient:
         group: str,
         key_equals: Optional[str] = None,
         key_contains: Optional[str] = None,
+        value_contains: Optional[str] = None,
         on_ready=None,
         skew_ms: int = 0,
     ) -> Optional[Dict[str, Any]]:
@@ -194,6 +195,7 @@ class KafkaRestClient:
                             starts[p] = maxoff + 1   # התקדם — לא לקרוא שוב את אותם הישנים
                         m = _scan_records(recs, topic, match, candidates,
                                           key_equals=key_equals, key_contains=key_contains,
+                                          value_contains=value_contains,
                                           min_timestamp_ms=min_timestamp_ms)
                         if m is not None:
                             return m
@@ -453,6 +455,23 @@ def _key_matches(key: Optional[str], key_equals: Optional[str], key_contains: Op
     return True
 
 
+def _unique_present(decoded: Dict[str, Any], value_contains: Optional[str]) -> bool:
+    """True אם הערך הייחודי (uid) מופיע ב-KEY *או* בכל מקום בגוף ה-value (כ-substring).
+    format-agnostic: לא מניחים אם ה-Worker שם את ה-id ב-key או בשדה גוף (FHIR → _data.member_id).
+    None → אין דרישת ייחודיות → True. בטוח מ-false-positive כי uid הוא מספר ייחודי בן 9 ספרות."""
+    if not value_contains:
+        return True
+    uid = str(value_contains)
+    if uid in (decoded.get("key") or ""):
+        return True
+    val = decoded.get("value_parsed")
+    try:
+        blob = val if isinstance(val, str) else json.dumps(val, ensure_ascii=False, default=str)
+    except Exception:
+        blob = str(val)
+    return uid in blob
+
+
 def _scan_records(
     records: Any,
     topic: str,
@@ -460,11 +479,12 @@ def _scan_records(
     candidates: Optional[List[Dict[str, Any]]] = None,
     key_equals: Optional[str] = None,
     key_contains: Optional[str] = None,
+    value_contains: Optional[str] = None,
     min_timestamp_ms: int = 0,
 ) -> Optional[Dict[str, Any]]:
     """מפענח רשומות, מוסיף ל-candidates (capped), ומחזיר את הראשונה שתואמת לכל ה-matchers:
-    timestamp >= min_timestamp_ms AND key_equals AND key_contains AND value match — או None.
-    מסר עם timestamp ישן (מ-TC קודם) ייאסף כ-candidate אך *לא* ייחשב match (מסומן too_old)."""
+    timestamp >= min_timestamp_ms AND key_equals AND key_contains AND value_contains(uid ב-key/גוף)
+    AND value match — או None. מסר עם timestamp ישן ייאסף כ-candidate אך *לא* ייחשב match."""
     if candidates is None:
         candidates = []
     if not isinstance(records, list):
@@ -483,6 +503,7 @@ def _scan_records(
         if (matched is None
                 and not too_old
                 and _key_matches(decoded.get("key"), key_equals, key_contains)
+                and _unique_present(decoded, value_contains)
                 and _record_matches(decoded["value_parsed"], match)):
             matched = decoded
     return matched

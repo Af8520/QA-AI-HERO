@@ -344,18 +344,24 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
 - ★★★ **אל תאמת metadata של ה-producer** — `header.mac_*`. אינך יודע את ערכיהם.
 - ★ **דלג על שדות דינמיים** — message_id=GUID, תאריכים, timestamps (או השתמש ב-__PRESENT__).
 
-★★★ מזהה ייחודי — אל תדאג לזה (ה-runner מטפל) ★★★
-ה-target topic מלא בכפילויות → ה-runner **מזריק אוטומטית** ערך ייחודי לכל ריצה לשדה ה-`KEY_BUILT_FROM`
-(במקור) וממלא `key_contains` בערך הזה. **אינך צריך למלא key_contains, ואל תכניס נתיבי member_id קשיחים**
-(`_data.parameters.0.member_id` וכו') אלא אם הם קיימים בפועל ב-TARGET_EXAMPLE. פשוט שמור את מבנה ה-source
-כפי שהוא (כולל שדה ה-KEY_BUILT_FROM) — ה-runner ידרוס בו את הערך הייחודי.
+★★★ מזהה ייחודי — קריטי לקורלציה (השתמש ב-__UNIQUE_ID__) ★★★
+ה-target topic מלא בכפילויות (אותו מסר מ-runs קודמים). כדי לזהות *בדיוק את המסר שלנו*, ה-runner מזריק
+ערך ייחודי לכל ריצה, ומחפש אותו במסר היעד (ב-KEY או בגוף). תפקידך: **לסמן היכן יושב המזהה העסקי**:
+- ★★★ זהה את שדה המזהה העסקי במקור — ה-member_id / מספר חבר / ת.ז (לרוב הסגמנט האחרון של KEY_BUILT_FROM,
+  למשל `identifier.value` ב-FHIR או `member_details.member_id` ב-MACKAF). **שים בו את הערך המילולי
+  `"__UNIQUE_ID__"`** (כ-string) ב-`source_overrides` (או ב-`value` במצב template). ה-runner יחליף אותו
+  בערך ייחודי אמיתי ויחפש אותו ב-target.
+  למשל ב-FHIR: `"source_overrides": {"<נתיב ה-identifier של החבר>": "__UNIQUE_ID__", "<נתיב הקוד>": "M_PAT_HPV"}`.
+- ★ **אל תכניס נתיבי member_id קשיחים ל-match/expected_fields** (`_data.parameters.0.member_id`) אלא אם הם
+  קיימים בפועל ב-TARGET_EXAMPLE. הקורלציה הייחודית מטופלת ע"י ה-runner דרך __UNIQUE_ID__.
+- אם אינך יודע איזה שדה הוא ה-member_id — שים `__UNIQUE_ID__` בשדה שמתאים ל-KEY_BUILT_FROM[0].
 
 החזר JSON בלבד:
 {
   "test_case_id": "string",
-  "source_overrides": {"<path/leaf>": "<value>"},   // ★ רק כש-SOURCE_SAMPLE סופק (אחרת השמט)
+  "source_overrides": {"<member_id path>": "__UNIQUE_ID__", "<other path>": "<value>"},  // ★ רק כש-SOURCE_SAMPLE סופק
   "actions": [
-    {"kind": "kafka_publish", "topic": "<SOURCE_TOPIC>", "value": {}},  // sample → {}; template → value מלא עם דריסות
+    {"kind": "kafka_publish", "topic": "<SOURCE_TOPIC>", "value": {}},  // sample → {}; template → value מלא עם דריסות (כולל __UNIQUE_ID__ בשדה ה-id)
     {"kind": "kafka_wait", "topic": "<TARGET_TOPIC>",
      "match": {"entity_type":"<TARGET_ENTITY_TYPE אם קיים ב-TARGET_EXAMPLE>", "root.action":"<create/delete אם קיים>"},
      "expected_fields": {"<נתיב שקיים ב-TARGET_EXAMPLE>":"<ערך מומר/צפוי>"},
@@ -364,7 +370,7 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
   "expected_status": 200,
   "compiler_notes": "string קצר — אילו דריסות הוחלו, ואילו שדות אומתו ב-target"
 }
-(key_contains מושמט בכוונה — ה-runner ממלא אותו מ-KEY_BUILT_FROM. match/expected_fields — רק שדות מ-TARGET_EXAMPLE.
+(שדה ה-member_id = "__UNIQUE_ID__" → ה-runner מזריק ומקשר. key_contains מושמט. match/expected_fields — רק שדות מ-TARGET_EXAMPLE.
 SOURCE_SAMPLE → value:{} + source_overrides; אחרת value מלא + השמט source_overrides.)
 
 כללי כתיבה חשובים:

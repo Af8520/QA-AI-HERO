@@ -45,6 +45,10 @@ class KafkaWaitAction(BaseModel):
     topic: str
     key_equals: Optional[str] = None
     key_contains: Optional[str] = None
+    # ★ קורלציה לפי הערך הייחודי בכל מקום במסר היעד (KEY *או* גוף ה-value). format-agnostic —
+    # ה-runner ממלא אותו ב-uid הייחודי. עדיף על key_contains כשה-target KEY אינו נושא את ה-id
+    # (למשל FHIR: ה-KEY הוא scc_message_id, וה-uid יושב ב-_data.member_id בגוף).
+    value_contains: Optional[str] = None
     match: Dict[str, Any] = Field(default_factory=dict)
     expected_fields: Dict[str, Any] = Field(default_factory=dict)
     timeout_seconds: int = 30

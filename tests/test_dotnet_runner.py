@@ -82,7 +82,7 @@ def test_apply_unique_id_overrides_concrete_member_id():
     # member_id מקורי "555" בלי אפסים → מקור=נקי (תלוי-בקשה, לא ממציאים בדיקת אפסים)
     assert pub.value["_data"]["member_details"]["member_id"] == uid
     assert pub.value["_data"]["member_details"]["member_id_code"] == "0"     # code לא נגע
-    assert wait.key_contains == uid
+    assert wait.value_contains == uid                                        # ★ קורלציה על ה-uid (key/גוף)
     assert wait.match["_data.parameters.0.member_id"] == uid
     assert wait.expected_fields["_data.parameters.0.member_id"] == uid
     assert wait.match["entity_type"] == "child_development"
@@ -108,9 +108,9 @@ def test_apply_unique_id_leading_zeros_conditional():
     assert wait.expected_fields["_data.parameters.0.member_id"] == uid   # יעד ללא אפסים → בודק הסרה
 
 
-def test_apply_unique_id_negative_correlates_via_key_contains():
+def test_apply_unique_id_negative_correlates_via_value_contains():
     """★ תרחיש שלילי: ה-wait (expect_no_message) בלי member_id ב-match → הקורלציה היא
-    key_contains=uid (ה-target key מכיל את ה-id הייחודי). השלילי מחפש את ה-id שלנו (שלא הופק)
+    value_contains=uid (ה-uid מופיע ב-target ב-key או בגוף). השלילי מחפש את ה-id שלנו (שלא הופק)
     → timeout → PASS נכון. (לא מזריקים נתיב MACKAF קשיח — format-agnostic.)"""
     ex = DotNetExecutableTestCase(
         test_case_id="TC-neg",
@@ -123,7 +123,7 @@ def test_apply_unique_id_negative_correlates_via_key_contains():
     assert uid and uid != "555"
     pub, wait = ex.actions
     assert pub.value["_data"]["member_details"]["member_id"] == uid   # "555" בלי אפסים → מקור נקי
-    assert wait.key_contains == uid                              # ★ קורלציה על ה-id הייחודי ב-key
+    assert wait.value_contains == uid                           # ★ קורלציה על ה-uid (key או גוף)
     assert "_data.parameters.0.member_id" not in wait.match      # לא מזריקים נתיב קשיח
     assert wait.match["entity_type"] == "child_development"      # הקיים נשמר
 
@@ -148,7 +148,7 @@ def test_apply_unique_id_format_agnostic_via_key_built_from():
     assert pub.value["entity_id_code"] == "0"        # ה-code לא נגע
     assert pub.value["resourceType"] == "Bundle"     # מבנה FHIR נשמר (בלי header/_data)
     assert wait.match["_data.0.entity_id"] == uid    # יעד: entity_id נדרס
-    assert wait.key_contains == uid
+    assert wait.value_contains == uid
 
 
 def test_apply_unique_id_noop_without_member_id():
@@ -431,7 +431,30 @@ def test_apply_unique_id_path_based_fhir_no_sibling_clobber():
     assert pub.value["identifier"]["value"] == uid                       # ★ נדרס לפי נתיב
     assert pub.value["entry"][0]["resource"]["valueQuantity"]["value"] == "12.5"  # אח לא נגע
     assert pub.value["entry"][1]["resource"]["code"]["value"] == "PAP"   # אח לא נגע
-    assert wait.key_contains == uid                                      # קורלציה על ה-uid
+    assert wait.value_contains == uid                                    # קורלציה על ה-uid (key/גוף)
+
+
+def test_apply_unique_id_token_in_source_sets_value_contains():
+    """★ FHIR: ה-LLM שם __UNIQUE_ID__ בשדה ה-member id (כ-source_override). ה-runner מחליף אותו
+    ב-uid (path-free, אמין) ומגדיר value_contains=uid → קורלציה לפי ה-uid בכל מקום ב-target."""
+    fhir = {"resourceType": "Bundle",
+            "entry": [{"resource": {"resourceType": "Patient",
+                                    "identifier": [{"system": "x"}, {"value": "__UNIQUE_ID__"}]}}]}
+    ex = DotNetExecutableTestCase(
+        test_case_id="TC-token",
+        key_built_from=["ServiceRequest.identifier.value"],   # leaf גנרי — הזרקת path עלולה להחמיץ
+        actions=[
+            KafkaPublishAction(topic="src", value=fhir),
+            KafkaWaitAction(topic="tgt", match={"entity_type": "test_lab_result_approval"}),
+        ],
+    )
+    uid = DotNetRunner()._apply_unique_id(ex)
+    assert uid and uid != "__UNIQUE_ID__"
+    pub, wait = ex.actions
+    assert pub.value["entry"][0]["resource"]["identifier"][1]["value"] == uid   # token הוחלף
+    assert wait.value_contains == uid                                           # ★ קורלציה לפי ה-uid
+    # שדה ה-system לא נגע (לא דרסנו leaf גנרי בכל מקום)
+    assert pub.value["entry"][0]["resource"]["identifier"][0]["system"] == "x"
 
 
 def test_apply_unique_id_path_fallback_to_leaf_when_path_missing():

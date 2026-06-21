@@ -14,6 +14,7 @@ from agents.runner.kafka_rest_client import (
     _parse_produce_response,
     _record_matches,
     _scan_records,
+    _unique_present,
 )
 from agents.runner.dotnet_runner import _extract_sys_name, _normalize_topic, _tc_key
 from config.settings import settings as _settings
@@ -126,6 +127,39 @@ def test_record_matches_exact_path_wins_over_leaf():
     other = {"_data": {"parameters": [{"member_id": "233848555"}]}}
     # הנתיב קיים (233848555) → אין fallback; ערך ≠ 555 → לא תואם
     assert not _record_matches(other, {"_data.parameters.0.member_id": "555"})
+
+
+def test_unique_present_key_or_body():
+    """★ value_contains: ה-uid נתפס אם הוא ב-KEY *או* בגוף ה-value (format-agnostic)."""
+    # uid בגוף (FHIR: ה-KEY הוא scc_message_id, ה-uid ב-_data.member_id)
+    in_body = {"key": "SCC-TST.128128403.0004549368.HISTO.final.0",
+               "value_parsed": {"_data": {"member_id": "999735863"}}}
+    assert _unique_present(in_body, "999735863")
+    # uid ב-KEY (MACKAF)
+    in_key = {"key": "child_development::999735863::4242", "value_parsed": {"x": 1}}
+    assert _unique_present(in_key, "999735863")
+    # uid לא קיים בשום מקום
+    assert not _unique_present(in_body, "111111111")
+    # None → אין דרישה → True
+    assert _unique_present(in_body, None)
+
+
+def test_scan_records_value_contains_picks_our_message():
+    """★ הבאג מהריצה: KEY משותף בין כל המסרים (scc_message_id), כך ש-key לא מבדיל. value_contains
+    תופס את המסר *שלנו* לפי ה-uid בגוף, ולא מסר זר עם אותו entity_type+action."""
+    same_key = "SCC-TST.128128403.0004549368.HISTO.final.0"
+    foreign = {"value": {"entity_type": "test_lab_result_approval", "action": "create",
+                         "_data": {"member_id": "111", "examination_type_code": 3}},
+               "offset": 16641, "partition": 0, "topic": "t", "key": same_key}
+    ours = {"value": {"entity_type": "test_lab_result_approval", "action": "create",
+                      "_data": {"member_id": "999735863", "examination_type_code": 1}},
+            "offset": 16686, "partition": 0, "topic": "t", "key": same_key}
+    match = {"entity_type": "test_lab_result_approval", "root.action": "create"}
+    # בלי value_contains → תופס את הראשון (הזר) — בדיוק הבאג
+    assert _scan_records([foreign, ours], "t", match)["offset"] == 16641
+    # עם value_contains=uid → מדלג על הזר ותופס את שלנו
+    got = _scan_records([foreign, ours], "t", match, value_contains="999735863")
+    assert got is not None and got["offset"] == 16686
 
 
 def test_scan_records_finds_match():
