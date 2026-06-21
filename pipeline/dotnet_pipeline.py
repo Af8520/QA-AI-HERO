@@ -454,12 +454,26 @@ _KEY_TARGET_FIELDS = {"entity_id", "scc_message_id", "_data.scc_message_id",
 
 
 def _extract_key_source_path(payload_templates):
-    """מחלץ את נתיב-המקור (לוגי) שהופך ל-target KEY/entity_id/scc_message_id **verbatim**, מתוך
-    ה-transformations של ה-Payload Builder. למשל {"MessageHeader.id": {"target_field_path":
-    "_data.scc_message_id"}} → "MessageHeader.id". זה השדה שצריך להזריק בו ערך ייחודי כדי שה-KEY
-    ביעד יהיה ייחודי (להבדיל מ-member_id שעובר טרנספורמציה). None אם לא נמצא."""
+    """מחלץ את נתיב-המקור (לוגי) שהופך ל-target KEY (verbatim) — דינמי לכל אפיון. סדר עדיפויות:
+    1. ★ שדה מפורש `key_source_field` מה-Payload Builder (top-level או target_templates[*]) — הכי אמין.
+    2. fallback: transformation שה-target שלה הוא entity_id/scc_message_id (היוריסטיקה).
+    כך אם ה-PB מחזיר את השדה המפורש (מומלץ) — אין ניחוש; אם לא — נשענים על ה-transformations.
+    None אם שום סימן לא נמצא → ה-runner ייפול ל-member_id/token. למשל → "MessageHeader.id"."""
     if not isinstance(payload_templates, dict):
         return None
+    # 1) שדה מפורש (top-level)
+    explicit = payload_templates.get("key_source_field")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+    # 1b) שדה מפורש בתוך target_templates[<action>]
+    tt = payload_templates.get("target_templates") or {}
+    if isinstance(tt, dict):
+        for tmpl in tt.values():
+            if isinstance(tmpl, dict):
+                e = tmpl.get("key_source_field")
+                if isinstance(e, str) and e.strip():
+                    return e.strip()
+    # 2) fallback היוריסטי: transformation → entity_id/scc_message_id
     tfs = payload_templates.get("transformations") or {}
     if isinstance(tfs, dict):
         for src_path, spec in tfs.items():

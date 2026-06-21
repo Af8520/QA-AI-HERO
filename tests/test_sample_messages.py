@@ -116,6 +116,16 @@ def test_extract_key_source_path_entity_id_target():
     assert _extract_key_source_path(pt) == "SomeRes.uid"
 
 
+def test_extract_key_source_path_explicit_field_wins():
+    """★ שדה מפורש key_source_field מה-PB גובר על ההיוריסטיקה (הכי אמין, דינמי לכל אפיון)."""
+    pt = {"key_source_field": "MessageHeader.id",
+          "transformations": {"Other.x": {"target_field_path": "scc_message_id"}}}
+    assert _extract_key_source_path(pt) == "MessageHeader.id"
+    # גם בתוך target_templates
+    pt2 = {"target_templates": {"create": {"key_source_field": "Bundle.id"}}}
+    assert _extract_key_source_path(pt2) == "Bundle.id"
+
+
 def test_extract_key_source_path_none():
     assert _extract_key_source_path({}) is None
     assert _extract_key_source_path({"transformations": {"x": {"target_field_path": "_data.member_name"}}}) is None
