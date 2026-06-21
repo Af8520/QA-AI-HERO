@@ -92,3 +92,7 @@ class DotNetExecutableTestCase(BaseModel):
     source_sample: Optional[Dict[str, Any]] = None
     # ★ דריסות התסריט על מסר-הדוגמה: מפת "<path/leaf>": value (למשל {"category.coding.code":"M_PAT_HPV"}).
     source_overrides: Dict[str, Any] = Field(default_factory=dict)
+    # ★ נתיב-המקור (לוגי, למשל "MessageHeader.id") שהופך ל-target KEY/entity_id/scc_message_id **verbatim**.
+    # מחושב מ-transformations של ה-Payload Builder. ה-runner מזריק לתוכו ערך ייחודי → ה-KEY ביעד ייחודי
+    # לכל ריצה → קורלציה מדויקת. עדיף על member_id (שעובר טרנספורמציה ולכן ה-uid המלא לא שורד ביעד).
+    key_source_path: Optional[str] = None

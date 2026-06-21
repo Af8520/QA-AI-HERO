@@ -8,7 +8,7 @@ os.environ.setdefault("KAFKA_BOOTSTRAP_SERVERS", "")
 
 from server.routes import _parse_messages_json  # noqa: E402
 from agents.compiler.dotnet_compiler import _extract_kbf  # noqa: E402
-from pipeline.dotnet_pipeline import _extract_key_built_from  # noqa: E402
+from pipeline.dotnet_pipeline import _extract_key_built_from, _extract_key_source_path  # noqa: E402
 from agents.runner.dotnet_runner import _primary_id_field, _primary_id_path  # noqa: E402
 
 
@@ -95,3 +95,27 @@ def test_primary_id_path_skips_code_and_fallback():
     assert _primary_id_path(["_data.x.member_id_code", "_data.x.member_id"]) == "_data.x.member_id"
     assert _primary_id_path(None) is None
     assert _primary_id_path(["a.code"]) == "a.code"   # הכל code → הראשון
+
+
+# ============================================================
+# _extract_key_source_path — שדה-המקור שהופך ל-KEY (מ-transformations)
+# ============================================================
+
+def test_extract_key_source_path_from_transformations():
+    """★ ה-KEY ביעד = scc_message_id המגיע מ-MessageHeader.id (verbatim). מחלצים אותו מה-
+    transformations כדי להזריק שם uid ולקבל KEY ייחודי."""
+    pt = {"transformations": {
+        "MessageHeader.id": {"target_field_path": "_data.scc_message_id", "rule": "..."},
+        "Patient.identifier.value": {"target_field_path": "_data.member_id", "rule": "strip first"},
+    }}
+    assert _extract_key_source_path(pt) == "MessageHeader.id"
+
+
+def test_extract_key_source_path_entity_id_target():
+    pt = {"transformations": {"SomeRes.uid": {"target_field_path": "entity_id"}}}
+    assert _extract_key_source_path(pt) == "SomeRes.uid"
+
+
+def test_extract_key_source_path_none():
+    assert _extract_key_source_path({}) is None
+    assert _extract_key_source_path({"transformations": {"x": {"target_field_path": "_data.member_name"}}}) is None

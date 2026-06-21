@@ -16,8 +16,11 @@ os.environ["COUCHBASE_CONNECTION_STRING"] = ""
 from agents.runner.dotnet_runner import (  # noqa: E402
     DotNetRunner,
     _check_expected_fields,
+    _make_key_unique,
     _matches,
+    _sanitize_expected_fields,
     _override_by_path,
+    _resolve_logical_holder,
     _substitute_token,
     _to_wire_message,
 )
@@ -432,6 +435,69 @@ def test_apply_unique_id_path_based_fhir_no_sibling_clobber():
     assert pub.value["entry"][0]["resource"]["valueQuantity"]["value"] == "12.5"  # אח לא נגע
     assert pub.value["entry"][1]["resource"]["code"]["value"] == "PAP"   # אח לא נגע
     assert wait.value_contains == uid                                    # קורלציה על ה-uid (key/גוף)
+
+
+def test_sanitize_expected_fields_strips_identity_and_metadata():
+    """★ מסיר KEY/זהות/metadata מ-expected_fields (מונע כשל-שווא על ערך ישן/ייחודי). שדות אמיתיים נשארים."""
+    ef = {"_data.examination_type_code": "1", "_data.examination_type_name": "PAP/HPV",
+          "_data.scc_message_id": "SCC-X", "_data.member_id": "999735863",
+          "_data.member_id_code": "0", "header.mac_transaction_id": "G", "entity_id": "SCC-X"}
+    removed = _sanitize_expected_fields(ef, strip_member=True)
+    assert set(ef.keys()) == {"_data.examination_type_code", "_data.examination_type_name"}
+    assert "_data.member_id" in removed and "entity_id" in removed and "header.mac_transaction_id" in removed
+
+
+def test_sanitize_expected_fields_keeps_member_id_for_mackaf():
+    """★ מסלול MACKAF (strip_member=False): member_id נשמר (הוא ה-uid המאומת), אבל scc/metadata עדיין מוסר."""
+    ef = {"_data.parameters.0.member_id": "123", "_data.parameters.0.gender": "זכר",
+          "scc_message_id": "X"}
+    _sanitize_expected_fields(ef, strip_member=False)
+    assert "_data.parameters.0.member_id" in ef and "_data.parameters.0.gender" in ef
+    assert "scc_message_id" not in ef
+
+
+def test_resolve_logical_holder_fhir_messageheader():
+    """★ נתיב לוגי 'MessageHeader.id' → מאתר את ה-resource הנכון ב-Bundle.entry."""
+    bundle = {"resourceType": "Bundle", "entry": [
+        {"resource": {"resourceType": "MessageHeader", "id": "SCC-TST.128.0004.260.HISTO.final.0"}},
+        {"resource": {"resourceType": "Patient", "id": "X"}},
+    ]}
+    holder, field = _resolve_logical_holder(bundle, "MessageHeader.id")
+    assert holder is bundle["entry"][0]["resource"] and field == "id"
+
+
+def test_make_key_unique_replaces_first_digit_run_preserving_format():
+    """★ ה-KEY נעשה ייחודי: רצף הספרות הראשון מוחלף ב-uid, הסיומת (HISTO.final.0) נשמרת."""
+    bundle = {"resourceType": "Bundle", "entry": [
+        {"resource": {"resourceType": "MessageHeader",
+                      "id": "SCC-TST.128128403.0004549368.260000548.HISTO.final.0"}}]}
+    new = _make_key_unique(bundle, "MessageHeader.id", "49069711")
+    assert new == "SCC-TST.49069711.0004549368.260000548.HISTO.final.0"   # רק הסגמנט הראשון
+    assert bundle["entry"][0]["resource"]["id"] == new
+
+
+def test_apply_unique_id_injects_into_key_source_path():
+    """★★★ התיקון המרכזי: ה-uid מוזרק לשדה ה-KEY (MessageHeader.id→scc_message_id verbatim) → ה-KEY
+    ביעד ייחודי. member_id (שעובר טרנספורמציה) לא נדרס. value_contains=uid → קורלציה לפי ה-KEY."""
+    bundle = {"resourceType": "Bundle", "entry": [
+        {"resource": {"resourceType": "MessageHeader",
+                      "id": "SCC-TST.128128403.0004549368.260000548.HISTO.final.0"}},
+        {"resource": {"resourceType": "Patient", "identifier": [{"system": "PID", "value": "050526227"}]}},
+    ]}
+    ex = DotNetExecutableTestCase(
+        test_case_id="TC-key",
+        key_source_path="MessageHeader.id",
+        source_sample=bundle,                       # מסלול מסר-דוגמה (FHIR) — מפעיל את הזרקת ה-KEY
+        actions=[KafkaPublishAction(topic="src", value=bundle),
+                 KafkaWaitAction(topic="tgt", match={"entity_type": "test_lab_result_approval"})],
+    )
+    uid = DotNetRunner()._apply_unique_id(ex)
+    val = ex.actions[0].value
+    mh_id = val["entry"][0]["resource"]["id"]
+    assert uid in mh_id                                              # ה-uid בתוך ה-KEY field
+    assert mh_id.endswith(".HISTO.final.0")                         # פורמט נשמר
+    assert val["entry"][1]["resource"]["identifier"][0]["value"] == "050526227"  # member לא נגע
+    assert ex.actions[1].value_contains == uid                      # קורלציה לפי ה-uid (KEY)
 
 
 def test_apply_unique_id_token_in_source_sets_value_contains():

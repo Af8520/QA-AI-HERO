@@ -135,6 +135,8 @@ async def run_dotnet_pipeline(session: ChatSession) -> PipelineResult:
                               sample_messages=sample_messages)
     # ★ key_built_from (נתיבי-מקור של ה-target KEY) → unique-id format-agnostic ב-runner
     key_built_from = _extract_key_built_from(payload_templates)
+    # ★ נתיב-המקור שהופך ל-KEY/entity_id verbatim (מ-transformations) — להזרקת ה-uid לשדה ה-KEY
+    key_source_path = _extract_key_source_path(payload_templates)
     executables: List[DotNetExecutableTestCase] = []
     compile_failures = 0
     for raw in raw_cases:
@@ -142,6 +144,7 @@ async def run_dotnet_pipeline(session: ChatSession) -> PipelineResult:
         try:
             ex = await compiler.compile(raw)
             ex.key_built_from = key_built_from
+            ex.key_source_path = key_source_path
             # ★ הגנתי: גם אם ה-compiler לא חתם source_sample (regex-only / נתיב ישן) — אם היוזר
             # העלה מסר-דוגמה, נשתמש בו כבסיס publish דטרמיניסטי ברנר (format-agnostic).
             if sample_messages and not ex.source_sample:
@@ -443,6 +446,25 @@ def _extract_key_built_from(payload_templates):
                 kbf = tmpl.get("key_built_from")
                 if isinstance(kbf, list) and kbf:
                     return kbf
+    return None
+
+
+_KEY_TARGET_FIELDS = {"entity_id", "scc_message_id", "_data.scc_message_id",
+                      "root.entity_id", "_data.entity_id"}
+
+
+def _extract_key_source_path(payload_templates):
+    """מחלץ את נתיב-המקור (לוגי) שהופך ל-target KEY/entity_id/scc_message_id **verbatim**, מתוך
+    ה-transformations של ה-Payload Builder. למשל {"MessageHeader.id": {"target_field_path":
+    "_data.scc_message_id"}} → "MessageHeader.id". זה השדה שצריך להזריק בו ערך ייחודי כדי שה-KEY
+    ביעד יהיה ייחודי (להבדיל מ-member_id שעובר טרנספורמציה). None אם לא נמצא."""
+    if not isinstance(payload_templates, dict):
+        return None
+    tfs = payload_templates.get("transformations") or {}
+    if isinstance(tfs, dict):
+        for src_path, spec in tfs.items():
+            if isinstance(spec, dict) and spec.get("target_field_path") in _KEY_TARGET_FIELDS:
+                return str(src_path)
     return None
 
 

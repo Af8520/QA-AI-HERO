@@ -174,6 +174,80 @@ def _inject_source_id(value_obj: Any, id_path: Optional[str], id_name: str, uid:
     return False
 
 
+def _resolve_logical_holder(obj: Any, path: str):
+    """מאתר את ה-dict שמחזיק את השדה האחרון של נתיב לוגי, + שם-השדה. תומך בשני סגנונות:
+    1. FHIR: 'MessageHeader.id' → מאתר ב-Bundle.entry את ה-resource עם resourceType==MessageHeader,
+       ואז מנווט לשדה (id). 2. dotted רגיל: 'root.entity_id' → ניווט ישיר.
+    מחזיר (holder_dict, field_name) או (None, None)."""
+    parts = path.split(".")
+    # FHIR Bundle: הסגמנט הראשון הוא resourceType בתוך entry[].resource
+    if isinstance(obj, dict) and isinstance(obj.get("entry"), list):
+        for entry in obj["entry"]:
+            res = entry.get("resource") if isinstance(entry, dict) else None
+            if isinstance(res, dict) and res.get("resourceType") == parts[0]:
+                holder = res
+                for seg in parts[1:-1]:
+                    nxt = holder.get(seg) if isinstance(holder, dict) else None
+                    if isinstance(nxt, list):
+                        nxt = nxt[0] if nxt else None
+                    if not isinstance(nxt, dict):
+                        holder = None
+                        break
+                    holder = nxt
+                if isinstance(holder, dict):
+                    return holder, parts[-1]
+    # fallback: dotted path ישיר על obj
+    holder = obj
+    for seg in parts[:-1]:
+        nxt = holder.get(seg) if isinstance(holder, dict) else None
+        if isinstance(nxt, list):
+            nxt = nxt[0] if nxt else None
+        if not isinstance(nxt, dict):
+            return None, None
+        holder = nxt
+    if isinstance(holder, dict) and parts[-1] in holder:
+        return holder, parts[-1]
+    return None, None
+
+
+# ★ שדות שלעולם אינם בני-אימות שוויון: ה-KEY/זהות/metadata של ה-Worker (משתנים פר-ריצה/הודעה).
+_NON_ASSERTABLE_LEAVES = {"scc_message_id", "entity_id", "message_id",
+                          "mac_correlation_id", "mac_transaction_id", "timestamp_sequence"}
+_MEMBER_LEAVES = {"member_id", "member_id_code"}
+
+
+def _sanitize_expected_fields(expected: Dict[str, Any], strip_member: bool) -> List[str]:
+    """מסיר מ-expected_fields שדות שאינם בני-אימות שוויון (KEY/זהות/metadata) — הם משתנים פר-ריצה
+    (ה-uid הייחודי) או מטא-דאטה של ה-Worker. מחזיר את רשימת הנתיבים שהוסרו. משנה את ה-dict in-place.
+    strip_member=True (מסלול מסר-דוגמה) מסיר גם member_id (עובר טרנספורמציה → לא אמין לאימות)."""
+    drop = set(_NON_ASSERTABLE_LEAVES)
+    if strip_member:
+        drop |= _MEMBER_LEAVES
+    removed: List[str] = []
+    for k in list(expected.keys()):
+        leaf = k.split(".")[-1]
+        if leaf in drop or "mac_" in k:
+            del expected[k]
+            removed.append(k)
+    return removed
+
+
+def _make_key_unique(value_obj: Any, key_source_path: str, uid: str) -> Optional[str]:
+    """מזריק ערך ייחודי לשדה-המקור שהופך ל-target KEY (verbatim) → ה-KEY ביעד ייחודי לכל ריצה.
+    שומר על מבנה הערך: מחליף את **רצף הספרות הראשון** ב-uid (SCC-TST.128...→SCC-TST.<uid>...),
+    כך שהסיומת (HISTO.final.0) והפורמט נשמרים. מחזיר את הערך החדש, או None אם השדה לא נמצא."""
+    holder, field = _resolve_logical_holder(value_obj, key_source_path)
+    if holder is None or field is None:
+        return None
+    cur = holder.get(field)
+    if not isinstance(cur, (str, int)):
+        return None
+    s = str(cur)
+    new = re.sub(r"\d+", uid, s, count=1) if re.search(r"\d", s) else f"{s}.{uid}"
+    holder[field] = new
+    return new
+
+
 def _get_nested_field(obj: Any, name: str) -> Optional[str]:
     """מחזיר את ערך השדה `name` הראשון (כ-str) במבנה מקונן, בלי לשנות. None אם אין."""
     if isinstance(obj, dict):
@@ -279,16 +353,25 @@ class DotNetRunner:
         uid_source = uid_target.zfill(9) if wants_leading_zeros else uid_target
         src_set = False
         token_seen = False
+        key_set = False
+        new_key_val = None
         waits: List[KafkaWaitAction] = []
         for action in executable.actions:
             if isinstance(action, KafkaPublishAction):
-                had_token = _contains_token(action.value, token)                    # ה-LLM שם __UNIQUE_ID__ בשדה ה-id
+                # ★★★ ראשי (מסלול מסר-דוגמה/FHIR): הזרקה לשדה-המקור שהופך ל-target KEY **verbatim**
+                # (scc_message_id/entity_id). זה השדה היחיד שעובר ליעד ללא טרנספורמציה → ה-uid שורד שלם
+                # ב-KEY → קורלציה מדויקת. (member_id עובר strip-first-char ולכן לא אמין.) מוגבל ל-source_sample
+                # כדי לא לשנות את מסלול ה-MACKAF (template) הקיים שעובד עם member_id.
+                if executable.key_source_path and executable.source_sample:
+                    nk = _make_key_unique(action.value, executable.key_source_path, uid_target)
+                    if nk is not None:
+                        key_set, new_key_val = True, nk
+                had_token = _contains_token(action.value, token)                    # ה-LLM שם __UNIQUE_ID__ בשדה
                 if had_token:
                     token_seen = True
-                action.value = _substitute_token(action.value, token, uid_source)   # token → uid (path-free, מדויק)
-                # ★ הזרקת נתיב **רק כשאין token** — ה-token כבר מיקם את ה-uid בשדה אחד מדויק; הזרקת
-                # נתיב/סיומת עלולה לדרוס יותר מדי (כל identifier.value ב-Bundle) ולהשחית את המסר.
-                if not had_token and _inject_source_id(action.value, id_path, id_name, uid_source):
+                action.value = _substitute_token(action.value, token, uid_source)   # token → uid (path-free)
+                # ★ הזרקת נתיב **רק כשאין token ולא הוזרק שדה KEY** — נמנעים מדריסת-יתר ומשדה מקור מיותר.
+                if not had_token and not key_set and _inject_source_id(action.value, id_path, id_name, uid_source):
                     src_set = True
                 if action.key and token in action.key:
                     action.key = action.key.replace(token, uid_source)
@@ -300,12 +383,19 @@ class DotNetRunner:
                 if id_name not in _GENERIC_LEAVES:
                     _override_dotted_field(action.match, id_name, uid_target)       # יעד (form נקי)
                     _override_dotted_field(action.expected_fields, id_name, uid_target)
+                # ★ סינון אסרשנים שאינם בני-אימות: KEY/זהות/metadata. במסלול מסר-דוגמה גם member_id
+                # (עובר טרנספורמציה/ייחודי). מונע כשל-שווא כשה-LLM מאמת שדות שלא נתבקשו עם ערך ישן.
+                removed = _sanitize_expected_fields(action.expected_fields,
+                                                    strip_member=bool(executable.source_sample))
+                if removed:
+                    self._log("ASSERT", "info",
+                              f"הוסרו {len(removed)} אסרשנים לא-בני-אימות (KEY/זהות/metadata): {', '.join(removed)}")
                 waits.append(action)
         # ★ קורלציה ראשית = value_contains: ה-uid הייחודי מופיע ב-target *בכל מקום* (KEY או גוף).
         # זה format-agnostic — ה-target KEY של FHIR הוא scc_message_id (לא ה-id שלנו), אבל ה-uid
         # יושב ב-_data.member_id בגוף → value_contains תופס בדיוק את המסר שלנו ולא מסר זר/ישן.
         # תרחיש שלילי: ה-uid לא הופק → אף מסר לא מכילו → timeout → PASS נכון.
-        used = src_set or token_seen
+        used = src_set or token_seen or key_set
         # legacy: token בתוך key_contains שה-LLM מילא
         for w in waits:
             if w.key_contains and token in (w.key_contains or ""):
@@ -313,15 +403,19 @@ class DotNetRunner:
         if used:
             for w in waits:
                 w.value_contains = uid_target          # ★ הקורלציה הייחודית (KEY או גוף)
-            if wants_leading_zeros:
+            if key_set:
+                self._log("UNIQUE", "success",
+                          f"שדה ה-KEY ({executable.key_source_path}) הוזרק ערך ייחודי → KEY ביעד: "
+                          f"{new_key_val} (קורלציה לפי ה-uid {uid_target})")
+            elif wants_leading_zeros:
                 self._log("UNIQUE", "info", f"{id_name}: מקור={uid_source} (עם אפסים מובילים — "
                                             f"בדיקת הסרה), יעד צפוי={uid_target} (ללא אפסים)")
             else:
                 self._log("UNIQUE", "info", f"{id_name} ייחודי לריצה: {uid_target} (קורלציה: ה-id מופיע ב-target)")
         else:
-            self._log("UNIQUE", "warn", "לא הוזרק id ייחודי (אין שדה id במקור / לא זוהה __UNIQUE_ID__) — "
-                                        "הקורלציה תתבסס על match בלבד ועלולה לתפוס מסר זר. ודא ש-key_built_from "
-                                        "מצביע על שדה ה-id, או שהתסריט משתמש ב-__UNIQUE_ID__.")
+            self._log("UNIQUE", "warn", "לא הוזרק id ייחודי (אין שדה KEY/id במקור / לא זוהה __UNIQUE_ID__) — "
+                                        "הקורלציה תתבסס על match בלבד ועלולה לתפוס מסר זר. ודא שה-Payload Builder "
+                                        "מחזיר transformation לשדה entity_id/scc_message_id.")
         return uid_target if used else None
 
     async def execute(self, executable: DotNetExecutableTestCase) -> TestCaseResult:
