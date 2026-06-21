@@ -9,7 +9,7 @@ os.environ.setdefault("KAFKA_BOOTSTRAP_SERVERS", "")
 from server.routes import _parse_messages_json  # noqa: E402
 from agents.compiler.dotnet_compiler import _extract_kbf  # noqa: E402
 from pipeline.dotnet_pipeline import _extract_key_built_from  # noqa: E402
-from agents.runner.dotnet_runner import _primary_id_field  # noqa: E402
+from agents.runner.dotnet_runner import _primary_id_field, _primary_id_path  # noqa: E402
 
 
 # ============================================================
@@ -78,3 +78,20 @@ def test_primary_id_field_fallback():
     assert _primary_id_field([]) is None
     # אם הכל code — מחזיר את הראשון
     assert _primary_id_field(["a.member_id_code"]) == "member_id_code"
+
+
+# ============================================================
+# _primary_id_path — נתיב מלא (Phase 3, מונע leaf גנרי)
+# ============================================================
+
+def test_primary_id_path_returns_full_path():
+    """★ FHIR: מחזיר נתיב מלא (ServiceRequest.identifier.value) ולא leaf גנרי 'value'."""
+    kbf = ["ServiceRequest.identifier.value", "DiagnosticReport.status"]
+    assert _primary_id_path(kbf) == "ServiceRequest.identifier.value"
+    assert _primary_id_field(kbf) == "value"   # ה-leaf הגנרי — בדיוק הסיכון שה-path מתקן
+
+
+def test_primary_id_path_skips_code_and_fallback():
+    assert _primary_id_path(["_data.x.member_id_code", "_data.x.member_id"]) == "_data.x.member_id"
+    assert _primary_id_path(None) is None
+    assert _primary_id_path(["a.code"]) == "a.code"   # הכל code → הראשון

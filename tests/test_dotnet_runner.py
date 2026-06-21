@@ -366,16 +366,34 @@ def test_apply_source_sample_builds_publish_from_sample_plus_overrides():
 
 
 def test_apply_source_sample_leaf_fallback_when_path_missing():
-    """דריסה לפי שם-שדה (leaf) כשהנתיב המדויק לא נמצא — תאימות עם נתיב חלקי של ה-LLM."""
-    sample = {"resourceType": "Bundle", "entry": [{"resource": {"code": "OLD"}}]}
+    """דריסה לפי שם-שדה (leaf) ספציפי כשהנתיב המדויק לא נמצא — תאימות עם נתיב חלקי של ה-LLM."""
+    sample = {"resourceType": "Bundle", "entry": [{"resource": {"examination_status": "OLD"}}]}
     ex = DotNetExecutableTestCase(
         test_case_id="TC-leaf",
         source_sample=sample,
-        source_overrides={"code": "NEW"},                      # leaf בלבד
+        source_overrides={"examination_status": "final"},      # leaf ספציפי (לא גנרי)
         actions=[KafkaPublishAction(topic="src", value={})],
     )
     assert DotNetRunner()._apply_source_sample(ex) is True
-    assert ex.actions[0].value["entry"][0]["resource"]["code"] == "NEW"
+    assert ex.actions[0].value["entry"][0]["resource"]["examination_status"] == "final"
+
+
+def test_apply_source_sample_suffix_match_not_generic_leaf():
+    """★ בטיחות FHIR: override 'category.coding.code' דורס רק את ה-code תחת category.coding,
+    לא code גנרי אחר ב-Bundle (suffix-match ולא leaf 'code' בודד)."""
+    sample = {"resourceType": "Bundle",
+              "entry": [{"resource": {"category": {"coding": {"code": "OLD"}}}},
+                        {"resource": {"type": {"coding": {"code": "KEEP"}}}}]}
+    ex = DotNetExecutableTestCase(
+        test_case_id="TC-suffix",
+        source_sample=sample,
+        source_overrides={"DiagnosticReport.category.coding.code": "M_PAT_HPV"},
+        actions=[KafkaPublishAction(topic="src", value={})],
+    )
+    assert DotNetRunner()._apply_source_sample(ex) is True
+    val = ex.actions[0].value
+    assert val["entry"][0]["resource"]["category"]["coding"]["code"] == "M_PAT_HPV"
+    assert val["entry"][1]["resource"]["type"]["coding"]["code"] == "KEEP"   # code אחר לא נגע
 
 
 def test_apply_source_sample_noop_without_sample():
@@ -386,3 +404,47 @@ def test_apply_source_sample_noop_without_sample():
     )
     assert DotNetRunner()._apply_source_sample(ex) is False
     assert ex.actions[0].value == {"_data": {"member_id": "555"}}   # ללא שינוי
+
+
+# ============================================================
+# Phase 3 — path-based unique-id injection (FHIR generic-leaf safety)
+# ============================================================
+
+def test_apply_unique_id_path_based_fhir_no_sibling_clobber():
+    """★ key_built_from=identifier.value (leaf גנרי 'value') → ההזרקה לפי נתיב מדויק דורסת *רק*
+    את identifier.value, ולא שדות `value` אחים ב-Bundle (הסיכון של §4)."""
+    fhir = {"resourceType": "Bundle",
+            "identifier": {"value": "999"},
+            "entry": [{"resource": {"valueQuantity": {"value": "12.5"}}},
+                      {"resource": {"code": {"value": "PAP"}}}]}
+    ex = DotNetExecutableTestCase(
+        test_case_id="TC-fhir-path",
+        key_built_from=["ServiceRequest.identifier.value", "DiagnosticReport.status"],
+        actions=[
+            KafkaPublishAction(topic="src", value=fhir),
+            KafkaWaitAction(topic="tgt", match={"entity_type": "lab"}),
+        ],
+    )
+    uid = DotNetRunner()._apply_unique_id(ex)
+    assert uid and uid != "999"
+    pub, wait = ex.actions
+    assert pub.value["identifier"]["value"] == uid                       # ★ נדרס לפי נתיב
+    assert pub.value["entry"][0]["resource"]["valueQuantity"]["value"] == "12.5"  # אח לא נגע
+    assert pub.value["entry"][1]["resource"]["code"]["value"] == "PAP"   # אח לא נגע
+    assert wait.key_contains == uid                                      # קורלציה על ה-uid
+
+
+def test_apply_unique_id_path_fallback_to_leaf_when_path_missing():
+    """key_built_from עם נתיב שלא קיים במבנה בפועל → fallback ל-leaf-override (תאימות עם הטסט
+    הקיים test_apply_unique_id_format_agnostic_via_key_built_from)."""
+    ex = DotNetExecutableTestCase(
+        test_case_id="TC-fallback",
+        key_built_from=["root.entity_id"],                              # אין 'root' wrapper במבנה
+        actions=[
+            KafkaPublishAction(topic="src", value={"entity_id": "777", "x": 1}),
+            KafkaWaitAction(topic="tgt", match={"entity_type": "lab"}),
+        ],
+    )
+    uid = DotNetRunner()._apply_unique_id(ex)
+    assert uid and uid != "777"
+    assert ex.actions[0].value["entity_id"] == uid                      # נדרס דרך leaf-fallback

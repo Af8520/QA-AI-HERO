@@ -111,6 +111,58 @@ def _override_by_path(obj: Any, path: str, value: Any) -> bool:
     return False
 
 
+# ★ שמות-שדה גנריים שאסור לדרוס לפי leaf בלבד (FHIR מלא בהם) — דורשים הקשר parent (suffix של 2+).
+_GENERIC_LEAVES = {"value", "code", "id", "status", "name", "text", "system", "display",
+                   "type", "url", "reference", "use", "version", "title", "key"}
+
+
+def _override_path_anywhere(obj: Any, parts: List[str], value: Any) -> bool:
+    """דורס בכל מקום ב-tree שבו הנתיב היחסי `parts` נפתר (החל מאותו node). מחזיר True אם נמצא
+    לפחות מופע אחד. ★ ה-key_built_from של FHIR הוא נתיב *לוגי* (ResourceType.field.subfield) ולא
+    נתיב-JSON ליטרלי, ולכן מנסים סיומות (identifier.value) במקום הנתיב המלא."""
+    found = False
+    if _override_by_path(obj, ".".join(parts), value):
+        found = True
+    if isinstance(obj, dict):
+        for v in obj.values():
+            if _override_path_anywhere(v, parts, value):
+                found = True
+    elif isinstance(obj, list):
+        for it in obj:
+            if _override_path_anywhere(it, parts, value):
+                found = True
+    return found
+
+
+def _override_field_smart(obj: Any, path: str, value: Any) -> bool:
+    """דריסת שדה format-agnostic ובטוחה מ-leaf גנרי. ה-paths מ-key_built_from/source_overrides
+    הם לוגיים (ResourceType.field.subfield) ולא נתיבי-JSON ליטרליים, לכן:
+    1. מנסה סיומות הולכות ומתקצרות (אורך 2+, parent.leaf) בכל מקום ב-tree.
+    2. fallback ל-leaf בודד — **רק** לשם ספציפי (member_id/category_code), לא גנרי (value/code/id).
+    כך 'ServiceRequest.identifier.value' דורס רק identifier.value, ולא valueQuantity.value אחים."""
+    parts = str(path).split(".")
+    for i in range(len(parts) - 1):              # מהארוך לקצר, מינימום 2 סגמנטים
+        sub = parts[i:]
+        if len(sub) < 2:
+            break
+        if _override_path_anywhere(obj, sub, value):
+            return True
+    leaf = parts[-1]
+    if leaf and leaf not in _GENERIC_LEAVES:
+        return _override_nested_field(obj, leaf, value)
+    return False
+
+
+def _inject_source_id(value_obj: Any, id_path: Optional[str], id_name: str, uid: str) -> bool:
+    """מזריק את ה-uid לשדה ה-id במסר המקור (format-agnostic, בטוח מ-leaf גנרי). id_path מ-key_built_from;
+    אם אין — fallback ל-id_name (member_id/entity_id) לפי leaf, ובלבד שאינו שם גנרי."""
+    if id_path:
+        return _override_field_smart(value_obj, id_path, uid)
+    if id_name and id_name not in _GENERIC_LEAVES:
+        return _override_nested_field(value_obj, id_name, uid)
+    return False
+
+
 def _get_nested_field(obj: Any, name: str) -> Optional[str]:
     """מחזיר את ערך השדה `name` הראשון (כ-str) במבנה מקונן, בלי לשנות. None אם אין."""
     if isinstance(obj, dict):
@@ -128,10 +180,24 @@ def _get_nested_field(obj: Any, name: str) -> Optional[str]:
     return None
 
 
+def _primary_id_path(key_built_from: Optional[List[str]]) -> Optional[str]:
+    """כמו _primary_id_field, אבל מחזיר את ה-**נתיב המלא** (לא רק ה-leaf) של ה-id הראשי.
+    משמש להזרקת ה-uid לפי נתיב מדויק (מונע דריסת leaf גנרי כמו 'value' בכל ה-FHIR Bundle).
+    דוגמה: ['ServiceRequest.identifier.value','DiagnosticReport.status'] → 'ServiceRequest.identifier.value'."""
+    if not key_built_from:
+        return None
+    for path in key_built_from:
+        seg = str(path).split(".")[-1]
+        if seg and not (seg.endswith("_code") or seg == "code"):
+            return str(path)
+    return str(key_built_from[0]) or None
+
+
 def _primary_id_field(key_built_from: Optional[List[str]]) -> Optional[str]:
     """מ-key_built_from (נתיבי-מקור שה-target KEY בנוי מהם) בוחר את השדה הראשי — הסגמנט האחרון
     של הנתיב הראשון שאינו *_code/code (הקוד הוא לא המזהה הייחודי). None → אין → fallback ל-member_id.
-    דוגמה: ['_data.member_details.member_id','_data.member_details.member_id_code'] → 'member_id'."""
+    דוגמה: ['_data.member_details.member_id','_data.member_details.member_id_code'] → 'member_id'.
+    משמש ל-leaf-fallback ול-dotted-keys של match/expected_fields."""
     if not key_built_from:
         return None
     for path in key_built_from:
@@ -170,10 +236,8 @@ class DotNetRunner:
         pub.value = copy.deepcopy(sample)
         overrides = executable.source_overrides or {}
         for path, val in overrides.items():
-            if _override_by_path(pub.value, path, val):
+            if _override_field_smart(pub.value, path, val):
                 self._log("SOURCE", "info", f"דריסה {path}={val}")
-            elif _override_nested_field(pub.value, str(path).split(".")[-1], val):
-                self._log("SOURCE", "info", f"דריסה {path}={val} (leaf fallback)")
             else:
                 self._log("SOURCE", "warn", f"דריסה {path}={val} — השדה לא נמצא במסר-הדוגמה")
         self._log("SOURCE", "success",
@@ -189,12 +253,17 @@ class DotNetRunner:
         token = _UNIQUE_TOKEN
         # ★ format-agnostic: שם-שדה המזהה מ-key_built_from (entity_id/member_id/...); fallback member_id
         id_name = _primary_id_field(executable.key_built_from) or "member_id"
+        # ★ נתיב מלא של ה-id (אם key_built_from סופק) — להזרקה לפי נתיב מדויק במקור, כדי לא לדרוס
+        # leaf גנרי (FHIR מלא ב-`value`). None → fallback ל-leaf-override לפי id_name.
+        id_path = _primary_id_path(executable.key_built_from)
         uid_target = _gen_unique_member_id()          # ה-form הנקי (ללא אפסים) — מה שה-Worker מפיק
         # ★ תלוי-בקשה: רק אם ה-id *בתסריט* מתחיל באפסים (התסריט בודק הסרת אפסים) — נשלח במקור עם
-        # אפסים מובילים. אחרת id רגיל (לא ממציאים בדיקה שלא נדרשה).
-        orig_id = next((_get_nested_field(a.value, id_name) for a in executable.actions
-                        if isinstance(a, KafkaPublishAction)
-                        and _get_nested_field(a.value, id_name) is not None), None)
+        # אפסים מובילים. אחרת id רגיל. מדלגים על הבדיקה ל-leaf גנרי (FHIR — לא רלוונטי, ולא אמין).
+        orig_id = None
+        if id_name not in _GENERIC_LEAVES:
+            orig_id = next((_get_nested_field(a.value, id_name) for a in executable.actions
+                            if isinstance(a, KafkaPublishAction)
+                            and _get_nested_field(a.value, id_name) is not None), None)
         wants_leading_zeros = bool(orig_id) and len(orig_id) > 1 and orig_id[0] == "0"
         uid_source = uid_target.zfill(9) if wants_leading_zeros else uid_target
         src_set = False
@@ -202,15 +271,19 @@ class DotNetRunner:
         for action in executable.actions:
             if isinstance(action, KafkaPublishAction):
                 action.value = _substitute_token(action.value, token, uid_source)   # legacy token
-                if _override_nested_field(action.value, id_name, uid_source):       # מקור (form עם אפסים)
+                # ★ הזרקה בטוחה מ-leaf גנרי: נתיב/סיומת קודם, ואז leaf רק לשם ספציפי (לא value/code)
+                if _inject_source_id(action.value, id_path, id_name, uid_source):    # מקור (form עם אפסים)
                     src_set = True
                 if action.key and token in action.key:
                     action.key = action.key.replace(token, uid_source)
             elif isinstance(action, KafkaWaitAction):
                 action.match = _substitute_token(action.match, token, uid_target)
                 action.expected_fields = _substitute_token(action.expected_fields, token, uid_target)
-                _override_dotted_field(action.match, id_name, uid_target)           # יעד (form נקי)
-                _override_dotted_field(action.expected_fields, id_name, uid_target)
+                # ★ דריסת ה-id ב-match/expected רק לשם ספציפי — לשם גנרי (value/code) מסתמכים על
+                # key_contains בלבד (לא דורסים שדה assert לגיטימי שמסתיים ב-'value').
+                if id_name not in _GENERIC_LEAVES:
+                    _override_dotted_field(action.match, id_name, uid_target)       # יעד (form נקי)
+                    _override_dotted_field(action.expected_fields, id_name, uid_target)
                 waits.append(action)
         # ★ ה-target KEY בנוי מה-id → key_contains=uid הוא קורלציה מדויקת (ה-id ייחודי, אף מסר אחר
         # לא מכיל אותו). כך גם תרחיש שלילי מחפש את ה-id שלנו (שלא הופק) → timeout → PASS נכון.
