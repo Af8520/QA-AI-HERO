@@ -90,33 +90,77 @@ def _override_dotted_field(d: Dict[str, Any], name: str, uid: str) -> bool:
     return found
 
 
+def _split_path_segments(path: str) -> List[str]:
+    """מפצל נתיב על '.' אבל **לא** בתוך סוגריים מרובעים — כך JSONPath filter כמו
+    `identifier[?(@.system=='PID')]` (שמכיל '.') נשאר סגמנט אחד.
+    'DiagnosticReport.category[0].coding[0].code' → ['DiagnosticReport','category[0]','coding[0]','code']."""
+    return re.findall(r"(?:[^.\[]|\[[^\]]*\])+", str(path))
+
+
+_FILTER_RE = re.compile(r"^\?\(@\.([^=!<>]+)\s*==\s*(.+)\)$")
+
+
+def _parse_steps(path: str) -> List[Any]:
+    """ממיר נתיב (dotted + bracket-index + JSONPath-filter) לרשימת steps:
+    str → מפתח dict | int → אינדקס list | dict{k:v} → פילטר (בחר אלמנט ב-list ש-el[k]==v).
+    תומך ב: a.b, a[0].b, a[?(@.system=='PID')].value, a[*] (→ auto)."""
+    steps: List[Any] = []
+    for tok in re.findall(r"[^.\[\]]+|\[[^\]]*\]", str(path)):
+        if tok.startswith("["):
+            inner = tok[1:-1].strip()
+            m = _FILTER_RE.match(inner)
+            if m:
+                steps.append({m.group(1).strip(): m.group(2).strip().strip("'\"")})
+            elif inner.lstrip("-").isdigit():
+                steps.append(int(inner))
+            elif inner in ("*", "?"):
+                steps.append("*")
+            else:
+                steps.append(inner.strip("'\""))
+        elif tok:
+            steps.append(tok)
+    return steps
+
+
 def _override_by_path(obj: Any, path: str, value: Any) -> bool:
-    """דורס שדה **לפי נתיב מלא** (dotted). list → auto-index [0] כשהסגמנט אינו מספר, או index
-    מפורש כשהוא מספר. דורס *רק* את השדה בנתיב — מתקן את סיכון ה-leaf הגנרי (FHIR מלא ב-`value`,
-    `code`...). מחזיר True אם הנתיב נמצא ונדרס, False אחרת (→ ה-caller יכול ליפול ל-leaf-override)."""
-    parts = path.split(".")
+    """דורס שדה **לפי נתיב מלא** — תומך ב-dotted, bracket-index `[0]`, ו-JSONPath filter
+    `[?(@.system=='PID')]`. list עם סגמנט-שם (לא אינדקס/פילטר) → auto-index [0]. דורס *רק* את
+    השדה בנתיב (מונע דריסת leaf גנרי). מחזיר True אם נמצא ונדרס, False אחרת."""
+    steps = _parse_steps(path)
+    if not steps:
+        return False
     cur = obj
-    for i, part in enumerate(parts):
-        last = i == len(parts) - 1
-        if isinstance(cur, list):
-            if part.lstrip("-").isdigit():
-                idx = int(part)
-                if not (-len(cur) <= idx < len(cur)):
-                    return False
-                if last:
-                    cur[idx] = value
-                    return True
-                cur = cur[idx]
-                continue
-            # סגמנט לא-מספרי על list → auto-index [0]
-            if not cur:
+    for i, step in enumerate(steps):
+        last = i == len(steps) - 1
+        if isinstance(step, dict):                       # פילטר על list
+            (fk, fv), = step.items()
+            if not isinstance(cur, list):
                 return False
-            cur = cur[0]
-        if isinstance(cur, dict) and part in cur:
+            cur = next((e for e in cur if isinstance(e, dict) and str(e.get(fk)) == str(fv)), None)
+            if cur is None:
+                return False
+            continue
+        if isinstance(step, int):                        # אינדקס מפורש
+            if not isinstance(cur, list) or not (-len(cur) <= step < len(cur)):
+                return False
             if last:
-                cur[part] = value
+                cur[step] = value
                 return True
-            cur = cur[part]
+            cur = cur[step]
+            continue
+        # step = str (מפתח). list → auto-index [0]
+        if isinstance(cur, list):
+            if step == "*":
+                cur = cur[0] if cur else None
+                if cur is None:
+                    return False
+                continue
+            cur = cur[0] if cur else None
+        if isinstance(cur, dict) and step in cur:
+            if last:
+                cur[step] = value
+                return True
+            cur = cur[step]
         else:
             return False
     return False
@@ -151,14 +195,15 @@ def _override_field_smart(obj: Any, path: str, value: Any) -> bool:
     1. מנסה סיומות הולכות ומתקצרות (אורך 2+, parent.leaf) בכל מקום ב-tree.
     2. fallback ל-leaf בודד — **רק** לשם ספציפי (member_id/category_code), לא גנרי (value/code/id).
     כך 'ServiceRequest.identifier.value' דורס רק identifier.value, ולא valueQuantity.value אחים."""
-    parts = str(path).split(".")
+    parts = _split_path_segments(path)           # bracket-aware (לא שובר JSONPath filter)
     for i in range(len(parts) - 1):              # מהארוך לקצר, מינימום 2 סגמנטים
         sub = parts[i:]
         if len(sub) < 2:
             break
         if _override_path_anywhere(obj, sub, value):
             return True
-    leaf = parts[-1]
+    # leaf בודד — שם-השדה האחרון (בלי ברקטים). רק לשם ספציפי (לא value/code גנרי).
+    leaf = re.sub(r"\[[^\]]*\]", "", parts[-1]) if parts else ""
     if leaf and leaf not in _GENERIC_LEAVES:
         return _override_nested_field(obj, leaf, value)
     return False

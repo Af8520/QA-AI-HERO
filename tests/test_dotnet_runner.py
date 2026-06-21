@@ -20,6 +20,7 @@ from agents.runner.dotnet_runner import (  # noqa: E402
     _matches,
     _sanitize_expected_fields,
     _override_by_path,
+    _override_field_smart,
     _resolve_logical_holder,
     _substitute_token,
     _to_wire_message,
@@ -322,6 +323,33 @@ async def test_runner_blocked_when_couchbase_not_configured():
 # ============================================================
 # Phase 2 — _override_by_path + _apply_source_sample (FHIR sample base)
 # ============================================================
+
+def test_override_by_path_bracket_index_notation():
+    """★ נתיב בסגנון JSONPath עם ברקטים [0] (כפי שה-LLM/PB מחזירים) — נפתר נכון."""
+    obj = {"category": [{"coding": [{"code": "OLD"}]}]}
+    assert _override_by_path(obj, "category[0].coding[0].code", "M_PAT_HPV")
+    assert obj["category"][0]["coding"][0]["code"] == "M_PAT_HPV"
+
+
+def test_override_by_path_jsonpath_filter():
+    """★ פילטר JSONPath [?(@.system=='PID')] — בוחר את האלמנט הנכון ב-list, לא [0]."""
+    obj = {"identifier": [{"system": "X", "value": "a"}, {"system": "PID", "value": "050"}]}
+    assert _override_by_path(obj, "identifier[?(@.system=='PID')].value", "49069711")
+    assert obj["identifier"][1]["value"] == "49069711"     # PID נדרס
+    assert obj["identifier"][0]["value"] == "a"            # X לא נגע
+    # פילטר שלא מתאים → False
+    assert not _override_by_path(obj, "identifier[?(@.system=='NOPE')].value", "x")
+
+
+def test_override_field_smart_resourcetype_prefixed_bracket_path():
+    """★ הבאג מהריצה: 'DiagnosticReport.category[0].coding[0].code' (ResourceType + ברקטים) —
+    הדריסה (M_PAT_HPV) מוחלת על ה-resource הנכון ב-Bundle."""
+    bundle = {"resourceType": "Bundle", "entry": [
+        {"resource": {"resourceType": "DiagnosticReport",
+                      "category": [{"coding": [{"code": "M_PAT_HIST"}]}]}}]}
+    assert _override_field_smart(bundle, "DiagnosticReport.category[0].coding[0].code", "M_PAT_HPV")
+    assert bundle["entry"][0]["resource"]["category"][0]["coding"][0]["code"] == "M_PAT_HPV"
+
 
 def test_override_by_path_nested_and_list_autoindex():
     """דריסה לפי נתיב מלא: dict מקונן + auto-index [0] לרשימה כשהסגמנט אינו מספר."""
