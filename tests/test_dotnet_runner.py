@@ -351,6 +351,19 @@ def test_override_field_smart_resourcetype_prefixed_bracket_path():
     assert bundle["entry"][0]["resource"]["category"][0]["coding"][0]["code"] == "M_PAT_HPV"
 
 
+def test_override_by_path_index_tolerates_object_vs_array():
+    """★ הבאג מהריצה: ה-PB מייצר 'category[0].coding[0].code' (מניח מערך), אבל ב-sample האמיתי
+    category/coding הם אובייקט בודד. אינדקס על אובייקט → מתייחס לאובייקט כאלמנט (לא נכשל)."""
+    # category=object, coding=object
+    o = {"category": {"coding": {"code": "OLD"}}}
+    assert _override_by_path(o, "category[0].coding[0].code", "M_PAT_HPV")
+    assert o["category"]["coding"]["code"] == "M_PAT_HPV"
+    # mixed: array + object
+    m = {"category": [{"coding": {"code": "OLD"}}]}
+    assert _override_by_path(m, "category[0].coding[0].code", "NEW")
+    assert m["category"][0]["coding"]["code"] == "NEW"
+
+
 def test_override_by_path_nested_and_list_autoindex():
     """דריסה לפי נתיב מלא: dict מקונן + auto-index [0] לרשימה כשהסגמנט אינו מספר."""
     obj = {"category": {"coding": {"code": "OLD"}},

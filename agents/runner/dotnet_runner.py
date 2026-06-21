@@ -134,6 +134,10 @@ def _override_by_path(obj: Any, path: str, value: Any) -> bool:
         last = i == len(steps) - 1
         if isinstance(step, dict):                       # פילטר על list
             (fk, fv), = step.items()
+            if isinstance(cur, dict):                    # ★ object-vs-array: אובייקט בודד שתואם
+                if str(cur.get(fk)) == str(fv):
+                    continue
+                return False
             if not isinstance(cur, list):
                 return False
             cur = next((e for e in cur if isinstance(e, dict) and str(e.get(fk)) == str(fv)), None)
@@ -141,6 +145,12 @@ def _override_by_path(obj: Any, path: str, value: Any) -> bool:
                 return False
             continue
         if isinstance(step, int):                        # אינדקס מפורש
+            # ★ FHIR single-vs-array tolerance: אינדקס על אובייקט בודד (לא מערך) → האובייקט הוא האלמנט.
+            # כך 'category.0.coding.0.code' עובד בין אם category הוא [{...}] ובין אם {...}.
+            if isinstance(cur, dict):
+                if last:
+                    return False
+                continue
             if not isinstance(cur, list) or not (-len(cur) <= step < len(cur)):
                 return False
             if last:
@@ -288,6 +298,8 @@ def _make_key_unique(value_obj: Any, key_source_path: str, uid: str) -> Optional
     if not isinstance(cur, (str, int)):
         return None
     s = str(cur)
+    if uid in s:                       # כבר מכיל את ה-uid (ה-token כבר הוזרק כאן) → לא לדרוס שוב
+        return s
     new = re.sub(r"\d+", uid, s, count=1) if re.search(r"\d", s) else f"{s}.{uid}"
     holder[field] = new
     return new
@@ -403,18 +415,18 @@ class DotNetRunner:
         waits: List[KafkaWaitAction] = []
         for action in executable.actions:
             if isinstance(action, KafkaPublishAction):
+                had_token = _contains_token(action.value, token)                    # ה-LLM שם __UNIQUE_ID__ בשדה
+                if had_token:
+                    token_seen = True
+                action.value = _substitute_token(action.value, token, uid_source)   # token → uid (קודם — מונע uid כפול ב-KEY)
                 # ★★★ ראשי (מסלול מסר-דוגמה/FHIR): הזרקה לשדה-המקור שהופך ל-target KEY **verbatim**
                 # (scc_message_id/entity_id). זה השדה היחיד שעובר ליעד ללא טרנספורמציה → ה-uid שורד שלם
                 # ב-KEY → קורלציה מדויקת. (member_id עובר strip-first-char ולכן לא אמין.) מוגבל ל-source_sample
-                # כדי לא לשנות את מסלול ה-MACKAF (template) הקיים שעובד עם member_id.
+                # כדי לא לשנות את מסלול ה-MACKAF (template) הקיים. no-op אם ה-token כבר הזריק את ה-uid שם.
                 if executable.key_source_path and executable.source_sample:
                     nk = _make_key_unique(action.value, executable.key_source_path, uid_target)
                     if nk is not None:
                         key_set, new_key_val = True, nk
-                had_token = _contains_token(action.value, token)                    # ה-LLM שם __UNIQUE_ID__ בשדה
-                if had_token:
-                    token_seen = True
-                action.value = _substitute_token(action.value, token, uid_source)   # token → uid (path-free)
                 # ★ הזרקת נתיב **רק כשאין token ולא הוזרק שדה KEY** — נמנעים מדריסת-יתר ומשדה מקור מיותר.
                 if not had_token and not key_set and _inject_source_id(action.value, id_path, id_name, uid_source):
                     src_set = True
