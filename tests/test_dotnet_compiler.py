@@ -191,3 +191,20 @@ def test_parse_anchored_response_reverse_maps_target_value_to_source_code():
     data2 = {"overrides": [{"target_field": "examination_type_code", "value": "M_CYT"}]}
     ex2 = c._parse_anchored_response("TC-ok", None, "t", data2)
     assert ex2.source_overrides == {"DiagnosticReport.category[0].coding[0].code": "M_CYT"}
+
+
+def test_parse_anchored_response_skips_derived_field_override():
+    """★ failures 2+4: ה-LLM ניסה override על member_name (שדה מחושב, source='...family + given[0]').
+    override כזה משחית את ה-name במקור → מדלגים (שדה מחושב = verify בלבד), המסר לא נשחת."""
+    idx = {
+        "by_target_path": {"_data.member_name": "Patient.name.family + name.given[0]"},
+        "by_target_leaf": {"member_name": "Patient.name.family + name.given[0]"},
+        "rules": {"_data.member_name": {"kind": "derived", "map": None}},
+        "target_paths": ["_data.member_name"],
+    }
+    c = DotNetCompiler(payload_templates={"source_topic": "s", "target_topic": "t", "templates": {"create": {}}},
+                       sample_messages=[{"resourceType": "Bundle"}], transform_index=idx)
+    data = {"overrides": [{"target_field": "member_name", "value": "יוסי"}]}
+    ex = c._parse_anchored_response("TC-derived", None, "t", data)
+    assert ex.source_overrides == {}                       # לא הוזרק — נמנעה השחתה
+    assert "מחושב" in (ex.compiler_notes or "") or "נגזר" in (ex.compiler_notes or "")
