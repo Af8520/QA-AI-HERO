@@ -36,14 +36,29 @@ log = get_logger(__name__)
 
 
 def _make_openai_client():
-    """בונה AsyncAzureOpenAI עם httpx client שמכבד את settings.VERIFY_SSL.
+    """בונה client ל-Azure OpenAI שמכבד את settings.VERIFY_SSL (SSL inspection ארגוני → VERIFY_SSL=false).
 
-    אם יש SSL inspection ארגוני (כמו במכבי) — הגדר VERIFY_SSL=false ב-.env.
-    """
-    from openai import AsyncAzureOpenAI  # type: ignore[import-not-found]
+    שני מצבים:
+    - ★ v1 API (AZURE_OPENAI_USE_V1=true): מודלים חדשים (gpt-5.x / o-series) הנפרסים ב-Foundry חשופים
+      רק דרך ה-route ה-v1 (`/openai/v1/...`), לא ה-route הקלאסי (`/openai/deployments/{name}/...`).
+      משתמשים ב-AsyncOpenAI עם base_url=<endpoint>/openai/v1/ ו-default_query api-version.
+    - קלאסי (ברירת-מחדל): AsyncAzureOpenAI עם azure_endpoint + api_version (gpt-4.x).
+    בשני המצבים `model=<deployment name>`."""
     import httpx
-
     http_client = httpx.AsyncClient(verify=settings.VERIFY_SSL, timeout=60.0)
+
+    if getattr(settings, "AZURE_OPENAI_USE_V1", False):
+        from openai import AsyncOpenAI  # type: ignore[import-not-found]
+        base = (settings.AZURE_OPENAI_ENDPOINT or "").rstrip("/")
+        base_url = base + "/openai/v1/"          # → https://<resource>.openai.azure.com/openai/v1/
+        return AsyncOpenAI(
+            api_key=settings.AZURE_OPENAI_KEY,
+            base_url=base_url,
+            default_query={"api-version": settings.AZURE_OPENAI_API_VERSION or "preview"},
+            http_client=http_client,
+        )
+
+    from openai import AsyncAzureOpenAI  # type: ignore[import-not-found]
     return AsyncAzureOpenAI(
         api_key=settings.AZURE_OPENAI_KEY,
         api_version=settings.AZURE_OPENAI_API_VERSION,

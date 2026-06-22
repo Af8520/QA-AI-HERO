@@ -117,6 +117,9 @@ class Settings(BaseSettings):
     # לשדרג רק את המוח (mini→חזק) למשימת פירוש-התסריט, בלי לגעת בשאר. ראה property compiler_deployment.
     COMPILER_AZURE_OPENAI_DEPLOYMENT: Optional[str] = None
     AZURE_OPENAI_API_VERSION: str = "2024-08-01-preview"
+    # ★ true → להשתמש ב-v1 API (/openai/v1/) במקום ה-route הקלאסי. נדרש למודלים חדשים שנפרסים
+    # ב-Foundry וחשופים רק דרך v1 (gpt-5.x / o-series — ה-route הקלאסי מחזיר 404). gpt-4.x = false.
+    AZURE_OPENAI_USE_V1: bool = False
 
     # Azure DevOps
     ADO_ORG_URL: Optional[str] = None
