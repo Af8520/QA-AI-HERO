@@ -713,12 +713,18 @@ class DotNetRunner:
             if not explicit and not resolvable:
                 skipped.append(str(tf))
                 continue
+            rule = (idx.get("rules") or {}).get(key)
             if exp in _ABSENT_MARKERS or exp == "absent":
                 expected[key] = "__ABSENT__"
             elif exp in _PRESENT_MARKERS or exp == "present":
                 expected[key] = "__PRESENT__"
+            elif exp not in (None, "", "auto", "compute") and rule and rule.get("kind") == "derived":
+                # ★ שדה נגזר (שרשור family+given / lookup / strip): הערך תלוי-דוגמה ואינו בר-דריסה, ולכן
+                # ה-literal של ה-LLM הוא ניחוש שלא תואם את הדוגמה (member_name='טסט טסט חדש' מול 'כהן יוסי').
+                # מאמתים **נוכחות** בלבד — לא ניתן לאמת ערך מדויק של שדה מחושב בלי לשלוט במקור.
+                expected[key] = "__PRESENT__"
             elif exp not in (None, "", "auto", "compute"):
-                expected[key] = exp                       # literal מהתסריט
+                expected[key] = exp                       # literal מהתסריט (code_map/verbatim)
             else:
                 expected[key] = _compute_expected(idx, tf, overrides)
         removed = _sanitize_expected_fields(expected, strip_member=bool(executable.source_sample))

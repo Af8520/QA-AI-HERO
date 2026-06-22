@@ -794,6 +794,31 @@ def test_apply_verify_spec_all_populated_and_sanitize():
     assert "_data.scc_message_id" not in ef                  # זהות → סונן ע"י _sanitize
 
 
+def test_apply_verify_spec_derived_literal_downgraded_to_present():
+    """★ member_name (rule=derived, שרשור) — ה-LLM נתן literal 'כהן יוסי' שאינו תואם את שם-הדוגמה
+    ('טסט טסט חדש'). שדה נגזר אינו בר-דריסה והערך תלוי-דוגמה → מאמתים נוכחות בלבד, לא את ה-literal."""
+    ex = DotNetExecutableTestCase(
+        test_case_id="TC-name",
+        transform_index=_IDX,
+        verify_spec={"verify": [{"target_field": "member_name", "expect": "כהן יוסי"}]},
+        actions=[KafkaPublishAction(topic="src", value={}),
+                 KafkaWaitAction(topic="tgt", match={})],
+    )
+    DotNetRunner()._apply_verify_spec(ex)
+    assert ex.actions[1].expected_fields["_data.member_name"] == "__PRESENT__"   # לא 'כהן יוסי'
+
+    # code_map עם literal — נשאר literal (לא נגזר)
+    ex2 = DotNetExecutableTestCase(
+        test_case_id="TC-code",
+        transform_index=_IDX,
+        verify_spec={"verify": [{"target_field": "examination_type_code", "expect": "7"}]},
+        actions=[KafkaPublishAction(topic="src", value={}),
+                 KafkaWaitAction(topic="tgt", match={})],
+    )
+    DotNetRunner()._apply_verify_spec(ex2)
+    assert ex2.actions[1].expected_fields["_data.examination_type_code"] == "7"  # literal נשמר
+
+
 def test_apply_verify_spec_noop_without_index():
     ex = DotNetExecutableTestCase(
         test_case_id="TC-noop",
