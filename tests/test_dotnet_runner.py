@@ -238,6 +238,20 @@ def test_check_expected_fields_leaf_name_fallback():
     assert any("missing" in i for i in _check_expected_fields(value, {"_data.x.no_field": "y"}))
 
 
+def test_check_expected_fields_absent_marker():
+    """★ __ABSENT__: תרחיש 'האובייקט לא אמור להופיע ביעד'. עובר אם חסר/ריק/null, נכשל אם קיים עם ערך."""
+    # referral_practitioner חסר → __ABSENT__ עובר
+    assert _check_expected_fields({"_data": {"act_practitioner": {"id": "1"}}},
+                                  {"_data.referral_practitioner": "__ABSENT__"}) == []
+    # קיים null/ריק → עובר
+    assert _check_expected_fields({"_data": {"referral_practitioner": None}},
+                                  {"_data.referral_practitioner": "__ABSENT__"}) == []
+    # קיים עם ערך → נכשל
+    issues = _check_expected_fields({"_data": {"referral_practitioner": {"id": "x"}}},
+                                    {"_data.referral_practitioner": "__ABSENT__"})
+    assert any("referral_practitioner" in i for i in issues)
+
+
 def test_check_expected_fields_present_marker():
     """★ ערך דינמי/מוצפן → __PRESENT__ בודק נוכחות (קיים ולא-ריק), לא שוויון."""
     value = {"_data": {"parameters": [{"pdf_link": "FVbtGX...encrypted...", "member_id": "555"}]}}

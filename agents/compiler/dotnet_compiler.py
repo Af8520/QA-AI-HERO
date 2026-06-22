@@ -329,12 +329,19 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
   **הנתיב המדויק** של שדה ולוודא שהוא **קיים** — הוא **אינו** רשימת שדות לאימות. אם תכניס עשרות
   שדות (member_name/request_num/institute/practitioner/...) שהתסריט לא ביקש — הבדיקה תיכשל על ערכים
   לא רלוונטיים. **expected_fields חייב להכיל רק את השדות מצעדי ה"ודא/בדוק" של התסריט — בד"כ 1-4 שדות.**
-- ★★★ לכל צעד "ודא שדה X" / "בדוק ש-X=Y" / "ודא טרנספורמציה X" **בלבד** — הוסף את X ל-expected_fields:
-  - אם X מומר (מופיע ב-TRANSFORMATIONS) → השתמש ב**ערך המומר** לפי ה-rule (למשל M_PAT_HPV→1, gender M→"זכר").
-  - אם התסריט נותן ערך מפורש → השתמש בו.
-  - נתיב מדויק לפי TARGET_EXAMPLE, case-sensitive (עם index ל-arrays אם רלוונטי).
-- ★★★ **אל תאמת member_id / member_name / request_num / institute / practitioner / תאריכים / scc_message_id /
-  member_id_code** אלא אם התסריט ביקש זאת **מפורשות**. ה-member_id במיוחד נדרס לערך ייחודי — אסור לאמת אותו.
+- ★★★ לכל צעד "ודא שדה X" / "בדוק ש-X=Y" / "ודא טרנספורמציה X" **בלבד** — הוסף את X ל-expected_fields.
+  ★★★★ **קביעת הערך הצפוי — קריטי:**
+  1. אם X מומר ע"י **דריסה שהחלת** (קוד מהתסריט, כמו M_PAT_HPV→1, gender M→"זכר") → השתמש בערך המומר.
+  2. אם התסריט נותן ערך **מפורש** → השתמש בו.
+  3. ★ אחרת — הערך **תלוי-נתונים מ-SOURCE_SAMPLE** (חילוץ/העתקה/resolve של reference, כמו practitioner_id,
+     practitioner_name, practitioner_license, member_name, institute) → **חשב את הערך מ-SOURCE_SAMPLE עצמו**
+     (לא מ-TARGET_EXAMPLE/template! ערכי ה-template הם דוגמה ולא תואמים את ה-sample האמיתי → כשל שווא).
+     אם אינך יכול לחשב בוודאות (FHIR reference מורכב, lookup בין resources) → שים **`"__PRESENT__"`**
+     (אימות נוכחות: השדה חולץ וקיים) במקום ערך קונקרטי שגוי.
+- ★★★ **לתרחיש "השדה/האובייקט לא אמור להופיע ביעד"** (למשל "referral_practitioner לא נבנה" כשאין רופא-מפנה
+  במקור, "ת.ז חסרה → לא נבנה אובייקט") → שים **`"__ABSENT__"`** על השדה/האובייקט. ה-validator יוודא שהוא
+  **חסר/ריק** ביעד. למשל: `"_data.referral_practitioner":"__ABSENT__"`. **אל תאמת תת-שדות שלו** (הם יחסרו → כשל שווא).
+- ★★★ **אל תאמת member_id / scc_message_id / member_id_code / request_num / תאריכים** אלא אם התסריט ביקש מפורשות.
 - ★★★ **אם התסריט מבקש לאמת שדה שאינו קיים ב-TARGET_EXAMPLE** — אל תכניס אותו; רשום ב-compiler_notes.
   אם אין צעדי "ודא" כלל — השאר `expected_fields` ריק והסתמך על הקורלציה.
 - ★★★ **אל תאמת `entity_id` / ה-KEY / `entity_type` כשדה ערך** — אלה ה-**correlation** שכבר מאמת

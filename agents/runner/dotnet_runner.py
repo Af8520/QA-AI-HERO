@@ -1390,6 +1390,9 @@ def _resolve_field_path(obj: Any, path: str) -> Any:
 # ★ marker גורף לאימות *נוכחות* (לא שוויון) — לשדות דינמיים: ערך מוצפן/RSA/GUID/timestamp
 # שאי-אפשר לחזות. ה-compiler שם marker כזה כ-value; ה-validator בודק שהשדה קיים ולא-ריק.
 _PRESENT_MARKERS = {"__PRESENT__", "__NOT_EMPTY__", "__ANY__", "__ENCRYPTED__"}
+# ★ אימות *היעדרות* — לתרחישי "השדה/האובייקט לא אמור להופיע ביעד" (למשל referral_practitioner
+# כשאין רופא-מפנה במקור). עובר אם השדה חסר/ריק/null; נכשל אם הוא קיים עם ערך.
+_ABSENT_MARKERS = {"__ABSENT__", "__NOT_PRESENT__", "__MISSING__", "__EMPTY__"}
 
 
 def _is_producer_metadata_key(k: str) -> bool:
@@ -1416,6 +1419,12 @@ def _check_expected_fields(value: Dict[str, Any], expected: Dict[str, Any]) -> L
         actual = _resolve_field_path(value, k) if "." in k else (
             value.get(k, _FIELD_MISSING) if isinstance(value, dict) else _FIELD_MISSING
         )
+        # ★ אימות היעדרות — השדה לא אמור להופיע ביעד (תרחיש "אובייקט לא נבנה")
+        if isinstance(want, str) and want in _ABSENT_MARKERS:
+            present_nonempty = actual is not _FIELD_MISSING and str(actual).strip() != "" and actual not in (None, {}, [])
+            if present_nonempty:
+                issues.append(f"{k} (אמור להיות חסר אך קיים: {actual!r})")
+            continue
         # ★ אימות נוכחות (ערך דינמי) — קיים ולא-ריק, ללא בדיקת שוויון
         if isinstance(want, str) and want in _PRESENT_MARKERS:
             if actual is _FIELD_MISSING or str(actual).strip() == "":
