@@ -231,6 +231,36 @@ def test_parse_anchored_response_applies_single_source_extraction_override():
     assert wait.expect_no_message is True
 
 
+def test_parse_anchored_response_derives_override_from_verify_codemap():
+    """★★★ הבאג מהריצה (Z_PAT_NGC/M_CYT/EXT_LAB נכשלו עם 0/0 דריסות): בתרחיש מיפוי-קוד חיובי ה-LLM
+    פלט רק verify עם ערך-יעד (expect=2) בלי override → המקור נשאר ערך-הדוגמה → הערך הצפוי לא התקבל.
+    דטרמיניסטית: reverse-map את ערך-היעד לקוד-מקור ומזריקים override (כך ה-Worker יפיק את הערך הצפוי)."""
+    idx = {
+        "by_target_path": {"_data.examination_type_code": "DiagnosticReport.category[0].coding[0].code"},
+        "by_target_leaf": {"examination_type_code": "DiagnosticReport.category[0].coding[0].code"},
+        "rules": {"_data.examination_type_code": {"kind": "code_map",
+                  "map": {"M_PAT_NGC": "2", "Z_PAT_NGC": "2", "M_CYT": "7", "EXT_LAB": "5"}}},
+        "target_paths": ["_data.examination_type_code"],
+    }
+    c = DotNetCompiler(payload_templates={"source_topic": "s", "target_topic": "t", "templates": {"create": {}}},
+                       sample_messages=[{"resourceType": "Bundle"}], transform_index=idx)
+    # ה-LLM פלט רק verify (expect=ערך-יעד), בלי overrides
+    data = {"verify": [{"target_field": "examination_type_code", "expect": "7"}]}
+    ex = c._parse_anchored_response("תרחיש חיובי – M_CYT", None, "t", data)
+    assert ex.source_overrides == {"DiagnosticReport.category[0].coding[0].code": "M_CYT"}  # נגזר → M_CYT (→7)
+
+    # דו-משמעות (2 ← M_PAT_NGC/Z_PAT_NGC): בוחרים את הקוד שבשם-התסריט
+    data2 = {"verify": [{"target_field": "examination_type_code", "expect": "2"}]}
+    ex2 = c._parse_anchored_response("תרחיש חיובי – Z_PAT_NGC", None, "t", data2)
+    assert ex2.source_overrides == {"DiagnosticReport.category[0].coding[0].code": "Z_PAT_NGC"}
+
+    # אם המקור כבר נדרס במפורש — לא דורסים שוב (override מנצח)
+    data3 = {"overrides": [{"target_field": "examination_type_code", "value": "EXT_LAB"}],
+             "verify": [{"target_field": "examination_type_code", "expect": "2"}]}
+    ex3 = c._parse_anchored_response("TC-x", None, "t", data3)
+    assert ex3.source_overrides == {"DiagnosticReport.category[0].coding[0].code": "EXT_LAB"}
+
+
 def test_parse_anchored_response_empty_positive_test_defaults_to_verify_all():
     """★ failure 1 (referral pass שקרי): תרחיש חיובי בלי overrides, בלי verify, ובלי verify_all_populated →
     assert ריק → 'pass' טריוויאלי. הגארד מחיל verify_all_populated=true (אימות אמיתי, לא מעבר בשקר)."""

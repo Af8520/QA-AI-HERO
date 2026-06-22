@@ -720,6 +720,36 @@ class DotNetCompiler:
         )
         verify_all = bool(data.get("verify_all_populated"))
         verify_list = data.get("verify") or []
+        # ★★★ גזירת override מ-verify (תיקון מרכזי): בתרחיש מיפוי-קוד חיובי ("ודא ש-Z_PAT_NGC→2") ה-LLM
+        # פולט verify עם ערך-יעד צפוי (2) אבל **שוכח להוסיף override** שמגדיר את הקוד במקור → המקור נשאר
+        # ערך-הדוגמה (M_PAT_HIST→3) → הערך הצפוי לא מתקבל. דטרמיניסטית: אם ל-verify יש ערך-יעד של code_map
+        # והמקור של אותו שדה עוד לא נדרס — reverse-map את ערך-היעד לקוד-מקור ומזריקים override. דינמי לכל code_map.
+        if not expect_no_message:
+            for v in verify_list:
+                if not isinstance(v, dict):
+                    continue
+                tf = v.get("target_field")
+                exp = v.get("expect")
+                if not tf or exp in (None, "", "auto", "compute", "present", "absent", "__PRESENT__", "__ABSENT__"):
+                    continue
+                src = _resolve_source_path(idx, tf)
+                if not src or not _is_concrete_source_path(src) or src in source_overrides:
+                    continue
+                rule = (idx.get("rules") or {}).get(_canonical_target_path(idx, tf))
+                if not (rule and rule.get("kind") == "code_map"):
+                    continue
+                cmap = rule.get("map") or {}
+                if str(exp) in cmap:                                   # exp הוא כבר קוד-מקור
+                    chosen = str(exp)
+                else:                                                  # exp הוא ערך-יעד → reverse-map לקוד-מקור
+                    srcs = [k for k, vv in cmap.items() if str(vv) == str(exp)]
+                    if not srcs:
+                        continue
+                    # אם כמה קודים ממופים לאותו ערך (M_PAT_NGC/Z_PAT_NGC→2) — בוחרים את זה שבשם-התסריט; אחרת הראשון
+                    chosen = next((c for c in srcs if c in (test_case_id or "")), srcs[0])
+                source_overrides[src] = chosen
+                notes.append(f"גזירת override מ-verify '{tf}': יעד-צפוי={exp} → קוד-מקור={chosen} "
+                             f"(ה-LLM לא הוסיף override; דטרמיניסטי)")
         # ★ גארד תרחיש-חיובי-ריק: תרחיש חיובי (לא expect_no_message) בלי overrides, בלי verify, ובלי
         # verify_all_populated → assert ריק → "pass" טריוויאלי שקרי (כמו referral שעבר בלי שנבדק). ברירת-מחדל
         # בטוחה: אמת שכל השדות הממופים מאוכלסים. אם הדוגמה חסרה את המבנה — האימות ייכשל נכון, לא יעבור בשקר.
