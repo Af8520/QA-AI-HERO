@@ -19,7 +19,7 @@ from agents.compiler.dotnet_compiler import DotNetCompiler
 from agents.payload_builder import PayloadBuilderBridge
 from agents.payload_builder.payload_builder_bridge import PayloadBuilderError
 from agents.reporter.reporter_agent import ReporterAgent
-from agents.runner.dotnet_runner import DotNetRunner
+from agents.runner.dotnet_runner import DotNetRunner, _parse_transform_rule
 from agents.validator.validator_agent import ValidatorAgent
 from config.logging_config import get_logger
 from config.settings import settings
@@ -131,8 +131,10 @@ async def run_dotnet_pipeline(session: ChatSession) -> PipelineResult:
     await emit(f"שלב 3/{TOTAL_STAGES} — מהדר {len(raw_cases)} תסריטים ל-actions...")
     # ★ מסרי-דוגמה אמיתיים מהמקור (אם היוזר העלה) → בסיס publish format-agnostic
     sample_messages = getattr(session, "sample_source_messages", None)
+    # ★ אינדקס-טרנספורמציות דטרמיניסטי (מ-PB transformations) — מיפוי שדה-לוגי→source_path + חוקים
+    transform_index = _build_transform_index(payload_templates)
     compiler = DotNetCompiler(spec_md=spec_md, payload_templates=payload_templates,
-                              sample_messages=sample_messages)
+                              sample_messages=sample_messages, transform_index=transform_index)
     # ★ key_built_from (נתיבי-מקור של ה-target KEY) → unique-id format-agnostic ב-runner
     key_built_from = _extract_key_built_from(payload_templates)
     # ★ נתיב-המקור שהופך ל-KEY/entity_id verbatim (מ-transformations) — להזרקת ה-uid לשדה ה-KEY
@@ -145,6 +147,7 @@ async def run_dotnet_pipeline(session: ChatSession) -> PipelineResult:
             ex = await compiler.compile(raw)
             ex.key_built_from = key_built_from
             ex.key_source_path = key_source_path
+            ex.transform_index = transform_index
             # ★ הגנתי: גם אם ה-compiler לא חתם source_sample (regex-only / נתיב ישן) — אם היוזר
             # העלה מסר-דוגמה, נשתמש בו כבסיס publish דטרמיניסטי ברנר (format-agnostic).
             if sample_messages and not ex.source_sample:
@@ -480,6 +483,45 @@ def _extract_key_source_path(payload_templates):
             if isinstance(spec, dict) and spec.get("target_field_path") in _KEY_TARGET_FIELDS:
                 return str(src_path)
     return None
+
+
+def _build_transform_index(payload_templates):
+    """בונה אינדקס-טרנספורמציות דטרמיניסטי מתשובת ה-Payload Builder (transformations). דינמי לכל אפיון —
+    אין שום שדה קשיח. מחזיר dict עם:
+      forward:        {source_path: {target_field_path, rule}}
+      by_target_path: {target_field_path: source_path}            (reverse מדויק)
+      by_target_leaf: {leaf(target): source_path | None על collision}
+      rules:          {target_field_path: _parse_transform_rule(rule)}
+      target_paths:   [כל ה-target_field_path]
+    None אם אין transformations שמישות (MACKAF/template) → ה-runner נשאר בהתנהגות הישנה."""
+    if not isinstance(payload_templates, dict):
+        return None
+    tfs = payload_templates.get("transformations")
+    if not isinstance(tfs, dict) or not tfs:
+        return None
+    forward, by_target_path, rules = {}, {}, {}
+    by_target_leaf: dict = {}
+    target_paths: list = []
+    for src_path, spec in tfs.items():
+        if not isinstance(spec, dict):
+            continue
+        target = spec.get("target_field_path")
+        if not isinstance(target, str) or not target.strip():
+            continue
+        src_path = str(src_path)
+        forward[src_path] = {"target_field_path": target, "rule": spec.get("rule")}
+        # reverse: target → source. על התנגשות (אותו target משני source) — שומרים את הראשון.
+        by_target_path.setdefault(target, src_path)
+        leaf = target.split(".")[-1]
+        # collision על leaf → None (לא לנחש)
+        by_target_leaf[leaf] = None if leaf in by_target_leaf and by_target_leaf[leaf] != src_path else src_path
+        rules.setdefault(target, _parse_transform_rule(spec.get("rule")))
+        if target not in target_paths:
+            target_paths.append(target)
+    if not forward:
+        return None
+    return {"forward": forward, "by_target_path": by_target_path, "by_target_leaf": by_target_leaf,
+            "rules": rules, "target_paths": target_paths}
 
 
 def _persist_payloads(session_id, payloads):

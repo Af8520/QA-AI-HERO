@@ -96,3 +96,10 @@ class DotNetExecutableTestCase(BaseModel):
     # מחושב מ-transformations של ה-Payload Builder. ה-runner מזריק לתוכו ערך ייחודי → ה-KEY ביעד ייחודי
     # לכל ריצה → קורלציה מדויקת. עדיף על member_id (שעובר טרנספורמציה ולכן ה-uid המלא לא שורד ביעד).
     key_source_path: Optional[str] = None
+    # ★ אינדקס-טרנספורמציות דטרמיניסטי (מ-Payload Builder transformations): forward/by_target_path/
+    # by_target_leaf/rules/target_paths. משמש את ה-runner למיפוי שדה-לוגי → source_path מדויק (override)
+    # ולחישוב ערכים צפויים (code_map) — כך ה-LLM לא מנחש נתיבי-FHIR. None → אין transformations (MACKAF).
+    transform_index: Optional[Dict[str, Any]] = None
+    # ★ מפרט-אימות לוגי מה-LLM: {"verify_all_populated": bool, "verify": [{"target_field","expect"}]}.
+    # ה-runner בונה ממנו expected_fields דרך ה-transform_index (לפני _apply_unique_id).
+    verify_spec: Optional[Dict[str, Any]] = None

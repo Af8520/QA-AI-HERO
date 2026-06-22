@@ -410,6 +410,42 @@ def _resolve_logical_holder(obj: Any, path: str):
     return None, None
 
 
+# ============================================================
+# ★ עיגון דטרמיניסטי של transformations — parser חוקים + מיפוי שדה-לוגי
+# ============================================================
+
+_CODE_MAP_TOKEN = re.compile(r"\s*([^=,→>]+?)\s*(?:==|=|->|→)\s*([^,]+?)\s*(?:,|$)")
+
+
+def _parse_transform_rule(rule: Any) -> Dict[str, Any]:
+    """מפענח חוק-טרנספורמציה (טקסט חופשי מה-Payload Builder) לתבנית בטוחה בלבד:
+    - code_map: 'A=1, B=2' / 'A→1' / 'A/B=1' (פיצול LHS על '/'). רק כש-RHS סקלרי קצר (לא מילים/רווחים).
+    - verbatim: 'verbatim' / 'copy as-is' / 'same'.
+    - אחרת (concatenate/strip/lookup/derived/...) → 'derived' (→ ייפול ל-__PRESENT__ באימות).
+    מחזיר {'kind': 'code_map'|'verbatim'|'derived', 'map': {<src>: <dst>} או None}."""
+    if not isinstance(rule, str) or not rule.strip():
+        return {"kind": "derived", "map": None}
+    low = rule.strip().lower()
+    if low in ("verbatim", "copy", "copy as-is", "as-is", "same", "passthrough", "pass-through"):
+        return {"kind": "verbatim", "map": None}
+    matches = _CODE_MAP_TOKEN.findall(rule)
+    cmap: Dict[str, str] = {}
+    ok = bool(matches)
+    for lhs, rhs in matches:
+        rhs = rhs.strip().strip("'\"")
+        # RHS חייב להיות סקלר קצר (מספר/קוד) — לא ביטוי עם רווחים/אופרטורים (concatenate וכו')
+        if not rhs or len(rhs) > 24 or " " in rhs or "+" in rhs or "(" in rhs:
+            ok = False
+            break
+        for token in str(lhs).split("/"):
+            token = token.strip().strip("'\"")
+            if token:
+                cmap[token] = rhs
+    if ok and cmap:
+        return {"kind": "code_map", "map": cmap}
+    return {"kind": "derived", "map": None}
+
+
 # ★ שדות שלעולם אינם בני-אימות שוויון: ה-KEY/זהות/metadata של ה-Worker (משתנים פר-ריצה/הודעה).
 _NON_ASSERTABLE_LEAVES = {"scc_message_id", "entity_id", "message_id",
                           "mac_correlation_id", "mac_transaction_id", "timestamp_sequence"}

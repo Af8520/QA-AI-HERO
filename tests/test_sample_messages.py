@@ -8,7 +8,12 @@ os.environ.setdefault("KAFKA_BOOTSTRAP_SERVERS", "")
 
 from server.routes import _parse_messages_json  # noqa: E402
 from agents.compiler.dotnet_compiler import _extract_kbf  # noqa: E402
-from pipeline.dotnet_pipeline import _extract_key_built_from, _extract_key_source_path  # noqa: E402
+from pipeline.dotnet_pipeline import (  # noqa: E402
+    _build_transform_index,
+    _extract_key_built_from,
+    _extract_key_source_path,
+)
+from agents.runner.dotnet_runner import _parse_transform_rule  # noqa: E402
 from agents.runner.dotnet_runner import _primary_id_field, _primary_id_path  # noqa: E402
 
 
@@ -129,3 +134,65 @@ def test_extract_key_source_path_explicit_field_wins():
 def test_extract_key_source_path_none():
     assert _extract_key_source_path({}) is None
     assert _extract_key_source_path({"transformations": {"x": {"target_field_path": "_data.member_name"}}}) is None
+
+
+# ============================================================
+# _parse_transform_rule — מיפויי-קוד / verbatim / derived
+# ============================================================
+
+def test_parse_transform_rule_code_map():
+    r = _parse_transform_rule("M_PAT_HPV/Z_PAT_HPV=1, M_PAT_NGC=2, M_PAT_HIST=3, M_CYT=7, EXT_LAB=5")
+    assert r["kind"] == "code_map"
+    assert r["map"]["M_PAT_HPV"] == "1" and r["map"]["Z_PAT_HPV"] == "1"   # פיצול LHS על '/'
+    assert r["map"]["M_CYT"] == "7" and r["map"]["EXT_LAB"] == "5"
+
+
+def test_parse_transform_rule_arrow_and_verbatim():
+    assert _parse_transform_rule("Abnormal→1, else 0")["kind"] == "code_map"
+    assert _parse_transform_rule("verbatim")["kind"] == "verbatim"
+    assert _parse_transform_rule("copy as-is")["kind"] == "verbatim"
+
+
+def test_parse_transform_rule_derived():
+    # ביטויים מורכבים → derived (לא code_map שקרי)
+    assert _parse_transform_rule("family + ' ' + given[0]")["kind"] == "derived"
+    assert _parse_transform_rule("strip first char (which becomes member_id_code)")["kind"] == "derived"
+    assert _parse_transform_rule("")["kind"] == "derived"
+    assert _parse_transform_rule(None)["kind"] == "derived"
+
+
+# ============================================================
+# _build_transform_index — forward / reverse / leaf / collision / rules
+# ============================================================
+
+def test_build_transform_index_basic():
+    pt = {"transformations": {
+        "DiagnosticReport.category[0].coding[0].code": {"target_field_path": "_data.examination_type_code",
+                                                        "rule": "M_PAT_HPV=1, M_CYT=7"},
+        "Patient.name": {"target_field_path": "_data.member_name", "rule": "family + given[0]"},
+        "MessageHeader.id": {"target_field_path": "_data.scc_message_id", "rule": "verbatim"},
+    }}
+    idx = _build_transform_index(pt)
+    assert idx["by_target_path"]["_data.examination_type_code"] == "DiagnosticReport.category[0].coding[0].code"
+    assert idx["by_target_leaf"]["examination_type_code"] == "DiagnosticReport.category[0].coding[0].code"
+    assert idx["rules"]["_data.examination_type_code"]["kind"] == "code_map"
+    assert idx["rules"]["_data.member_name"]["kind"] == "derived"
+    assert idx["rules"]["_data.scc_message_id"]["kind"] == "verbatim"
+    assert set(idx["target_paths"]) == {"_data.examination_type_code", "_data.member_name", "_data.scc_message_id"}
+
+
+def test_build_transform_index_leaf_collision_is_none():
+    """★ שני source שונים לאותו leaf → by_target_leaf[leaf]=None (לא לנחש)."""
+    pt = {"transformations": {
+        "A.x": {"target_field_path": "ref.practitioner_id", "rule": "v"},
+        "B.y": {"target_field_path": "act.practitioner_id", "rule": "v"},
+    }}
+    idx = _build_transform_index(pt)
+    assert idx["by_target_leaf"]["practitioner_id"] is None       # collision
+    assert idx["by_target_path"]["ref.practitioner_id"] == "A.x"  # exact עדיין עובד
+
+
+def test_build_transform_index_none_without_transformations():
+    assert _build_transform_index({}) is None
+    assert _build_transform_index({"transformations": {}}) is None
+    assert _build_transform_index(None) is None

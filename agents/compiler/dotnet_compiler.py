@@ -448,11 +448,14 @@ class DotNetCompiler:
         spec_md: Optional[str] = None,
         payload_templates: Optional[Dict[str, Any]] = None,
         sample_messages: Optional[List[Dict[str, Any]]] = None,
+        transform_index: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.spec_md = spec_md or ""
         self.payload_templates = payload_templates  # full Payload Builder response
         # ★ מסרי-דוגמה אמיתיים מהטופיק מקור (אם היוזר העלה) — בסיס publish format-agnostic
         self.sample_messages = sample_messages or []
+        # ★ אינדקס-טרנספורמציות דטרמיניסטי (פאזה 3 ישתמש בו לחוזה LLM מעוגן). None → מסלול ישן.
+        self.transform_index = transform_index
 
     @property
     def has_templates(self) -> bool:
