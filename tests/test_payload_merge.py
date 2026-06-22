@@ -136,6 +136,7 @@ async def test_compile_uses_llm_when_templates_present():
          patch("agents.compiler.dotnet_compiler._make_openai_client", return_value=mock_client):
         mock_settings.azure_openai_enabled = True
         mock_settings.AZURE_OPENAI_DEPLOYMENT = "gpt-x"
+        mock_settings.compiler_deployment = "gpt-x"
         mock_settings.KAFKA_DEFAULT_TIMEOUT_SECONDS = 30
         mock_settings.COUCHBASE_DEFAULT_TIMEOUT_SECONDS = 30
 
@@ -177,6 +178,7 @@ async def test_compile_emits_key_contains_and_nested_expected_fields():
          patch("agents.compiler.dotnet_compiler._make_openai_client", return_value=mock_client):
         mock_settings.azure_openai_enabled = True
         mock_settings.AZURE_OPENAI_DEPLOYMENT = "gpt-x"
+        mock_settings.compiler_deployment = "gpt-x"
         mock_settings.KAFKA_DEFAULT_TIMEOUT_SECONDS = 30
         mock_settings.COUCHBASE_DEFAULT_TIMEOUT_SECONDS = 30
 
@@ -207,6 +209,7 @@ async def test_compile_negative_test_marks_expect_no_message():
          patch("agents.compiler.dotnet_compiler._make_openai_client", return_value=mock_client):
         mock_settings.azure_openai_enabled = True
         mock_settings.AZURE_OPENAI_DEPLOYMENT = "gpt-x"
+        mock_settings.compiler_deployment = "gpt-x"
         mock_settings.KAFKA_DEFAULT_TIMEOUT_SECONDS = 30
         mock_settings.COUCHBASE_DEFAULT_TIMEOUT_SECONDS = 30
 
@@ -231,6 +234,7 @@ async def test_compile_falls_back_to_regex_when_templates_mode_fails():
          patch("agents.compiler.dotnet_compiler._make_openai_client", return_value=mock_client):
         mock_settings.azure_openai_enabled = True
         mock_settings.AZURE_OPENAI_DEPLOYMENT = "gpt-x"
+        mock_settings.compiler_deployment = "gpt-x"
         mock_settings.KAFKA_DEFAULT_TIMEOUT_SECONDS = 30
         mock_settings.COUCHBASE_DEFAULT_TIMEOUT_SECONDS = 30
 

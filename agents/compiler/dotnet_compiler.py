@@ -30,6 +30,34 @@ from models.dotnet_test_case import (
 log = get_logger(__name__)
 
 
+# ★ מודלי reasoning (gpt-5.x / o-series) לא תומכים ב-temperature מותאם (רק ברירת-מחדל=1).
+_REASONING_MODEL_RE = re.compile(r"(?:^|[-_/])(?:gpt-?5|o[1-4])\b", re.IGNORECASE)
+
+
+async def _chat_json(client, model: str, system_prompt: str, user_content: str):
+    """קריאת chat-completions שמחזירה JSON, **עמידה להבדלי-מודל**: למודלי gpt-5/o משמיטים temperature
+    (הם תומכים רק בברירת-מחדל); ובכל מקרה — אם הקריאה נכשלת על פרמטר לא-נתמך, חוזרים בלי temperature.
+    כך אותו קוד עובד גם ל-gpt-4.1-mini (temperature=0) וגם ל-gpt-5.4-mini (בלי temperature)."""
+    kwargs: Dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+        "response_format": {"type": "json_object"},
+    }
+    if not _REASONING_MODEL_RE.search(str(model or "")):
+        kwargs["temperature"] = 0
+    try:
+        return await client.chat.completions.create(**kwargs)
+    except Exception as e:
+        msg = str(e).lower()
+        if "temperature" in msg or "unsupported" in msg or "max_tokens" in msg:
+            kwargs.pop("temperature", None)
+            return await client.chat.completions.create(**kwargs)
+        raise
+
+
 # ============================================================
 # Regex patterns
 # ============================================================
@@ -603,15 +631,8 @@ class DotNetCompiler:
             system_prompt = SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES
 
         try:
-            resp = await client.chat.completions.create(
-                model=settings.compiler_deployment,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False, default=str)},
-                ],
-                response_format={"type": "json_object"},
-                temperature=0,
-            )
+            resp = await _chat_json(client, settings.compiler_deployment, system_prompt,
+                                    json.dumps(user_payload, ensure_ascii=False, default=str))
             content = resp.choices[0].message.content or "{}"
             data = json.loads(content)
         except Exception as e:
@@ -684,15 +705,8 @@ class DotNetCompiler:
         }
 
         try:
-            resp = await client.chat.completions.create(
-                model=settings.compiler_deployment,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT_DOTNET},
-                    {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False, default=str)},
-                ],
-                response_format={"type": "json_object"},
-                temperature=0,
-            )
+            resp = await _chat_json(client, settings.compiler_deployment, SYSTEM_PROMPT_DOTNET,
+                                    json.dumps(user_payload, ensure_ascii=False, default=str))
             content = resp.choices[0].message.content or "{}"
             data = json.loads(content)
         except Exception as e:
