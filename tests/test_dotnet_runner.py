@@ -229,13 +229,25 @@ def test_check_expected_fields_dotted_and_list():
     assert any("missing" in i for i in _check_expected_fields(value, {"root.no_such_field": "x"}))
 
 
-def test_check_expected_fields_leaf_name_fallback():
-    """★ נתיב שגוי של ה-LLM (resource_type תחת _data אבל נכתב parameters.0.resource_type) —
-    fallback גורף לפי שם-השדה האחרון מוצא אותו בכל מקום ב-tree."""
-    value = {"_data": {"resource_type": "parameters", "parameters": [{"member_id": "555"}]}}
-    assert _check_expected_fields(value, {"_data.parameters.0.resource_type": "parameters"}) == []
+def test_check_expected_fields_parent_leaf_fallback():
+    """★ fallback סלחני-אך-בטוח: סיומת parent.leaf בעומק שונה נפתרת (סלחנות לטעות-נתיב), אבל
+    **בלי חציית-אחים** — נתיב תחת parent שלא קיים לא נפתר לאח עם אותו leaf (מונע false-pass)."""
+    # depth tolerance: ה-LLM כתב _data.member_details.0.gender אבל זה תחת _data.x — parent.leaf מוצא
+    val = {"_data": {"x": {"member_details": [{"gender": "זכר"}]}}}
+    assert _check_expected_fields(val, {"_data.member_details.0.gender": "זכר"}) == []
     # שם-שדה שלא קיים בשום מקום → missing
-    assert any("missing" in i for i in _check_expected_fields(value, {"_data.x.no_field": "y"}))
+    assert any("missing" in i for i in _check_expected_fields(val, {"_data.x.no_field": "y"}))
+
+
+def test_check_expected_fields_no_cross_sibling_resolution():
+    """★★★ הבאג מ-TC20: referral_practitioner.practitioner_id לא יפתר ל-act_practitioner.practitioner_id
+    (false-pass). אם ה-parent (referral_practitioner) חסר → השדה חסר, גם אם ה-leaf קיים אצל אח."""
+    val = {"_data": {"act_practitioner": {"practitioner_id": "051756047"}}}
+    # __PRESENT__ על referral שאינו קיים → נכשל (לא חוצה ל-act)
+    assert any("referral_practitioner" in i for i in
+               _check_expected_fields(val, {"_data.referral_practitioner.practitioner_id": "__PRESENT__"}))
+    # אבל act_practitioner.practitioner_id (קיים) → עובר
+    assert _check_expected_fields(val, {"_data.act_practitioner.practitioner_id": "051756047"}) == []
 
 
 def test_check_expected_fields_absent_marker():

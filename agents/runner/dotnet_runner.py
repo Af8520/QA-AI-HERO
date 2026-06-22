@@ -489,8 +489,12 @@ class DotNetRunner:
                 if action.key and token in action.key:
                     action.key = action.key.replace(token, uid_source)
             elif isinstance(action, KafkaWaitAction):
-                action.match = _substitute_token(action.match, token, uid_target)
-                action.expected_fields = _substitute_token(action.expected_fields, token, uid_target)
+                action.match = _substitute_token(action.match, token, uid_target)  # legacy MACKAF (member_id במ-match)
+                # ★ expected: אם ה-LLM השאיר __UNIQUE_ID__ ב-assert (טעות — למשל ב-practitioner_id) →
+                # אל תאמת את ה-uid של ה-runtime (אינו הערך האמיתי). המר ל-__PRESENT__ (אימות נוכחות).
+                # שדה ה-id האמיתי (member_id) ידרס ל-uid ע"י _override_dotted_field למטה (לשם ספציפי).
+                action.expected_fields = {k: ("__PRESENT__" if isinstance(v, str) and token in v else v)
+                                          for k, v in (action.expected_fields or {}).items()}
                 # ★ דריסת ה-id ב-match/expected רק לשם ספציפי — לשם גנרי (value/code) מסתמכים על
                 # value_contains בלבד (לא דורסים שדה assert לגיטימי שמסתיים ב-'value').
                 if id_name not in _GENERIC_LEAVES:
@@ -1373,23 +1377,27 @@ def _resolve_raw_path_autolist(obj: Any, path: str) -> Any:
     return cur
 
 
-def _find_by_leaf_name(obj: Any, name: str) -> Any:
-    """חיפוש גורף: מחזיר את הערך של ה-dict-key הראשון ששמו == name, בכל עומק.
-    fallback אחרון כשה-LLM שם נתיב שגוי (למשל '_data.parameters.0.resource_type' במקום
-    '_data.resource_type') — מוצא את השדה לפי שמו בלי תלות במבנה המדויק. _FIELD_MISSING אם אין."""
+def _collect_by_leaf_name(obj: Any, name: str, out: List[Any]) -> None:
+    """אוסף את *כל* הערכים של dict-keys ששמם == name, בכל עומק (לתוך out)."""
     if isinstance(obj, dict):
-        if name in obj:
-            return obj[name]
-        for v in obj.values():
-            r = _find_by_leaf_name(v, name)
-            if r is not _FIELD_MISSING:
-                return r
+        for k, v in obj.items():
+            if k == name:
+                out.append(v)
+            else:
+                _collect_by_leaf_name(v, name, out)
     elif isinstance(obj, list):
         for item in obj:
-            r = _find_by_leaf_name(item, name)
-            if r is not _FIELD_MISSING:
-                return r
-    return _FIELD_MISSING
+            _collect_by_leaf_name(item, name, out)
+
+
+def _find_by_leaf_name(obj: Any, name: str) -> Any:
+    """fallback אחרון כשה-LLM שם נתיב שגוי — מוצא שדה לפי שמו. ★ רק כשהשם **חד-משמעי** (מופע אחד
+    ב-tree): אם הוא מופיע ביותר ממקום אחד (למשל `practitioner_id` תחת referral_practitioner *וגם*
+    act_practitioner) — מחזיר _FIELD_MISSING, כדי לא לפתור 'referral_practitioner.practitioner_id'
+    בטעות לערך של act_practitioner (false-pass). _FIELD_MISSING אם אין/דו-משמעי."""
+    found: List[Any] = []
+    _collect_by_leaf_name(obj, name, found)
+    return found[0] if len(found) == 1 else _FIELD_MISSING
 
 
 def _resolve_field_path(obj: Any, path: str) -> Any:
@@ -1412,10 +1420,36 @@ def _resolve_field_path(obj: Any, path: str) -> Any:
         val = _resolve_raw_path_autolist(obj, path[len("root."):])
     if val is _FIELD_MISSING and path.startswith("headers."):
         val = _resolve_raw_path_autolist(obj, "header." + path[len("headers."):])
-    # ★ fallback גורף — חיפוש שם-השדה האחרון בכל מקום (טעות-נתיב של ה-LLM)
+    # ★ fallback — סלחנות לטעות-נתיב של ה-LLM, אבל **בלי חציית-אחים** (referral↔act):
+    #   1. סיומת parent.leaf (שני סגמנטי-שדה אחרונים) בכל מקום — דורש שה-parent (referral_practitioner)
+    #      באמת קיים. כך 'referral_practitioner.practitioner_id' לא נפתר ל-act_practitioner (false-pass).
+    #   2. רק לנתיב חד-סגמנטי — leaf בודד חד-משמעי.
     if val is _FIELD_MISSING and "." in path:
-        val = _find_by_leaf_name(obj, path.split(".")[-1])
+        fields = [s for s in path.split(".") if not s.lstrip("-").isdigit()]
+        if len(fields) >= 2:
+            val = _find_suffix_anywhere(obj, fields[-2:])
+        else:
+            val = _find_by_leaf_name(obj, fields[-1] if fields else path)
     return val
+
+
+def _find_suffix_anywhere(obj: Any, segs: List[str]) -> Any:
+    """מחפש את הערך שבו סיומת-הנתיב `segs` (שמות-שדה) נפתרת, בכל מקום ב-tree (read-only, auto-index).
+    מחזיר _FIELD_MISSING אם אין. כך 'parent.leaf' נדרש שה-parent יתקיים — מונע חציית-אחים."""
+    v = _read_by_path(obj, ".".join(segs))
+    if v is not _FIELD_MISSING:
+        return v
+    if isinstance(obj, dict):
+        for x in obj.values():
+            r = _find_suffix_anywhere(x, segs)
+            if r is not _FIELD_MISSING:
+                return r
+    elif isinstance(obj, list):
+        for x in obj:
+            r = _find_suffix_anywhere(x, segs)
+            if r is not _FIELD_MISSING:
+                return r
+    return _FIELD_MISSING
 
 
 # ★ marker גורף לאימות *נוכחות* (לא שוויון) — לשדות דינמיים: ערך מוצפן/RSA/GUID/timestamp
