@@ -168,3 +168,26 @@ def test_parse_anchored_response_unresolved_field_skipped():
     ex = c._parse_anchored_response("TC-u", None, "t", data)
     assert ex.source_overrides == {}                     # לא הוזרק כלום
     assert "nonexistent_field" in (ex.compiler_notes or "")
+
+
+def test_parse_anchored_response_reverse_maps_target_value_to_source_code():
+    """★ ה-LLM נתן את ערך-היעד (2) במקום קוד-המקור (M_PAT_NGC). reverse-map הופך אותו חזרה
+    כדי שה-Worker יזהה את הקוד. דטרמיניסטי — סופג את טעות ה-LLM."""
+    idx = {
+        "by_target_path": {"_data.examination_type_code": "DiagnosticReport.category[0].coding[0].code"},
+        "by_target_leaf": {"examination_type_code": "DiagnosticReport.category[0].coding[0].code"},
+        "rules": {"_data.examination_type_code": {"kind": "code_map",
+                                                  "map": {"M_PAT_HPV": "1", "M_PAT_NGC": "2", "M_CYT": "7"}}},
+        "target_paths": ["_data.examination_type_code"],
+    }
+    c = DotNetCompiler(payload_templates={"source_topic": "s", "target_topic": "t", "templates": {"create": {}}},
+                       sample_messages=[{"resourceType": "Bundle"}], transform_index=idx)
+    # ה-LLM נתן value="2" (ערך-יעד) במקום "M_PAT_NGC"
+    data = {"overrides": [{"target_field": "examination_type_code", "value": "2"}]}
+    ex = c._parse_anchored_response("TC-rev", None, "t", data)
+    # reverse-map: 2 → M_PAT_NGC (ה-Worker יקבל קוד תקין)
+    assert ex.source_overrides == {"DiagnosticReport.category[0].coding[0].code": "M_PAT_NGC"}
+    # ערך-מקור תקין (M_CYT) נשאר כפי-שהוא
+    data2 = {"overrides": [{"target_field": "examination_type_code", "value": "M_CYT"}]}
+    ex2 = c._parse_anchored_response("TC-ok", None, "t", data2)
+    assert ex2.source_overrides == {"DiagnosticReport.category[0].coding[0].code": "M_CYT"}

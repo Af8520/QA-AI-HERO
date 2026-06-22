@@ -652,7 +652,7 @@ class DotNetCompiler:
         """ממיר את פלט ה-LLM המעוגן (שדות-לוגיים) ל-DotNetExecutableTestCase: ממפה כל override
         ל-source_path מדויק דרך ה-transform_index (בלי ניחוש), מסנתז publish/wait, ושומר verify_spec
         ל-runner. ה-runner יבנה את ה-publish מהדוגמה + הדריסות, ואת expected_fields מ-verify_spec."""
-        from agents.runner.dotnet_runner import _resolve_source_path
+        from agents.runner.dotnet_runner import _resolve_source_path, _canonical_target_path
         pt = self.payload_templates or {}
         idx = self.transform_index or {}
         source_overrides: Dict[str, Any] = {}
@@ -665,7 +665,21 @@ class DotNetCompiler:
             if not src:
                 notes.append(f"override '{tf}' לא נפתר ל-source (לא ב-transformations/collision) — דולג")
                 continue
-            source_overrides[src] = "__REMOVE__" if ov.get("op") == "remove" else ov.get("value")
+            if ov.get("op") == "remove":
+                source_overrides[src] = "__REMOVE__"
+                continue
+            val = ov.get("value")
+            # ★ reverse-map: ה-LLM לפעמים נותן את ערך-היעד (2) במקום קוד-המקור (M_PAT_NGC). אם לשדה יש
+            # code_map והערך הוא RHS (ערך-יעד) — הופכים אותו חזרה ל-LHS (קוד-המקור), כדי שה-Worker יזהה.
+            rule = (idx.get("rules") or {}).get(_canonical_target_path(idx, tf))
+            if rule and rule.get("kind") == "code_map":
+                cmap = rule.get("map") or {}
+                if str(val) not in cmap and str(val) in {str(v) for v in cmap.values()}:
+                    src_code = next((k for k, v in cmap.items() if str(v) == str(val)), None)
+                    if src_code is not None:
+                        notes.append(f"reverse-map '{tf}': {val} → {src_code} (ה-LLM נתן ערך-יעד)")
+                        val = src_code
+            source_overrides[src] = val
 
         publish = KafkaPublishAction(topic=pt.get("source_topic") or "", value={})
         wait = KafkaWaitAction(

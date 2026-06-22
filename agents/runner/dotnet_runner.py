@@ -104,6 +104,24 @@ def _split_path_segments(path: str) -> List[str]:
     return re.findall(r"(?:[^.\[]|\[[^\]]*\])+", str(path))
 
 
+def _normalize_filter_position(path: str) -> str:
+    """מתקן פילטר שה-Payload Builder שם במיקום שגוי — על שדה-עלה סקלרי במקום על ה-list שמכיל אותו.
+    `Patient.identifier.value[system=PID]` → `Patient.identifier[system=PID].value`.
+    מזיז רק אם הסגמנט האחרון הוא leaf גנרי/סקלרי (value/code/...) עם פילטר (לא אינדקס) — אחרת משאיר."""
+    segs = _split_path_segments(path)
+    if len(segs) < 2:
+        return path
+    m = re.match(r"^([^\[]+)(\[[^\]]*\])$", segs[-1])
+    if not m:
+        return path
+    name, bracket = m.group(1), m.group(2)
+    if name not in _GENERIC_LEAVES or "=" not in bracket:   # פילטר על leaf סקלרי בלבד (לא [0])
+        return path
+    segs[-1] = name
+    segs[-2] = segs[-2] + bracket                            # מעבירים את הפילטר ל-list שלפני
+    return ".".join(segs)
+
+
 _FILTER_RE = re.compile(r"^\?\(@\.([^=!<>]+)\s*==\s*(.+)\)$")
 
 
@@ -270,6 +288,7 @@ def _override_field_smart(obj: Any, path: str, value: Any) -> bool:
        לא ב-category הראשון האקראי — Observation/ServiceRequest יכולים גם הם להחזיק category).
     2. סיומות הולכות ומתקצרות (אורך 2+, parent.leaf) בכל מקום ב-tree.
     3. fallback ל-leaf בודד — **רק** לשם ספציפי (member_id/...), לא גנרי (value/code/id)."""
+    path = _normalize_filter_position(path)      # identifier.value[system=PID] → identifier[system=PID].value
     parts = _split_path_segments(path)           # bracket-aware (לא שובר JSONPath filter)
     if not parts:
         return False
@@ -360,6 +379,7 @@ def _remove_path_anywhere(obj: Any, parts: List[str]) -> bool:
 def _remove_field_smart(obj: Any, path: str) -> bool:
     """מסיר שדה/אלמנט — ResourceType-aware + סיומת (כמו _override_field_smart, אך מחיקה).
     לתרחיש 'השמט ת"ז → לא לבנות אובייקט' (__REMOVE__ ב-source_overrides)."""
+    path = _normalize_filter_position(path)
     parts = _split_path_segments(path)
     if not parts:
         return False

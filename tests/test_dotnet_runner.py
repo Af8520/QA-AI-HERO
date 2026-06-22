@@ -826,3 +826,13 @@ def test_override_by_path_pb_filter_syntax():
                     {"system": "ICD", "version": "2", "display": "y"}]}
     assert _override_by_path(c, "coding[system=ICD,version=2].display", "Z")
     assert c["coding"][1]["display"] == "Z" and c["coding"][0]["display"] == "x"
+
+
+def test_normalize_filter_position():
+    """★ ה-PB שם פילטר על leaf סקלרי (value[system=PID]) — מעבירים ל-list שמכיל (identifier)."""
+    from agents.runner.dotnet_runner import _normalize_filter_position as nf
+    assert nf("Patient.identifier.value[system=PID]") == "Patient.identifier[system=PID].value"
+    # פילטר על ה-list עצמו → לא נוגעים
+    assert nf("PractitionerRole[code=R].practitioner.reference") == "PractitionerRole[code=R].practitioner.reference"
+    # אינדקס [0] → לא מזיזים
+    assert nf("category[0].coding[0].code") == "category[0].coding[0].code"
