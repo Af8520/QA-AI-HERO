@@ -113,6 +113,9 @@ class Settings(BaseSettings):
     AZURE_OPENAI_ENDPOINT: Optional[str] = None
     AZURE_OPENAI_KEY: Optional[str] = None
     AZURE_OPENAI_DEPLOYMENT: str = "gpt51-qa"
+    # ★ deployment ייעודי ל-compiler (".NET brain"). None → נופל ל-AZURE_OPENAI_DEPLOYMENT. מאפשר
+    # לשדרג רק את המוח (mini→חזק) למשימת פירוש-התסריט, בלי לגעת בשאר. ראה property compiler_deployment.
+    COMPILER_AZURE_OPENAI_DEPLOYMENT: Optional[str] = None
     AZURE_OPENAI_API_VERSION: str = "2024-08-01-preview"
 
     # Azure DevOps
@@ -205,6 +208,11 @@ class Settings(BaseSettings):
     @property
     def azure_openai_enabled(self) -> bool:
         return bool(self.AZURE_OPENAI_ENDPOINT and self.AZURE_OPENAI_KEY)
+
+    @property
+    def compiler_deployment(self) -> str:
+        """ה-deployment למוח (compiler) — COMPILER_AZURE_OPENAI_DEPLOYMENT אם הוגדר, אחרת ברירת-המחדל."""
+        return self.COMPILER_AZURE_OPENAI_DEPLOYMENT or self.AZURE_OPENAI_DEPLOYMENT
 
 
 settings = Settings()

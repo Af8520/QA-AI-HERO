@@ -601,7 +601,7 @@ class DotNetCompiler:
 
         try:
             resp = await client.chat.completions.create(
-                model=settings.AZURE_OPENAI_DEPLOYMENT,
+                model=settings.compiler_deployment,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False, default=str)},
@@ -682,7 +682,7 @@ class DotNetCompiler:
 
         try:
             resp = await client.chat.completions.create(
-                model=settings.AZURE_OPENAI_DEPLOYMENT,
+                model=settings.compiler_deployment,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT_DOTNET},
                     {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False, default=str)},
