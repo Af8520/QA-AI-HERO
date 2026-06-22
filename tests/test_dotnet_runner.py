@@ -500,6 +500,23 @@ def test_apply_source_sample_suffix_match_not_generic_leaf():
     assert val["entry"][1]["resource"]["type"]["coding"]["code"] == "KEEP"   # code אחר לא נגע
 
 
+def test_apply_source_sample_remove_marker():
+    """★ TC22: __REMOVE__ מסיר שדה ספציפי (ת"ז של רופא) — לא מרוקן את כל המערך. לתרחיש 'לא לבנות אובייקט'."""
+    sample = {"resourceType": "Bundle", "entry": [
+        {"resource": {"resourceType": "Practitioner",
+                      "identifier": [{"type": {"coding": [{"code": "NID"}]}, "value": "013"},
+                                     {"type": {"coding": [{"code": "LN"}]}, "value": "030"}]}}]}
+    ex = DotNetExecutableTestCase(
+        test_case_id="TC-remove",
+        source_sample=sample,
+        source_overrides={"Practitioner.identifier[?(@.type.coding.code=='NID')]": "__REMOVE__"},
+        actions=[KafkaPublishAction(topic="src", value={})],
+    )
+    assert DotNetRunner()._apply_source_sample(ex) is True
+    ids = ex.actions[0].value["entry"][0]["resource"]["identifier"]
+    assert [i.get("value") for i in ids] == ["030"]   # NID הוסר, LN נשאר (לא רוקן הכל)
+
+
 def test_apply_source_sample_noop_without_sample():
     """★ אין source_sample → no-op (False) → המסלול הישן (value מה-LLM) ללא שינוי. תאימות MACKAF."""
     ex = DotNetExecutableTestCase(

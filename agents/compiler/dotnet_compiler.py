@@ -307,6 +307,15 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
 5. צור KafkaWaitAction עם topic=TARGET_TOPIC (או CouchbaseWaitAction אם התסריט מזכיר Couchbase).
 6. אם התסריט הוא תרחיש שלילי (הערך שגוי, תאריך ישן, סינון, "אין להפיץ", "לא יגיע") —
    קבע expect_no_message=true על ה-wait. אז timeout = PASS.
+7. ★ **השמטת שדה (תרחיש "שדה חסר → אובייקט לא נבנה"):** כדי להסיר שדה מהמקור (למשל "אל תשלח ת"ז
+   לרופא המפנה") — שים ב-source_overrides את הערך **`"__REMOVE__"`** על נתיב השדה. ה-runner מסיר את
+   השדה הספציפי בלבד (לא מרוקן מערכים). **אל תרוקן `identifier: []` ידנית** — זה מוחק את כל המזהים ומשבש.
+   דוגמה: `"Practitioner[?(@.id=='referral-id')].identifier[?(@.type.coding.code=='NID')]": "__REMOVE__"`.
+   ב-wait, אמת שהאובייקט לא נבנה: `"_data.referral_practitioner": "__ABSENT__"`.
+8. ★ **"בנה אובייקט ע"י החלפת code" (למשל הפוך רופא מבצע N → מפנה R):** ב-source_overrides שנה את ה-code
+   של ה-PractitionerRole (`PractitionerRole[?(@.code.coding.code=='N')].code.coding[0].code`: "R"),
+   ואם נדרש — עדכן/הסר ערכי ה-Practitioner המשויך. (אם הדוגמה לא מכילה PractitionerRole כלל — אי-אפשר
+   לבנות; רשום ב-compiler_notes.)
 
 ★★★ זיהוי המסר שלנו ב-target (correlation) — קריטי, format-agnostic ★★★
 ה-target topic משותף — הרבה מסרים לא קשורים (verifyhub, user_login_status...). חייבים לזהות

@@ -31,6 +31,10 @@ log = get_logger(__name__)
 # כדי שה-key ב-target topic יהיה ייחודי ולא יתנגש עם מסרים של טסטים אחרים/קודמים.
 _UNIQUE_TOKEN = "__UNIQUE_ID__"
 
+# ★ markers ב-source_overrides שמסמנים **מחיקת** שדה (לא דריסה) — לתרחיש שלילי "השמט ת"ז/שדה
+# → ודא שהאובייקט לא נבנה ביעד". מסיר את השדה הספציפי בלבד (לא מרוקן מערכים שלמים).
+_REMOVE_MARKERS = {"__REMOVE__", "__DELETE__", "__OMIT__"}
+
 
 def _gen_unique_member_id() -> str:
     """ה-form ה'נקי' של member_id (ללא אפסים מובילים) — מה שה-Worker מפיק ב-target.
@@ -275,6 +279,91 @@ def _override_field_smart(obj: Any, path: str, value: Any) -> bool:
     return False
 
 
+def _remove_by_path(obj: Any, path: str) -> bool:
+    """מוחק שדה/אלמנט לפי נתיב (dotted/bracket/filter). מנווט ל-parent ומסיר את הסגמנט האחרון:
+    מפתח dict → del; אינדקס/פילטר על list → הסרת אלמנט(ים). מחזיר True אם הוסר. לתרחישי 'השמט ת"ז'."""
+    steps = _parse_steps(path)
+    if not steps:
+        return False
+    cur = obj
+    for step in steps[:-1]:                          # נווט ל-parent
+        if isinstance(step, dict):
+            (fk, fv), = step.items()
+            if isinstance(cur, dict):
+                if _filter_match(cur, fk, fv):
+                    continue
+                return False
+            if not isinstance(cur, list):
+                return False
+            cur = next((e for e in cur if _filter_match(e, fk, fv)), None)
+        elif isinstance(step, int):
+            if isinstance(cur, dict):
+                continue
+            cur = cur[step] if isinstance(cur, list) and -len(cur) <= step < len(cur) else None
+        else:
+            if isinstance(cur, list):
+                cur = cur[0] if cur else None
+            cur = cur.get(step) if isinstance(cur, dict) else None
+        if cur is None:
+            return False
+    last = steps[-1]
+    if isinstance(last, dict):                       # פילטר → הסרת אלמנטים תואמים מ-list
+        (fk, fv), = last.items()
+        if isinstance(cur, list):
+            before = len(cur)
+            cur[:] = [e for e in cur if not _filter_match(e, fk, fv)]
+            return len(cur) < before
+        return False
+    if isinstance(last, int):
+        if isinstance(cur, list) and -len(cur) <= last < len(cur):
+            del cur[last]
+            return True
+        return False
+    if isinstance(cur, list):
+        cur = cur[0] if cur else None
+    if isinstance(cur, dict) and last in cur:
+        del cur[last]
+        return True
+    return False
+
+
+def _remove_path_anywhere(obj: Any, parts: List[str]) -> bool:
+    """מסיר את המופע הראשון ב-tree שבו הנתיב היחסי `parts` נפתר."""
+    if _remove_by_path(obj, ".".join(parts)):
+        return True
+    if isinstance(obj, dict):
+        for v in obj.values():
+            if _remove_path_anywhere(v, parts):
+                return True
+    elif isinstance(obj, list):
+        for it in obj:
+            if _remove_path_anywhere(it, parts):
+                return True
+    return False
+
+
+def _remove_field_smart(obj: Any, path: str) -> bool:
+    """מסיר שדה/אלמנט — ResourceType-aware + סיומת (כמו _override_field_smart, אך מחיקה).
+    לתרחיש 'השמט ת"ז → לא לבנות אובייקט' (__REMOVE__ ב-source_overrides)."""
+    parts = _split_path_segments(path)
+    if not parts:
+        return False
+    rtype = re.sub(r"\[[^\]]*\]", "", parts[0])
+    rest = ".".join(parts[1:])
+    resources = _fhir_resources_of_type(obj, rtype) if rest else []
+    if resources:
+        for res in resources:
+            if _remove_by_path(res, rest):
+                return True
+    for i in range(len(parts) - 1):
+        sub = parts[i:]
+        if len(sub) < 2:
+            break
+        if _remove_path_anywhere(obj, sub):
+            return True
+    return False
+
+
 def _inject_source_id(value_obj: Any, id_path: Optional[str], id_name: str, uid: str) -> bool:
     """מזריק את ה-uid לשדה ה-id במסר המקור (format-agnostic, בטוח מ-leaf גנרי). id_path מ-key_built_from;
     אם אין — fallback ל-id_name (member_id/entity_id) לפי leaf, ובלבד שאינו שם גנרי."""
@@ -434,7 +523,14 @@ class DotNetRunner:
         pub.value = copy.deepcopy(sample)
         overrides = executable.source_overrides or {}
         for path, val in overrides.items():
-            if _override_field_smart(pub.value, path, val):
+            # ★ __REMOVE__ → מחיקת השדה/האלמנט (לתרחיש שלילי "השמט ת"ז → לא לבנות אובייקט"),
+            # ולא דריסה לערך ריק. מסיר רק את השדה הספציפי, לא מרוקן מערכים שלמים.
+            if isinstance(val, str) and val.strip() in _REMOVE_MARKERS:
+                if _remove_field_smart(pub.value, path):
+                    self._log("SOURCE", "info", f"השמטה {path} (הוסר מהמסר)")
+                else:
+                    self._log("SOURCE", "warn", f"השמטה {path} — השדה לא נמצא במסר-הדוגמה")
+            elif _override_field_smart(pub.value, path, val):
                 self._log("SOURCE", "info", f"דריסה {path}={val}")
             else:
                 self._log("SOURCE", "warn", f"דריסה {path}={val} — השדה לא נמצא במסר-הדוגמה")
