@@ -446,6 +446,50 @@ def _parse_transform_rule(rule: Any) -> Dict[str, Any]:
     return {"kind": "derived", "map": None}
 
 
+def _resolve_source_path(transform_index: Optional[Dict[str, Any]], ref: str) -> Optional[str]:
+    """ממפה שדה-לוגי (target_field_path מלא או leaf) ל-source_path המדויק מה-transformations.
+    by_target_path (מדויק) → by_target_leaf (None על collision) → None. **בלי ניחוש.**"""
+    if not transform_index or not ref:
+        return None
+    bp = transform_index.get("by_target_path") or {}
+    if ref in bp:
+        return bp[ref]
+    bl = transform_index.get("by_target_leaf") or {}
+    return bl.get(str(ref).split(".")[-1])
+
+
+def _canonical_target_path(transform_index: Optional[Dict[str, Any]], ref: str) -> str:
+    """מחזיר את ה-target_field_path המלא לשדה-לוגי (אם ref הוא leaf — מוצא את הנתיב המלא). אחרת ref כפי-שהוא."""
+    if not transform_index:
+        return ref
+    bp = transform_index.get("by_target_path") or {}
+    if ref in bp:
+        return ref
+    for p in bp:
+        if p.split(".")[-1] == ref:
+            return p
+    return ref
+
+
+def _compute_expected(transform_index: Optional[Dict[str, Any]], target_field: str,
+                      applied_overrides: Dict[str, Any]) -> Any:
+    """מחשב את הערך הצפוי ביעד לשדה — דטרמיניסטית, לא מ-template:
+    - rule=code_map + השדה דרסנו במקור → ממפה את ערך-הדריסה (M_PAT_HPV→1). לא-במפה → __PRESENT__.
+    - rule=verbatim + ערך-דריסה → הערך.
+    - אחרת (derived/לא-דרסנו/תלוי-דוגמה) → __PRESENT__ (אימות נוכחות, לא literal שגוי)."""
+    rules = (transform_index or {}).get("rules") or {}
+    tfp = _canonical_target_path(transform_index, target_field)
+    rule = rules.get(tfp)
+    src = _resolve_source_path(transform_index, target_field)
+    ov = (applied_overrides or {}).get(src) if src else None
+    if rule and rule.get("kind") == "code_map" and ov is not None:
+        mapped = (rule.get("map") or {}).get(str(ov))
+        return mapped if mapped is not None else "__PRESENT__"
+    if rule and rule.get("kind") == "verbatim" and ov is not None:
+        return ov
+    return "__PRESENT__"
+
+
 # ★ שדות שלעולם אינם בני-אימות שוויון: ה-KEY/זהות/metadata של ה-Worker (משתנים פר-ריצה/הודעה).
 _NON_ASSERTABLE_LEAVES = {"scc_message_id", "entity_id", "message_id",
                           "mac_correlation_id", "mac_transaction_id", "timestamp_sequence"}
@@ -574,6 +618,45 @@ class DotNetRunner:
                   f"בסיס publish ממסר-דוגמה אמיתי + {len(overrides)} דריסות מהתסריט")
         return True
 
+    def _apply_verify_spec(self, executable: DotNetExecutableTestCase) -> None:
+        """★ עיגון דטרמיניסטי של האימות: בונה expected_fields מ-verify_spec (לוגי, מה-LLM) + transform_index.
+        verify_all_populated → __PRESENT__ לכל target_paths; verify[] → ערך מחושב (code_map)/__PRESENT__/__ABSENT__/literal.
+        אחר כך _sanitize_expected_fields מסיר KEY/זהות/metadata. no-op אם אין verify_spec/transform_index."""
+        spec = executable.verify_spec
+        idx = executable.transform_index
+        if not spec or not idx:
+            return
+        waits = [a for a in executable.actions if isinstance(a, KafkaWaitAction)]
+        if not waits:
+            return
+        overrides = executable.source_overrides or {}
+        expected: Dict[str, Any] = {}
+        if spec.get("verify_all_populated"):
+            for tp in idx.get("target_paths") or []:
+                expected[tp] = "__PRESENT__"
+        for v in spec.get("verify") or []:
+            if not isinstance(v, dict):
+                continue
+            tf = v.get("target_field")
+            if not tf:
+                continue
+            key = _canonical_target_path(idx, tf)
+            exp = v.get("expect")
+            if exp in _ABSENT_MARKERS or exp == "absent":
+                expected[key] = "__ABSENT__"
+            elif exp in _PRESENT_MARKERS or exp == "present":
+                expected[key] = "__PRESENT__"
+            elif exp not in (None, "", "auto", "compute"):
+                expected[key] = exp                       # literal מהתסריט
+            else:
+                expected[key] = _compute_expected(idx, tf, overrides)
+        removed = _sanitize_expected_fields(expected, strip_member=bool(executable.source_sample))
+        n_pre = sum(1 for x in expected.values() if x == "__PRESENT__")
+        for w in waits:
+            w.expected_fields = dict(expected)
+        self._log("VERIFY", "info",
+                  f"עוגן אימות דטרמיניסטי: {len(expected)} שדות ({n_pre} נוכחות), הוסרו {len(removed)} זהות/metadata")
+
     def _apply_unique_id(self, executable: DotNetExecutableTestCase) -> Optional[str]:
         """מזריק member_id ייחודי לריצה — *באותו ערך* במסר המקור, בקורלציה וב-expected_fields,
         כך שה-Worker מפיק key ייחודי ב-target ואנחנו תופסים בדיוק את המסר שלנו (וטסט שלילי לא
@@ -688,6 +771,9 @@ class DotNetRunner:
         self._log_entries = []
         # ★ בסיס publish מ-source_sample + דריסות התסריט (דטרמיניסטי) — *לפני* ה-id, כי ה-id נדרס מעל.
         self._apply_source_sample(executable)
+        # ★ עיגון דטרמיניסטי: בונה expected_fields מ-verify_spec + transform_index (לפני ה-id, כדי
+        #   שסינון ה-id/metadata יחול). no-op אם אין verify_spec/transform_index (מסלול ישן).
+        self._apply_verify_spec(executable)
         # ★ member_id ייחודי לריצה — מחליף __UNIQUE_ID__ ב-publish+wait (key/match/expected_fields)
         self._apply_unique_id(executable)
 

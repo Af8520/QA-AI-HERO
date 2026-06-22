@@ -16,8 +16,10 @@ os.environ["COUCHBASE_CONNECTION_STRING"] = ""
 from agents.runner.dotnet_runner import (  # noqa: E402
     DotNetRunner,
     _check_expected_fields,
+    _compute_expected,
     _make_key_unique,
     _matches,
+    _resolve_source_path,
     _sanitize_expected_fields,
     _override_by_path,
     _override_field_smart,
@@ -700,3 +702,80 @@ def test_apply_unique_id_path_fallback_to_leaf_when_path_missing():
     uid = DotNetRunner()._apply_unique_id(ex)
     assert uid and uid != "777"
     assert ex.actions[0].value["entity_id"] == uid                      # נדרס דרך leaf-fallback
+
+
+# ============================================================
+# Phase 2 — deterministic resolve + expected + verify_spec
+# ============================================================
+
+_IDX = {
+    "by_target_path": {"_data.examination_type_code": "DiagnosticReport.category[0].coding[0].code",
+                       "_data.member_name": "Patient.name",
+                       "_data.scc_message_id": "MessageHeader.id"},
+    "by_target_leaf": {"examination_type_code": "DiagnosticReport.category[0].coding[0].code",
+                       "member_name": "Patient.name", "scc_message_id": "MessageHeader.id"},
+    "rules": {"_data.examination_type_code": {"kind": "code_map", "map": {"M_PAT_HPV": "1", "M_CYT": "7"}},
+              "_data.member_name": {"kind": "derived", "map": None},
+              "_data.scc_message_id": {"kind": "verbatim", "map": None}},
+    "target_paths": ["_data.examination_type_code", "_data.member_name", "_data.scc_message_id"],
+}
+
+
+def test_resolve_source_path_exact_and_leaf():
+    assert _resolve_source_path(_IDX, "_data.examination_type_code") == "DiagnosticReport.category[0].coding[0].code"
+    assert _resolve_source_path(_IDX, "examination_type_code") == "DiagnosticReport.category[0].coding[0].code"
+    assert _resolve_source_path(_IDX, "nope") is None
+    assert _resolve_source_path(None, "x") is None
+
+
+def test_compute_expected_code_map_and_present():
+    src = "DiagnosticReport.category[0].coding[0].code"
+    # code_map + override M_PAT_HPV → "1"
+    assert _compute_expected(_IDX, "_data.examination_type_code", {src: "M_PAT_HPV"}) == "1"
+    assert _compute_expected(_IDX, "examination_type_code", {src: "M_CYT"}) == "7"
+    # override value not in map → __PRESENT__ (לא literal שגוי)
+    assert _compute_expected(_IDX, "_data.examination_type_code", {src: "WEIRD"}) == "__PRESENT__"
+    # derived (member_name) → __PRESENT__ (לא ערך template)
+    assert _compute_expected(_IDX, "_data.member_name", {}) == "__PRESENT__"
+
+
+def test_apply_verify_spec_builds_expected_fields():
+    ex = DotNetExecutableTestCase(
+        test_case_id="TC-vs",
+        transform_index=_IDX,
+        source_overrides={"DiagnosticReport.category[0].coding[0].code": "M_PAT_HPV"},
+        verify_spec={"verify": [{"target_field": "examination_type_code"},
+                                {"target_field": "_data.referral_practitioner", "expect": "absent"}]},
+        actions=[KafkaPublishAction(topic="src", value={"x": 1}),
+                 KafkaWaitAction(topic="tgt", match={"entity_type": "lab"})],
+    )
+    DotNetRunner()._apply_verify_spec(ex)
+    ef = ex.actions[1].expected_fields
+    assert ef["_data.examination_type_code"] == "1"          # code_map computed (leaf→canonical path)
+    assert ef["_data.referral_practitioner"] == "__ABSENT__"  # absent marker
+
+
+def test_apply_verify_spec_all_populated_and_sanitize():
+    ex = DotNetExecutableTestCase(
+        test_case_id="TC-all",
+        transform_index=_IDX,
+        source_sample={"resourceType": "Bundle"},           # → strip_member
+        verify_spec={"verify_all_populated": True},
+        actions=[KafkaPublishAction(topic="src", value={}),
+                 KafkaWaitAction(topic="tgt", match={})],
+    )
+    DotNetRunner()._apply_verify_spec(ex)
+    ef = ex.actions[1].expected_fields
+    assert ef["_data.examination_type_code"] == "__PRESENT__"
+    assert ef["_data.member_name"] == "__PRESENT__"
+    assert "_data.scc_message_id" not in ef                  # זהות → סונן ע"י _sanitize
+
+
+def test_apply_verify_spec_noop_without_index():
+    ex = DotNetExecutableTestCase(
+        test_case_id="TC-noop",
+        verify_spec={"verify_all_populated": True},          # אבל אין transform_index
+        actions=[KafkaWaitAction(topic="tgt", match={}, expected_fields={"a": "1"})],
+    )
+    DotNetRunner()._apply_verify_spec(ex)
+    assert ex.actions[0].expected_fields == {"a": "1"}       # ללא שינוי (מסלול ישן)
