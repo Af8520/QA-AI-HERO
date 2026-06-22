@@ -812,3 +812,17 @@ def test_anchored_end_to_end_source_and_expected():
     assert val["entry"][0]["resource"]["category"][0]["coding"][0]["code"] == "OBS"
     # expected מחושב: M_PAT_HPV → 1
     assert ex.actions[1].expected_fields["_data.examination_type_code"] == "1"
+
+
+def test_override_by_path_pb_filter_syntax():
+    """★ תחביר הפילטר של ה-Payload Builder ([system=PID], multi-key [system=ICD,version=2]) —
+    נפתר כמו JSONPath, לא נחשב למפתח literal (תיקון לכשל ה-צה"ל/organ)."""
+    # single-key [system=PID]
+    p = {"identifier": [{"system": "MRN", "value": "a"}, {"system": "PID", "value": "b"}]}
+    assert _override_by_path(p, "identifier[system=PID].value", "X")
+    assert p["identifier"][1]["value"] == "X" and p["identifier"][0]["value"] == "a"
+    # multi-key [system=ICD,version=2]
+    c = {"coding": [{"system": "ICD", "version": "1", "display": "x"},
+                    {"system": "ICD", "version": "2", "display": "y"}]}
+    assert _override_by_path(c, "coding[system=ICD,version=2].display", "Z")
+    assert c["coding"][1]["display"] == "Z" and c["coding"][0]["display"] == "x"

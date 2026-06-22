@@ -35,6 +35,9 @@ _UNIQUE_TOKEN = "__UNIQUE_ID__"
 # → ודא שהאובייקט לא נבנה ביעד". מסיר את השדה הספציפי בלבד (לא מרוקן מערכים שלמים).
 _REMOVE_MARKERS = {"__REMOVE__", "__DELETE__", "__OMIT__"}
 
+# sentinel ל-default arg של _filter_match (כדי לתמוך גם ב-pair בודד וגם ב-dict רב-מפתחי)
+_SENTINEL = object()
+
 
 def _gen_unique_member_id() -> str:
     """ה-form ה'נקי' של member_id (ללא אפסים מובילים) — מה שה-Worker מפיק ב-target.
@@ -105,20 +108,28 @@ _FILTER_RE = re.compile(r"^\?\(@\.([^=!<>]+)\s*==\s*(.+)\)$")
 
 
 def _parse_steps(path: str) -> List[Any]:
-    """ממיר נתיב (dotted + bracket-index + JSONPath-filter) לרשימת steps:
-    str → מפתח dict | int → אינדקס list | dict{k:v} → פילטר (בחר אלמנט ב-list ש-el[k]==v).
-    תומך ב: a.b, a[0].b, a[?(@.system=='PID')].value, a[*] (→ auto)."""
+    """ממיר נתיב (dotted + bracket-index + filter) לרשימת steps:
+    str → מפתח dict | int → אינדקס list | dict{k:v,...} → פילטר (בחר אלמנט ב-list שכל ה-pairs מתקיימים).
+    תומך ב: a.b, a[0].b, a[?(@.system=='PID')].value (JSONPath), a[system=PID] / a[code=R,version=2]
+    (תחביר ה-Payload Builder), a[*]."""
     steps: List[Any] = []
     for tok in re.findall(r"[^.\[\]]+|\[[^\]]*\]", str(path)):
         if tok.startswith("["):
             inner = tok[1:-1].strip()
             m = _FILTER_RE.match(inner)
-            if m:
+            if m:                                                       # [?(@.system=='PID')]
                 steps.append({m.group(1).strip(): m.group(2).strip().strip("'\"")})
-            elif inner.lstrip("-").isdigit():
+            elif inner.lstrip("-").isdigit():                           # [0]
                 steps.append(int(inner))
-            elif inner in ("*", "?"):
+            elif inner in ("*", "?"):                                   # [*]
                 steps.append("*")
+            elif "=" in inner and "?(" not in inner:                    # [system=PID] / [code=R,version=2]
+                filt: Dict[str, Any] = {}
+                for pair in inner.split(","):
+                    if "=" in pair:
+                        k, val = pair.split("=", 1)
+                        filt[k.strip().lstrip("@.")] = val.strip().strip("'\"")
+                steps.append(filt or inner)
             else:
                 steps.append(inner.strip("'\""))
         elif tok:
@@ -149,12 +160,19 @@ def _read_by_path(obj: Any, path: str) -> Any:
     return cur
 
 
-def _filter_match(elem: Any, fk: str, fv: Any) -> bool:
-    """True אם האלמנט תואם את הפילטר fk==fv. תומך במפתח פשוט (system) ובמפתח מקונן (type.coding[0].code)."""
+def _filter_match(elem: Any, filt: Any, fv: Any = _SENTINEL) -> bool:
+    """True אם האלמנט תואם את הפילטר. שתי צורות קריאה:
+    - _filter_match(elem, "system", "PID")  — pair בודד.
+    - _filter_match(elem, {"system":"ICD","version":"2"})  — **כל** ה-pairs חייבים להתקיים (multi-key).
+    תומך במפתח פשוט (system) ובמפתח מקונן (type.coding.code)."""
     if not isinstance(elem, dict):
         return False
-    actual = elem.get(fk, _FIELD_MISSING) if "." not in fk and "[" not in fk else _read_by_path(elem, fk)
-    return actual is not _FIELD_MISSING and str(actual) == str(fv)
+    pairs = filt.items() if isinstance(filt, dict) else [(filt, fv)]
+    for fk, want in pairs:
+        actual = elem.get(fk, _FIELD_MISSING) if ("." not in str(fk) and "[" not in str(fk)) else _read_by_path(elem, fk)
+        if actual is _FIELD_MISSING or str(actual) != str(want):
+            return False
+    return True
 
 
 def _override_by_path(obj: Any, path: str, value: Any) -> bool:
@@ -167,15 +185,14 @@ def _override_by_path(obj: Any, path: str, value: Any) -> bool:
     cur = obj
     for i, step in enumerate(steps):
         last = i == len(steps) - 1
-        if isinstance(step, dict):                       # פילטר על list (system=='PID' וכו')
-            (fk, fv), = step.items()
+        if isinstance(step, dict):                       # פילטר על list (system=='PID', multi-key, וכו')
             if isinstance(cur, dict):                    # ★ object-vs-array: אובייקט בודד שתואם
-                if _filter_match(cur, fk, fv):
+                if _filter_match(cur, step):
                     continue
                 return False
             if not isinstance(cur, list):
                 return False
-            cur = next((e for e in cur if _filter_match(e, fk, fv)), None)
+            cur = next((e for e in cur if _filter_match(e, step)), None)
             if cur is None:
                 return False
             continue
@@ -288,14 +305,13 @@ def _remove_by_path(obj: Any, path: str) -> bool:
     cur = obj
     for step in steps[:-1]:                          # נווט ל-parent
         if isinstance(step, dict):
-            (fk, fv), = step.items()
             if isinstance(cur, dict):
-                if _filter_match(cur, fk, fv):
+                if _filter_match(cur, step):
                     continue
                 return False
             if not isinstance(cur, list):
                 return False
-            cur = next((e for e in cur if _filter_match(e, fk, fv)), None)
+            cur = next((e for e in cur if _filter_match(e, step)), None)
         elif isinstance(step, int):
             if isinstance(cur, dict):
                 continue
@@ -308,10 +324,9 @@ def _remove_by_path(obj: Any, path: str) -> bool:
             return False
     last = steps[-1]
     if isinstance(last, dict):                       # פילטר → הסרת אלמנטים תואמים מ-list
-        (fk, fv), = last.items()
         if isinstance(cur, list):
             before = len(cur)
-            cur[:] = [e for e in cur if not _filter_match(e, fk, fv)]
+            cur[:] = [e for e in cur if not _filter_match(e, last)]
             return len(cur) < before
         return False
     if isinstance(last, int):
@@ -634,6 +649,7 @@ class DotNetRunner:
         if spec.get("verify_all_populated"):
             for tp in idx.get("target_paths") or []:
                 expected[tp] = "__PRESENT__"
+        skipped: List[str] = []
         for v in spec.get("verify") or []:
             if not isinstance(v, dict):
                 continue
@@ -642,6 +658,16 @@ class DotNetRunner:
                 continue
             key = _canonical_target_path(idx, tf)
             exp = v.get("expect")
+            explicit = (exp in _ABSENT_MARKERS or exp == "absent"
+                        or (exp not in (None, "", "auto", "compute", "present") and exp not in _PRESENT_MARKERS))
+            # ★ דילוג על שדה לא-פתיר (leaf בודד לא-מוכר/דו-משמעי, כמו practitioner_id שקיים גם ב-act וגם
+            #   ב-referral) — כדי לא לייצר כשל-שווא. רק לבדיקת נוכחות/חישוב; absent/literal מפורש נשמר.
+            bp = idx.get("by_target_path") or {}
+            bl = idx.get("by_target_leaf") or {}
+            resolvable = key in bp or "." in str(key) or bool(bl.get(str(key)))
+            if not explicit and not resolvable:
+                skipped.append(str(tf))
+                continue
             if exp in _ABSENT_MARKERS or exp == "absent":
                 expected[key] = "__ABSENT__"
             elif exp in _PRESENT_MARKERS or exp == "present":
@@ -651,6 +677,10 @@ class DotNetRunner:
             else:
                 expected[key] = _compute_expected(idx, tf, overrides)
         removed = _sanitize_expected_fields(expected, strip_member=bool(executable.source_sample))
+        if skipped:
+            self._log("VERIFY", "warn",
+                      f"דולגו {len(skipped)} שדות-אימות לא-פתירים (לא ב-transformations / leaf דו-משמעי): "
+                      f"{', '.join(skipped)} — אמת את האובייקט המלא במקום (למשל act_practitioner).")
         n_pre = sum(1 for x in expected.values() if x == "__PRESENT__")
         for w in waits:
             w.expected_fields = dict(expected)
