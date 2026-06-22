@@ -270,13 +270,24 @@ def _override_path_anywhere(obj: Any, parts: List[str], value: Any) -> bool:
 
 
 def _fhir_resources_of_type(bundle: Any, rtype: str) -> List[Dict[str, Any]]:
-    """מחזיר את כל ה-resources ב-Bundle.entry[].resource עם resourceType==rtype (FHIR). [] אם אין."""
+    """מחזיר את כל ה-dicts עם resourceType==rtype **בכל מקום** במבנה (FHIR) — רקורסיבי, לא רק
+    ב-Bundle.entry[].resource ברמה העליונה. ★ קריטי: מסר Kafka/REST-Proxy עוטף לרוב את ה-Bundle
+    ({'value': <bundle>} / payload / records[...]); חיפוש רק ברמה העליונה היה מחמיץ את ה-resource
+    ואז ה-suffix-fallback היה כותב ל-resource הראשון התואם (Observation גם הוא בעל category!) במקום
+    ל-DiagnosticReport — והערך נשאר M_PAT_HIST. רקורסיה מבטיחה שה-override נוחת ב-resource הנכון."""
     out: List[Dict[str, Any]] = []
-    if isinstance(bundle, dict) and isinstance(bundle.get("entry"), list):
-        for e in bundle["entry"]:
-            res = e.get("resource") if isinstance(e, dict) else None
-            if isinstance(res, dict) and res.get("resourceType") == rtype:
-                out.append(res)
+
+    def walk(o: Any) -> None:
+        if isinstance(o, dict):
+            if o.get("resourceType") == rtype:
+                out.append(o)
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for it in o:
+                walk(it)
+
+    walk(bundle)
     return out
 
 
@@ -637,20 +648,34 @@ class DotNetRunner:
             return False
         pub.value = copy.deepcopy(sample)
         overrides = executable.source_overrides or {}
+        # ★ אימות-החלה: משווים את המסר *לפני ואחרי* כל דריסה. הפונקציה יכולה להחזיר True בלי לשנות כלום
+        # (למשל write ל-leaf שלא קיים, או value שכבר שווה) — מה ש*נראה* כהצלחה אך משאיר את הערך המקורי.
+        # זה היה הבאג הסמוי: ה-source_path מהטרנספורמציות לא תאם את מבנה מסר-הדוגמה → הערך נשאר M_PAT_HIST.
+        failed: List[str] = []
         for path, val in overrides.items():
+            before = json.dumps(pub.value, ensure_ascii=False, sort_keys=True, default=str)
             # ★ __REMOVE__ → מחיקת השדה/האלמנט (לתרחיש שלילי "השמט ת"ז → לא לבנות אובייקט"),
             # ולא דריסה לערך ריק. מסיר רק את השדה הספציפי, לא מרוקן מערכים שלמים.
-            if isinstance(val, str) and val.strip() in _REMOVE_MARKERS:
-                if _remove_field_smart(pub.value, path):
-                    self._log("SOURCE", "info", f"השמטה {path} (הוסר מהמסר)")
-                else:
-                    self._log("SOURCE", "warn", f"השמטה {path} — השדה לא נמצא במסר-הדוגמה")
-            elif _override_field_smart(pub.value, path, val):
-                self._log("SOURCE", "info", f"דריסה {path}={val}")
+            is_remove = isinstance(val, str) and val.strip() in _REMOVE_MARKERS
+            ok = _remove_field_smart(pub.value, path) if is_remove else _override_field_smart(pub.value, path, val)
+            changed = json.dumps(pub.value, ensure_ascii=False, sort_keys=True, default=str) != before
+            verb = "השמטה" if is_remove else f"דריסה ={val}"
+            if ok and changed:
+                self._log("SOURCE", "info", f"{verb} {path} ✓")
+            elif ok and not changed:
+                self._log("SOURCE", "warn",
+                          f"{verb} {path} — דווח הצלחה אך המסר לא השתנה (הערך כבר היה זהה, או נכתב למקום ריק)")
             else:
-                self._log("SOURCE", "warn", f"דריסה {path}={val} — השדה לא נמצא במסר-הדוגמה")
-        self._log("SOURCE", "success",
-                  f"בסיס publish ממסר-דוגמה אמיתי + {len(overrides)} דריסות מהתסריט")
+                failed.append(path)
+                self._log("SOURCE", "error",
+                          f"{verb} {path} — ❌ השדה לא נמצא במסר-הדוגמה! הערך המקורי נשאר. "
+                          f"ה-source_path בטרנספורמציות אינו תואם את מבנה המסר שהעלית.")
+        if failed:
+            self._log("SOURCE", "error",
+                      f"⚠ {len(failed)}/{len(overrides)} דריסות לא הוחלו (המסר נשלח עם הערכים המקוריים) — "
+                      f"התרחיש ייכשל. נתיבים: {', '.join(failed)}")
+        self._log("SOURCE", "success" if not failed else "warn",
+                  f"בסיס publish ממסר-דוגמה אמיתי + {len(overrides) - len(failed)}/{len(overrides)} דריסות הוחלו")
         return True
 
     def _apply_verify_spec(self, executable: DotNetExecutableTestCase) -> None:

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 
 import pytest
@@ -411,6 +412,28 @@ def test_override_field_smart_resourcetype_aware_picks_right_resource():
     assert bundle["entry"][1]["resource"]["category"][0]["coding"][0]["code"] == "M_PAT_HPV"  # ה-DiagnosticReport
     assert bundle["entry"][0]["resource"]["category"][0]["coding"][0]["code"] == "OBS"        # ה-decoy לא נגע
     assert bundle["entry"][1]["resource"]["code"]["coding"][0]["code"] == "other"             # שדה אחר לא נגע
+
+
+def test_override_field_smart_finds_resource_in_wrapped_bundle():
+    """★★★ הבאג האמיתי מהריצה (M_PAT_HIST נשאר): מסר Kafka/REST-Proxy עוטף את ה-Bundle
+    ({'value': <bundle>}). חיפוש resource רק ברמה העליונה החמיץ את ה-DiagnosticReport → ה-suffix-fallback
+    כתב ל-Observation.category (decoy) וה-DiagnosticReport נשאר M_PAT_HIST → ה-Worker קרא 3 במקום הקוד החדש.
+    הפתרון: _fhir_resources_of_type רקורסיבי → מוצא את ה-resource גם כשעטוף ומחיל שם."""
+    inner = {"resourceType": "Bundle", "entry": [
+        {"resource": {"resourceType": "Observation", "category": [{"coding": [{"code": "OBSCAT"}]}]}},
+        {"resource": {"resourceType": "DiagnosticReport",
+                      "category": [{"coding": [{"system": "ICD", "code": "M_PAT_HIST"}]}]}},
+        {"resource": {"resourceType": "Patient", "identifier": [{"system": "PID", "value": "0999735863"}]}},
+    ]}
+    for wrap, get in [({"value": copy.deepcopy(inner)}, lambda m: m["value"]),
+                      ({"records": [{"value": copy.deepcopy(inner)}]}, lambda m: m["records"][0]["value"])]:
+        assert _override_field_smart(wrap, "DiagnosticReport.category[0].coding[0].code", "M_PAT_NGC")
+        assert _override_field_smart(wrap, "Patient.identifier.value[system=PID]", "299999999")
+        b = get(wrap)
+        res = {e["resource"]["resourceType"]: e["resource"] for e in b["entry"]}
+        assert res["DiagnosticReport"]["category"][0]["coding"][0]["code"] == "M_PAT_NGC"  # ה-resource הנכון
+        assert res["Observation"]["category"][0]["coding"][0]["code"] == "OBSCAT"          # decoy לא נגע
+        assert res["Patient"]["identifier"][0]["value"] == "299999999"                     # PID נדרס (צה"ל)
 
 
 def test_override_by_path_index_tolerates_object_vs_array():
