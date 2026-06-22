@@ -365,6 +365,24 @@ def test_override_field_smart_resourcetype_prefixed_bracket_path():
     assert bundle["entry"][0]["resource"]["category"][0]["coding"][0]["code"] == "M_PAT_HPV"
 
 
+def test_override_by_path_filter_targets_right_identifier():
+    """★ הבאג מ-TC09: ת"ז צה"ל צריכה ללכת ל-identifier כאשר system=PID, לא ל-MRN. הפילטר בוחר נכון."""
+    p = {"identifier": [{"system": "MRN", "value": "0004549368"},
+                        {"system": "PID", "value": "050526227"}]}
+    assert _override_by_path(p, "identifier[?(@.system=='PID')].value", "5999735863")
+    assert p["identifier"][0]["value"] == "0004549368"   # MRN לא נגע
+    assert p["identifier"][1]["value"] == "5999735863"   # PID נדרס
+
+
+def test_override_by_path_nested_filter_key_auto_index():
+    """★ פילטר עם מפתח מקונן (type.coding.code) — נפתר עם auto-index (בלי סוגריים פנימיים)."""
+    pr = {"identifier": [{"type": {"coding": [{"code": "NID"}]}, "value": "1"},
+                         {"type": {"coding": [{"code": "LN"}]}, "value": "2"}]}
+    assert _override_by_path(pr, "identifier[?(@.type.coding.code=='LN')].value", "X")
+    assert pr["identifier"][1]["value"] == "X"           # LN נדרס
+    assert pr["identifier"][0]["value"] == "1"           # NID לא נגע
+
+
 def test_override_field_smart_resourcetype_aware_picks_right_resource():
     """★★★ הבאג מהריצה: Observation עם category מופיע *לפני* DiagnosticReport. ה-ResourceType-aware
     מוודא שהדריסה פוגעת ב-DiagnosticReport.category (מה שה-Worker קורא), לא ב-category הראשון האקראי."""

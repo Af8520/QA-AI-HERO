@@ -122,25 +122,56 @@ def _parse_steps(path: str) -> List[Any]:
     return steps
 
 
+def _read_by_path(obj: Any, path: str) -> Any:
+    """קורא ערך לפי נתיב (dotted/bracket/index), read-only. _FIELD_MISSING אם לא נמצא.
+    משמש להערכת מפתח-פילטר מקונן (`type.coding[0].code`) ב-JSONPath filter."""
+    cur = obj
+    for step in _parse_steps(path):
+        if isinstance(step, dict):
+            return _FIELD_MISSING
+        if isinstance(step, int):
+            if isinstance(cur, dict):
+                continue
+            if isinstance(cur, list) and -len(cur) <= step < len(cur):
+                cur = cur[step]
+                continue
+            return _FIELD_MISSING
+        if isinstance(cur, list):
+            cur = cur[0] if cur else None
+        if isinstance(cur, dict) and step in cur:
+            cur = cur[step]
+        else:
+            return _FIELD_MISSING
+    return cur
+
+
+def _filter_match(elem: Any, fk: str, fv: Any) -> bool:
+    """True אם האלמנט תואם את הפילטר fk==fv. תומך במפתח פשוט (system) ובמפתח מקונן (type.coding[0].code)."""
+    if not isinstance(elem, dict):
+        return False
+    actual = elem.get(fk, _FIELD_MISSING) if "." not in fk and "[" not in fk else _read_by_path(elem, fk)
+    return actual is not _FIELD_MISSING and str(actual) == str(fv)
+
+
 def _override_by_path(obj: Any, path: str, value: Any) -> bool:
     """דורס שדה **לפי נתיב מלא** — תומך ב-dotted, bracket-index `[0]`, ו-JSONPath filter
-    `[?(@.system=='PID')]`. list עם סגמנט-שם (לא אינדקס/פילטר) → auto-index [0]. דורס *רק* את
-    השדה בנתיב (מונע דריסת leaf גנרי). מחזיר True אם נמצא ונדרס, False אחרת."""
+    `[?(@.system=='PID')]` (כולל מפתח מקונן). list עם סגמנט-שם (לא אינדקס/פילטר) → auto-index [0].
+    דורס *רק* את השדה בנתיב (מונע דריסת leaf גנרי). מחזיר True אם נמצא ונדרס, False אחרת."""
     steps = _parse_steps(path)
     if not steps:
         return False
     cur = obj
     for i, step in enumerate(steps):
         last = i == len(steps) - 1
-        if isinstance(step, dict):                       # פילטר על list
+        if isinstance(step, dict):                       # פילטר על list (system=='PID' וכו')
             (fk, fv), = step.items()
             if isinstance(cur, dict):                    # ★ object-vs-array: אובייקט בודד שתואם
-                if str(cur.get(fk)) == str(fv):
+                if _filter_match(cur, fk, fv):
                     continue
                 return False
             if not isinstance(cur, list):
                 return False
-            cur = next((e for e in cur if isinstance(e, dict) and str(e.get(fk)) == str(fv)), None)
+            cur = next((e for e in cur if _filter_match(e, fk, fv)), None)
             if cur is None:
                 return False
             continue

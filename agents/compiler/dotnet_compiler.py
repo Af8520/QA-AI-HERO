@@ -355,33 +355,34 @@ SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES = """אתה QA Test Compiler עבור מחל
 - ★★★ **אל תאמת metadata של ה-producer** — `header.mac_*`. אינך יודע את ערכיהם.
 - ★ **דלג על שדות דינמיים** — message_id=GUID, תאריכים, timestamps (או השתמש ב-__PRESENT__).
 
-★★★ מזהה ייחודי — קריטי לקורלציה (השתמש ב-__UNIQUE_ID__) ★★★
-ה-target topic מלא בכפילויות (אותו מסר מ-runs קודמים). כדי לזהות *בדיוק את המסר שלנו*, ה-runner מזריק
-ערך ייחודי לכל ריצה, ומחפש אותו במסר היעד (ב-KEY או בגוף). תפקידך: **לסמן היכן יושב המזהה העסקי**:
-- ★★★ זהה את שדה המזהה העסקי במקור — ה-member_id / מספר חבר / ת.ז (לרוב הסגמנט האחרון של KEY_BUILT_FROM,
-  למשל `identifier.value` ב-FHIR או `member_details.member_id` ב-MACKAF). **שים בו את הערך המילולי
-  `"__UNIQUE_ID__"`** (כ-string) ב-`source_overrides` (או ב-`value` במצב template). ה-runner יחליף אותו
-  בערך ייחודי אמיתי ויחפש אותו ב-target.
-  למשל ב-FHIR: `"source_overrides": {"<נתיב ה-identifier של החבר>": "__UNIQUE_ID__", "<נתיב הקוד>": "M_PAT_HPV"}`.
-- ★ **אל תכניס נתיבי member_id קשיחים ל-match/expected_fields** (`_data.parameters.0.member_id`) אלא אם הם
-  קיימים בפועל ב-TARGET_EXAMPLE. הקורלציה הייחודית מטופלת ע"י ה-runner דרך __UNIQUE_ID__.
-- אם אינך יודע איזה שדה הוא ה-member_id — שים `__UNIQUE_ID__` בשדה שמתאים ל-KEY_BUILT_FROM[0].
+★★★ מזהה ייחודי — אל תטפל בזה! (ה-runner עושה זאת אוטומטית) ★★★
+- ★★★★ **אל תשתמש ב-__UNIQUE_ID__ ואל תזריק ערך ייחודי בשום שדה.** ה-runner מייצר אוטומטית KEY ייחודי
+  לכל ריצה (על שדה ה-scc_message_id/entity_id) ומקשר לפיו. הזרקת token ידנית **מזיקה** — במיוחד בתרחיש
+  שלילי היא דורסת את הערך הלא-תקין שאתה בודק (למשל ת"ז צה"ל) בערך תקין → המסר יתקבל והתרחיש ייכשל.
+- ★★★ תפקידך פשוט: **החל רק את הערכים שהתסריט מבקש** (קוד הבדיקה, ערך שלילי, וכו') על השדה הנכון.
+  אל תכניס נתיבי member_id קשיחים ל-match/expected_fields אלא אם קיימים ב-TARGET_EXAMPLE.
+- ★★★ **מיקוד שדה מדויק (קריטי לתרחישי "כאשר system=X" / "כאשר type.coding.code=Y"):** השתמש בפילטר
+  JSONPath כדי לפגוע באלמנט הנכון, **לא** באינדקס מספרי (שעלול לפגוע באלמנט הלא-נכון):
+  - "ת.ז כאשר system=PID" → `Patient.identifier[?(@.system=='PID')].value` (לא `identifier[0]`/`identifier[1]`!)
+  - "רישיון כאשר type.coding.code=LN" → `Practitioner.identifier[?(@.type.coding.code=='LN')].value`
+  ★ **אל תשים סוגריים מרובעים בתוך הפילטר** (לא `type.coding[0].code`) — השתמש ב-`type.coding.code` (יפתר אוטומטית).
+  כך לא תשנה בטעות את ה-MRN במקום ה-PID.
 
 החזר JSON בלבד:
 {
   "test_case_id": "string",
-  "source_overrides": {"<member_id path>": "__UNIQUE_ID__", "<other path>": "<value>"},  // ★ רק כש-SOURCE_SAMPLE סופק
+  "source_overrides": {"<path הערך מהתסריט>": "<value>"},  // ★ רק כש-SOURCE_SAMPLE סופק; רק ערכי התסריט (ללא __UNIQUE_ID__!)
   "actions": [
-    {"kind": "kafka_publish", "topic": "<SOURCE_TOPIC>", "value": {}},  // sample → {}; template → value מלא עם דריסות (כולל __UNIQUE_ID__ בשדה ה-id)
+    {"kind": "kafka_publish", "topic": "<SOURCE_TOPIC>", "value": {}},  // sample → {}; template → value מלא עם דריסות
     {"kind": "kafka_wait", "topic": "<TARGET_TOPIC>",
      "match": {"entity_type":"<TARGET_ENTITY_TYPE אם קיים ב-TARGET_EXAMPLE>", "root.action":"<create/delete אם קיים>"},
-     "expected_fields": {"<נתיב שקיים ב-TARGET_EXAMPLE>":"<ערך מומר/צפוי>"},
+     "expected_fields": {"<נתיב שקיים ב-TARGET_EXAMPLE>":"<ערך מ-SAMPLE / __PRESENT__ / __ABSENT__>"},
      "timeout_seconds": 150, "expect_no_message": false}
   ],
   "expected_status": 200,
   "compiler_notes": "string קצר — אילו דריסות הוחלו, ואילו שדות אומתו ב-target"
 }
-(שדה ה-member_id = "__UNIQUE_ID__" → ה-runner מזריק ומקשר. key_contains מושמט. match/expected_fields — רק שדות מ-TARGET_EXAMPLE.
+(ה-runner מייצר KEY ייחודי ומקשר לבד — אל תזריק __UNIQUE_ID__. key_contains מושמט. match/expected_fields — רק שדות מ-TARGET_EXAMPLE.
 SOURCE_SAMPLE → value:{} + source_overrides; אחרת value מלא + השמט source_overrides.)
 
 כללי כתיבה חשובים:
