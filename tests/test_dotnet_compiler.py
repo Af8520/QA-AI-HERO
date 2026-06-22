@@ -113,3 +113,58 @@ def test_parse_llm_response_no_sample_leaves_fields_empty():
     assert ex is not None
     assert ex.source_sample is None
     assert ex.source_overrides == {}
+
+
+# ============================================================
+# Phase 3 — anchored contract: _parse_anchored_response
+# ============================================================
+
+_ANCHORED_IDX = {
+    "by_target_path": {"_data.examination_type_code": "DiagnosticReport.category[0].coding[0].code"},
+    "by_target_leaf": {"examination_type_code": "DiagnosticReport.category[0].coding[0].code"},
+    "rules": {"_data.examination_type_code": {"kind": "code_map", "map": {"M_PAT_HPV": "1"}}},
+    "target_paths": ["_data.examination_type_code"],
+}
+
+
+def test_parse_anchored_response_maps_overrides_to_source_paths():
+    """★ פאזה 3: ה-LLM נותן שדה לוגי (examination_type_code) + ערך; המערכת ממפה ל-source_path מדויק."""
+    sample = {"resourceType": "Bundle"}
+    c = DotNetCompiler(payload_templates={"source_topic": "src", "target_topic": "tgt",
+                                          "templates": {"create": {}}},
+                       sample_messages=[sample], transform_index=_ANCHORED_IDX)
+    data = {
+        "action_type": "create",
+        "overrides": [{"target_field": "examination_type_code", "value": "M_PAT_HPV"}],
+        "verify": [{"target_field": "examination_type_code"}],
+        "expect_no_message": False, "timeout_seconds": 150,
+    }
+    ex = c._parse_anchored_response("TC-anchored", None, "text", data)
+    assert ex is not None
+    # ה-override מופה ל-source_path המדויק (DiagnosticReport.category...), לא נשאר שם לוגי
+    assert ex.source_overrides == {"DiagnosticReport.category[0].coding[0].code": "M_PAT_HPV"}
+    assert ex.verify_spec["verify"] == [{"target_field": "examination_type_code"}]
+    assert ex.source_sample == sample
+    kinds = [a.kind for a in ex.actions]
+    assert "kafka_publish" in kinds and "kafka_wait" in kinds
+
+
+def test_parse_anchored_response_remove_and_negative():
+    c = DotNetCompiler(payload_templates={"source_topic": "s", "target_topic": "t", "templates": {"create": {}}},
+                       sample_messages=[{"resourceType": "Bundle"}], transform_index=_ANCHORED_IDX)
+    data = {"overrides": [{"target_field": "examination_type_code", "op": "remove"}],
+            "expect_no_message": True}
+    ex = c._parse_anchored_response("TC-neg", None, "t", data)
+    assert ex.source_overrides == {"DiagnosticReport.category[0].coding[0].code": "__REMOVE__"}
+    wait = next(a for a in ex.actions if a.kind == "kafka_wait")
+    assert wait.expect_no_message is True
+
+
+def test_parse_anchored_response_unresolved_field_skipped():
+    """★ שדה שאינו ב-transformations → מדולג (לא ניחוש), נרשם ב-compiler_notes."""
+    c = DotNetCompiler(payload_templates={"source_topic": "s", "target_topic": "t", "templates": {"create": {}}},
+                       sample_messages=[{"resourceType": "Bundle"}], transform_index=_ANCHORED_IDX)
+    data = {"overrides": [{"target_field": "nonexistent_field", "value": "x"}]}
+    ex = c._parse_anchored_response("TC-u", None, "t", data)
+    assert ex.source_overrides == {}                     # לא הוזרק כלום
+    assert "nonexistent_field" in (ex.compiler_notes or "")

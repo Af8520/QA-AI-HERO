@@ -421,6 +421,50 @@ SOURCE_SAMPLE → value:{} + source_overrides; אחרת value מלא + השמט 
 """
 
 
+# ★★★ Prompt "מעוגן" — בשימוש כשיש transform_index (חוזה source→target מה-Payload Builder).
+# ה-LLM **לא** רואה את מסר-הדוגמה, **לא** כותב נתיבי-FHIR, ו**לא** מחשב ערכים. הוא רק מפרש את התסריט
+# במונחי שדות-לוגיים. כל מיפוי-הנתיבים וחישוב-הערכים נעשה דטרמיניסטית ב-runner.
+SYSTEM_PROMPT_DOTNET_ANCHORED = """אתה QA Test Compiler (.NET, מכבי). המערכת כבר יודעת דטרמיניסטית
+איפה כל שדה יושב במקור וביעד (חוזה ה-Worker). תפקידך **רק לפרש את התסריט** למונחים לוגיים — לא לכתוב
+נתיבי-JSON/FHIR, לא לחשב ערכים מומרים, לא לשחזר את המסר.
+
+קלט:
+- TEST_CASE.text — התסריט בעברית.
+- AVAILABLE_FIELDS — רשימת שמות-השדות הלוגיים שמותר להתייחס אליהם (ה-target fields שה-Worker מפיק).
+- ACTION_TYPES — סוגי הפעולה האפשריים (create/delete/...).
+- TARGET_ENTITY_TYPE.
+
+החזר JSON בלבד במבנה הבא (שום דבר אחר):
+{
+  "test_case_id": "string",
+  "action_type": "<אחד מ-ACTION_TYPES>",
+  "verify_all_populated": false,            // true רק אם התסריט אומר "ודא שכל השדות מאוכלסים"
+  "overrides": [                            // השדות שהתסריט מבקש *לשנות במקור* (שם-שדה לוגי + הערך מהתסריט)
+    {"target_field": "<שם מ-AVAILABLE_FIELDS>", "value": "<הערך מהתסריט, כפי שהוא>"},
+    {"target_field": "<שם>", "op": "remove"}   // להשמטת שדה (תרחיש 'שדה חסר → לא לבנות אובייקט')
+  ],
+  "verify": [                               // השדות שהתסריט מבקש *לאמת ביעד*
+    {"target_field": "<שם>"},                       // ערך מחושב ע"י המערכת (מיפוי-קוד) או נוכחות
+    {"target_field": "<שם>", "expect": "absent"},   // האובייקט/שדה לא אמור להופיע
+    {"target_field": "<שם>", "expect": "<ערך literal מהתסריט>"}  // רק אם התסריט נותן ערך מפורש
+  ],
+  "expect_no_message": false,               // true לתרחיש שלילי ("לא יגיע"/"לא יופץ"/ערך לא-תקין שנדחה)
+  "timeout_seconds": 150,
+  "compiler_notes": "string קצר"
+}
+
+כללים:
+- ★ `overrides[].value` = הערך **כפי שהתסריט אומר לשלוח במקור** (למשל קוד M_PAT_HPV, ת"ז לא-תקינה).
+  **אל תמיר** (אל תכתוב 1 במקום M_PAT_HPV) — ההמרה נעשית במערכת.
+- ★ תרחיש שלילי "ערך לא-תקין" → הוסף override עם הערך הלא-תקין **+** expect_no_message=true.
+- ★ "ודא שכל השדות מאוכלסים" → verify_all_populated=true (אל תפרט שדה-שדה).
+- ★ "האובייקט X לא נבנה / לא קיים" → verify עם expect:"absent". אם התסריט גם אומר "אל תשלח את שדה Y"
+  → override עם op:"remove" על Y.
+- ★ השתמש **רק** בשמות מ-AVAILABLE_FIELDS. אם התסריט מזכיר שדה שאינו ברשימה — רשום ב-compiler_notes ודלג.
+- אל תכתוב נתיבים, אינדקסים, או מבני-JSON. שמות לוגיים בלבד. JSON תקני בלבד.
+"""
+
+
 def _extract_kbf(pt: Dict[str, Any]) -> Optional[List[str]]:
     """מחלץ key_built_from מתשובת ה-Payload Builder (top-level או target_templates[*])."""
     if not isinstance(pt, dict):
@@ -522,27 +566,44 @@ class DotNetCompiler:
             return None
 
         pt = self.payload_templates or {}
-        user_payload = {
-            "TEST_CASE": {"id": test_case_id, "ado_id": ado_id, "text": text},
-            "SOURCE_TOPIC": pt.get("source_topic"),
-            "TARGET_TOPIC": pt.get("target_topic"),
-            "PAYLOAD_TEMPLATES": pt.get("templates") or {},
-            "FIELD_CATALOG": pt.get("field_catalog") or {},
-            # ★ מבנה ה-target (אם ה-Payload Builder מספק) — לזיהוי שדה ה-KEY ושדות מומרים
-            "TARGET_ENTITY_TYPE": pt.get("target_entity_type"),
-            "TARGET_EXAMPLE": pt.get("target_example") or pt.get("target_templates"),
-            "TRANSFORMATIONS": pt.get("transformations"),
-            # ★ מסר-דוגמה אמיתי מהמקור (אם היוזר העלה) — בסיס ה-publish כפי-שהוא (format-agnostic)
-            "SOURCE_SAMPLE": (self.sample_messages[0] if self.sample_messages else None),
-            "SOURCE_SAMPLES_COUNT": len(self.sample_messages),
-            "KEY_BUILT_FROM": _extract_kbf(pt),
-        }
+        # ★★★ מסלול מעוגן: יש transform_index (+ מסר-דוגמה) → ה-LLM עובד בשדות-לוגיים בלבד, המערכת
+        # ממפה דטרמיניסטית. prompt רזה, בלי ה-sample (חוסך 14KB ומונע ניחושי-נתיב/חישוב-ערכים).
+        anchored = bool(self.transform_index and self.sample_messages)
+        if anchored:
+            idx = self.transform_index
+            available = list(dict.fromkeys(                       # target paths + leaves, dedup
+                list(idx.get("by_target_path") or {}) +
+                [k for k, v in (idx.get("by_target_leaf") or {}).items() if v]))
+            user_payload = {
+                "TEST_CASE": {"id": test_case_id, "ado_id": ado_id, "text": text},
+                "TARGET_ENTITY_TYPE": pt.get("target_entity_type"),
+                "ACTION_TYPES": list((pt.get("templates") or {}).keys()) or ["create"],
+                "AVAILABLE_FIELDS": available,
+            }
+            system_prompt = SYSTEM_PROMPT_DOTNET_ANCHORED
+        else:
+            user_payload = {
+                "TEST_CASE": {"id": test_case_id, "ado_id": ado_id, "text": text},
+                "SOURCE_TOPIC": pt.get("source_topic"),
+                "TARGET_TOPIC": pt.get("target_topic"),
+                "PAYLOAD_TEMPLATES": pt.get("templates") or {},
+                "FIELD_CATALOG": pt.get("field_catalog") or {},
+                # ★ מבנה ה-target (אם ה-Payload Builder מספק) — לזיהוי שדה ה-KEY ושדות מומרים
+                "TARGET_ENTITY_TYPE": pt.get("target_entity_type"),
+                "TARGET_EXAMPLE": pt.get("target_example") or pt.get("target_templates"),
+                "TRANSFORMATIONS": pt.get("transformations"),
+                # ★ מסר-דוגמה אמיתי מהמקור (אם היוזר העלה) — בסיס ה-publish כפי-שהוא (format-agnostic)
+                "SOURCE_SAMPLE": (self.sample_messages[0] if self.sample_messages else None),
+                "SOURCE_SAMPLES_COUNT": len(self.sample_messages),
+                "KEY_BUILT_FROM": _extract_kbf(pt),
+            }
+            system_prompt = SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES
 
         try:
             resp = await client.chat.completions.create(
                 model=settings.AZURE_OPENAI_DEPLOYMENT,
                 messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False, default=str)},
                 ],
                 response_format={"type": "json_object"},
@@ -554,11 +615,53 @@ class DotNetCompiler:
             log.warning("dotnet_compiler_templates_llm_failed", error=str(e), tc=test_case_id)
             return None
 
+        if anchored:
+            return self._parse_anchored_response(test_case_id, ado_id, text, data)
+
         # ★ Post-process: מסנן placeholders שה-LLM החזיר בכל מקרה (גם בניגוד להוראות).
         # יש LLMs שמתעקשים להחזיר "MISSING - ..." או דומה. מסירים את אלה לפני שליחה ל-Kafka.
         _strip_placeholders(data)
 
         return self._parse_llm_response(test_case_id, ado_id, text, data, source_label="templates")
+
+    def _parse_anchored_response(self, test_case_id, ado_id, text, data) -> Optional[DotNetExecutableTestCase]:
+        """ממיר את פלט ה-LLM המעוגן (שדות-לוגיים) ל-DotNetExecutableTestCase: ממפה כל override
+        ל-source_path מדויק דרך ה-transform_index (בלי ניחוש), מסנתז publish/wait, ושומר verify_spec
+        ל-runner. ה-runner יבנה את ה-publish מהדוגמה + הדריסות, ואת expected_fields מ-verify_spec."""
+        from agents.runner.dotnet_runner import _resolve_source_path
+        pt = self.payload_templates or {}
+        idx = self.transform_index or {}
+        source_overrides: Dict[str, Any] = {}
+        notes = [data.get("compiler_notes") or ""]
+        for ov in (data.get("overrides") or []):
+            if not isinstance(ov, dict):
+                continue
+            tf = ov.get("target_field")
+            src = _resolve_source_path(idx, tf) if tf else None
+            if not src:
+                notes.append(f"override '{tf}' לא נפתר ל-source (לא ב-transformations/collision) — דולג")
+                continue
+            source_overrides[src] = "__REMOVE__" if ov.get("op") == "remove" else ov.get("value")
+
+        publish = KafkaPublishAction(topic=pt.get("source_topic") or "", value={})
+        wait = KafkaWaitAction(
+            topic=pt.get("target_topic") or "",
+            timeout_seconds=int(data.get("timeout_seconds") or 150),
+            expect_no_message=bool(data.get("expect_no_message")),
+        )
+        ex = DotNetExecutableTestCase(
+            test_case_id=test_case_id,
+            ado_test_case_id=ado_id,
+            actions=[publish, wait],
+            source_text=text,
+            compiler_notes=" | ".join(n for n in notes if n) or "anchored",
+        )
+        ex.source_overrides = source_overrides
+        ex.verify_spec = {"verify_all_populated": bool(data.get("verify_all_populated")),
+                          "verify": data.get("verify") or []}
+        if self.sample_messages:
+            ex.source_sample = self.sample_messages[0]
+        return ex
 
     async def _compile_via_llm(
         self,

@@ -779,3 +779,36 @@ def test_apply_verify_spec_noop_without_index():
     )
     DotNetRunner()._apply_verify_spec(ex)
     assert ex.actions[0].expected_fields == {"a": "1"}       # ללא שינוי (מסלול ישן)
+
+
+def test_anchored_end_to_end_source_and_expected():
+    """★★★ אינטגרציה פאזה 1-3: override ממופה ל-source_path מדויק (DiagnosticReport, לא Observation),
+    ו-expected מחושב דטרמיניסטית (M_PAT_HPV→1). מדמה את פלט ה-compiler המעוגן דרך ה-runner."""
+    idx = {
+        "by_target_path": {"_data.examination_type_code": "DiagnosticReport.category[0].coding[0].code"},
+        "by_target_leaf": {"examination_type_code": "DiagnosticReport.category[0].coding[0].code"},
+        "rules": {"_data.examination_type_code": {"kind": "code_map", "map": {"M_PAT_HPV": "1", "M_CYT": "7"}}},
+        "target_paths": ["_data.examination_type_code"],
+    }
+    sample = {"resourceType": "Bundle", "entry": [
+        {"resource": {"resourceType": "Observation", "category": [{"coding": [{"code": "OBS"}]}]}},   # decoy
+        {"resource": {"resourceType": "DiagnosticReport", "category": [{"coding": [{"code": "M_PAT_HIST"}]}]}},
+    ]}
+    ex = DotNetExecutableTestCase(
+        test_case_id="TC-e2e",
+        transform_index=idx,
+        source_sample=sample,
+        source_overrides={"DiagnosticReport.category[0].coding[0].code": "M_PAT_HPV"},
+        verify_spec={"verify": [{"target_field": "examination_type_code"}]},
+        actions=[KafkaPublishAction(topic="src", value={}),
+                 KafkaWaitAction(topic="tgt", match={})],
+    )
+    r = DotNetRunner()
+    r._apply_source_sample(ex)
+    r._apply_verify_spec(ex)
+    val = ex.actions[0].value
+    # ה-code נחת ב-DiagnosticReport הנכון, ה-Observation (decoy) לא נגע
+    assert val["entry"][1]["resource"]["category"][0]["coding"][0]["code"] == "M_PAT_HPV"
+    assert val["entry"][0]["resource"]["category"][0]["coding"][0]["code"] == "OBS"
+    # expected מחושב: M_PAT_HPV → 1
+    assert ex.actions[1].expected_fields["_data.examination_type_code"] == "1"
