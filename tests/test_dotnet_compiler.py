@@ -208,3 +208,40 @@ def test_parse_anchored_response_skips_derived_field_override():
     ex = c._parse_anchored_response("TC-derived", None, "t", data)
     assert ex.source_overrides == {}                       # לא הוזרק — נמנעה השחתה
     assert "מחושב" in (ex.compiler_notes or "") or "נגזר" in (ex.compiler_notes or "")
+
+
+def test_parse_anchored_response_applies_single_source_extraction_override():
+    """★ הממצא המכריע (צה"ל): member_id מחולץ מ-**מקור-יחיד קונקרטי** (Patient.identifier.value[system=PID]),
+    ולכן override עליו **כן** מוחל — כך מזריקים ת"ז לא-תקינה (מתחילה ב-2) לתרחיש שלילי. (שונה מ-member_name
+    ששורשר מכמה מקורות ומדולג.) זה מה שהיה שבור: ה-prompt אסר על member_id ולכן ה-PID נשאר 0."""
+    idx = {
+        "by_target_path": {"_data.member_details.member_id": "Patient.identifier.value[system=PID]"},
+        "by_target_leaf": {"member_id": "Patient.identifier.value[system=PID]"},
+        "rules": {"_data.member_details.member_id": {"kind": "derived", "map": None}},
+        "target_paths": ["_data.member_details.member_id"],
+    }
+    c = DotNetCompiler(payload_templates={"source_topic": "s", "target_topic": "t", "templates": {"create": {}}},
+                       sample_messages=[{"resourceType": "Bundle"}], transform_index=idx)
+    data = {"overrides": [{"target_field": "member_id", "value": "299999999"}],
+            "expect_no_message": True}
+    ex = c._parse_anchored_response("TC-tzahal", None, "t", data)
+    # ה-override מוחל על המקור הקונקרטי (לא מדולג) → ה-Worker יקבל ת"ז לא-תקינה → ידחה → NO-MESSAGE
+    assert ex.source_overrides == {"Patient.identifier.value[system=PID]": "299999999"}
+    wait = next(a for a in ex.actions if a.kind == "kafka_wait")
+    assert wait.expect_no_message is True
+
+
+def test_parse_anchored_response_empty_positive_test_defaults_to_verify_all():
+    """★ failure 1 (referral pass שקרי): תרחיש חיובי בלי overrides, בלי verify, ובלי verify_all_populated →
+    assert ריק → 'pass' טריוויאלי. הגארד מחיל verify_all_populated=true (אימות אמיתי, לא מעבר בשקר)."""
+    c = DotNetCompiler(payload_templates={"source_topic": "s", "target_topic": "t", "templates": {"create": {}}},
+                       sample_messages=[{"resourceType": "Bundle"}], transform_index=_ANCHORED_IDX)
+    data = {"action_type": "create"}        # אין overrides/verify/verify_all_populated, לא שלילי
+    ex = c._parse_anchored_response("TC-empty-pos", None, "t", data)
+    assert ex.verify_spec["verify_all_populated"] is True
+    assert "verify_all_populated" in (ex.compiler_notes or "")
+
+    # ביקורת: תרחיש שלילי ריק (expect_no_message) **לא** מקבל verify_all (אין מה לאמת — מצפים לאי-הגעה)
+    data_neg = {"expect_no_message": True}
+    ex_neg = c._parse_anchored_response("TC-empty-neg", None, "t", data_neg)
+    assert ex_neg.verify_spec["verify_all_populated"] is False
