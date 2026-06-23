@@ -795,10 +795,10 @@ def test_apply_source_sample_set_first_char_preserves_rest():
     assert pat["identifier"][0]["value"] == "2999735863"     # תו ראשון 0→2, השאר נשמר
 
 
-def test_apply_source_sample_clones_sibling_for_absent_resource():
-    """★ ה-builder: התסריט מאמת referral_practitioner (מקור PractitionerRole[code=R]) אך הדוגמה מכילה
-    רק code=N (act). משכפלים את האחות (code=N), קובעים code=R, ומוסיפים ל-Bundle — כך 'שלח רופא מפנה'
-    עובד בלי לשנות את הדוגמה. דינמי לכל סוג/פילטר."""
+def test_apply_source_sample_converts_resource_for_absent_filter():
+    """★ או/או: התסריט מאמת referral_practitioner (מקור PractitionerRole[code=R]) אך הדוגמה מכילה רק
+    code=N (act). **ממירים** את הקיים N→R (לא מוסיפים) — באפיון זה שולחים מבצע *או* מפנה, לא שניהם.
+    דינמי לכל סוג/פילטר."""
     idx = {
         "by_target_path": {"_data.referral_practitioner": "PractitionerRole[code=R].practitioner.reference"},
         "by_target_leaf": {"referral_practitioner": "PractitionerRole[code=R].practitioner.reference"},
@@ -819,9 +819,9 @@ def test_apply_source_sample_clones_sibling_for_absent_resource():
     pub = next(a for a in ex.actions if isinstance(a, KafkaPublishAction))
     roles = [e["resource"] for e in pub.value["entry"] if e["resource"]["resourceType"] == "PractitionerRole"]
     codes = sorted(r.get("code") for r in roles)
-    assert codes == ["N", "R"]                               # נבנה code=R משכפול ה-code=N
+    assert codes == ["R"]                                    # הומר N→R במקום (לא נוסף) — או/או
 
-    # ביקורת: תרחיש "השמט code=R" (remove) **לא** בונה — אסור לבנות מה שמבקשים להסיר
+    # ביקורת: תרחיש "השמט code=R" (remove) **לא** ממיר — אסור להמיר את מה שמבקשים להסיר
     ex2 = DotNetExecutableTestCase(
         test_case_id="omit", transform_index=idx,
         source_sample=copy.deepcopy(sample),
@@ -832,7 +832,7 @@ def test_apply_source_sample_clones_sibling_for_absent_resource():
     DotNetRunner()._apply_source_sample(ex2)
     pub2 = next(a for a in ex2.actions if isinstance(a, KafkaPublishAction))
     roles2 = [e["resource"] for e in pub2.value["entry"] if e["resource"]["resourceType"] == "PractitionerRole"]
-    assert sorted(r.get("code") for r in roles2) == ["N"]    # לא נבנה code=R (התסריט מבקש היעדרו)
+    assert sorted(r.get("code") for r in roles2) == ["N"]    # לא הומר (התסריט מבקש היעדר code=R)
 
 
 def test_apply_verify_spec_all_populated_and_sanitize():

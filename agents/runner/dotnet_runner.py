@@ -433,32 +433,12 @@ def _read_field_smart(obj: Any, path: str) -> Any:
     return _FIELD_MISSING
 
 
-def _append_resource_sibling(obj: Any, sibling: Dict[str, Any], clone: Dict[str, Any]) -> bool:
-    """מוסיף entry חדש ({'resource': clone}) לאותה רשימת entry שמכילה את ה-sibling (לפי זהות-אובייקט).
-    רקורסיבי — תומך ב-Bundle עטוף/מקונן. מחזיר True אם נוסף."""
-    if isinstance(obj, dict):
-        entry = obj.get("entry")
-        if isinstance(entry, list):
-            for e in entry:
-                if isinstance(e, dict) and e.get("resource") is sibling:
-                    entry.append({"resource": clone})
-                    return True
-        for v in obj.values():
-            if _append_resource_sibling(v, sibling, clone):
-                return True
-    elif isinstance(obj, list):
-        for it in obj:
-            if _append_resource_sibling(it, sibling, clone):
-                return True
-    return False
-
-
 def _ensure_filtered_resource(bundle: Any, src_path: str) -> Optional[str]:
-    """★ בונה resource שהתסריט דורש אך אינו בדוגמה: אם ל-src_path יש פילטר-resource בסגמנט הראשון
-    (PractitionerRole[code=R]) שאינו תואם אף resource — משכפל resource אחות קיים מאותו סוג (code=N),
-    מגדיר את שדות-הפילטר (code=R), ומוסיף אותו ל-Bundle. כך תסריט "שלח רופא מפנה" עובד גם כשהדוגמה מכילה
-    רק רופא מבצע. דינמי לכל סוג/פילטר — אפס hardcode. מחזיר תיאור (לוג) אם נבנה, אחרת None.
-    *לא* בונה אם אין אחות לשכפל, או אם ה-resource כבר קיים."""
+    """★ ממיר resource קיים שהתסריט דורש בצורה אחרת: אם ל-src_path יש פילטר-resource בסגמנט הראשון
+    (PractitionerRole[code=R]) שאינו תואם אף resource — **משנה את הדיסקרימינטור של resource קיים**
+    מאותו סוג (code: N→R) **במקום**, לא מוסיף חדש. באפיון זה זה או/או (רופא מבצע *או* מפנה, לא שניהם) —
+    בדיוק כמו override על כל שדה אחר. דינמי לכל סוג/פילטר — אפס hardcode. מחזיר תיאור (לוג) אם הומר, אחרת None.
+    *לא* ממיר אם אין resource קיים, או אם כבר קיים resource תואם את הפילטר."""
     parts = _split_path_segments(src_path)
     if not parts:
         return None
@@ -467,17 +447,16 @@ def _ensure_filtered_resource(bundle: Any, src_path: str) -> Optional[str]:
         return None
     rtype = re.sub(r"\[[^\]]*\]", "", parts[0])
     existing = _fhir_resources_of_type(bundle, rtype)
-    if any(_filter_match(r, flt) for r in existing):  # כבר קיים → אין מה לבנות
+    if any(_filter_match(r, flt) for r in existing):  # כבר קיים תואם → אין מה להמיר
         return None
-    if not existing:                                  # אין אחות לשכפל → לא ניתן לבנות
+    if not existing:                                  # אין resource קיים להמיר
         return None
-    clone = copy.deepcopy(existing[0])
-    for k, v in flt.items():                          # קובע את הדיסקרימינטור (code=R) על העותק
-        clone[k] = v
-    if _append_resource_sibling(bundle, existing[0], clone):
-        flt_desc = ",".join(f"{k}={v}" for k, v in flt.items())
-        return f"{rtype}[{flt_desc}]"
-    return None
+    target = existing[0]
+    old = ",".join(f"{k}={target.get(k)}" for k in flt)
+    for k, v in flt.items():                          # מחליף את הדיסקרימינטור in-place (code: N→R)
+        target[k] = v
+    flt_desc = ",".join(f"{k}={v}" for k, v in flt.items())
+    return f"{rtype}[{old}]→[{flt_desc}]"
 
 
 def _remove_by_path(obj: Any, path: str) -> bool:
@@ -802,9 +781,9 @@ class DotNetRunner:
             return False
         pub.value = copy.deepcopy(sample)
         overrides = executable.source_overrides or {}
-        # ★★ בניית resource חסר ע"י שכפול-אחות: אם התסריט דורש resource עם פילטר (PractitionerRole[code=R])
-        # שאינו בדוגמה — משכפלים אחות (code=N) וקובעים את הדיסקרימינטור. דורשים: overrides שאינם מחיקה +
-        # verify שאינו absent (אלה התסריטים ש"שולחים" את ה-resource). דינמי לכל סוג/פילטר.
+        # ★★ המרת resource: אם התסריט דורש resource עם פילטר (PractitionerRole[code=R]) שאינו בדוגמה —
+        # **משנים את הדיסקרימינטור של הקיים** (code: N→R) במקום, כי באפיון זה זה או/או. דורשים: overrides
+        # שאינם מחיקה + verify שאינו absent (התסריטים ש"שולחים" את ה-resource). דינמי לכל סוג/פילטר.
         idx = executable.transform_index or {}
         spec = executable.verify_spec or {}
         required: set = {p for p, v in overrides.items()
@@ -821,7 +800,7 @@ class DotNetRunner:
         for s in required:
             built = _ensure_filtered_resource(pub.value, s)
             if built:
-                self._log("SOURCE", "info", f"נבנה {built} (שוכפל מ-resource אחות) — התסריט דורש אותו אך לא היה בדוגמה")
+                self._log("SOURCE", "info", f"הומר resource: {built} (התסריט דורש אותו והדוגמה הכילה גרסה אחרת — או/או)")
         # ★ אימות-החלה: משווים את המסר *לפני ואחרי* כל דריסה. הפונקציה יכולה להחזיר True בלי לשנות כלום
         # (למשל write ל-leaf שלא קיים, או value שכבר שווה) — מה ש*נראה* כהצלחה אך משאיר את הערך המקורי.
         # זה היה הבאג הסמוי: ה-source_path מהטרנספורמציות לא תאם את מבנה מסר-הדוגמה → הערך נשאר M_PAT_HIST.
