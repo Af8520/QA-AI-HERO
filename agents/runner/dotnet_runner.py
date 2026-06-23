@@ -310,6 +310,14 @@ def _override_field_smart(obj: Any, path: str, value: Any) -> bool:
     # 1) ResourceType-aware
     rtype = re.sub(r"\[[^\]]*\]", "", parts[0])
     rest = ".".join(parts[1:])
+    # ★ פילטר על ה-resource עצמו (PractitionerRole[code=R]) — דורסים **רק** ב-resource התואם, בלי
+    # suffix-fallback (שיפגע ב-resource אחר, code=N). כך override על referral_practitioner לא נוחת ב-act.
+    first_flt = next((s for s in _parse_steps(parts[0]) if isinstance(s, dict)), None)
+    if rest and first_flt is not None:
+        for res in (r for r in _fhir_resources_of_type(obj, rtype) if _filter_match(r, first_flt)):
+            if _override_by_path(res, rest, value):
+                return True
+        return False
     resources = _fhir_resources_of_type(obj, rtype) if rest else []
     if resources:
         for res in resources:
@@ -423,6 +431,53 @@ def _read_field_smart(obj: Any, path: str) -> Any:
         if r is not None:
             return r
     return _FIELD_MISSING
+
+
+def _append_resource_sibling(obj: Any, sibling: Dict[str, Any], clone: Dict[str, Any]) -> bool:
+    """מוסיף entry חדש ({'resource': clone}) לאותה רשימת entry שמכילה את ה-sibling (לפי זהות-אובייקט).
+    רקורסיבי — תומך ב-Bundle עטוף/מקונן. מחזיר True אם נוסף."""
+    if isinstance(obj, dict):
+        entry = obj.get("entry")
+        if isinstance(entry, list):
+            for e in entry:
+                if isinstance(e, dict) and e.get("resource") is sibling:
+                    entry.append({"resource": clone})
+                    return True
+        for v in obj.values():
+            if _append_resource_sibling(v, sibling, clone):
+                return True
+    elif isinstance(obj, list):
+        for it in obj:
+            if _append_resource_sibling(it, sibling, clone):
+                return True
+    return False
+
+
+def _ensure_filtered_resource(bundle: Any, src_path: str) -> Optional[str]:
+    """★ בונה resource שהתסריט דורש אך אינו בדוגמה: אם ל-src_path יש פילטר-resource בסגמנט הראשון
+    (PractitionerRole[code=R]) שאינו תואם אף resource — משכפל resource אחות קיים מאותו סוג (code=N),
+    מגדיר את שדות-הפילטר (code=R), ומוסיף אותו ל-Bundle. כך תסריט "שלח רופא מפנה" עובד גם כשהדוגמה מכילה
+    רק רופא מבצע. דינמי לכל סוג/פילטר — אפס hardcode. מחזיר תיאור (לוג) אם נבנה, אחרת None.
+    *לא* בונה אם אין אחות לשכפל, או אם ה-resource כבר קיים."""
+    parts = _split_path_segments(src_path)
+    if not parts:
+        return None
+    flt = next((s for s in _parse_steps(parts[0]) if isinstance(s, dict)), None)
+    if not flt:                                       # אין פילטר-resource בסגמנט הראשון → לא רלוונטי
+        return None
+    rtype = re.sub(r"\[[^\]]*\]", "", parts[0])
+    existing = _fhir_resources_of_type(bundle, rtype)
+    if any(_filter_match(r, flt) for r in existing):  # כבר קיים → אין מה לבנות
+        return None
+    if not existing:                                  # אין אחות לשכפל → לא ניתן לבנות
+        return None
+    clone = copy.deepcopy(existing[0])
+    for k, v in flt.items():                          # קובע את הדיסקרימינטור (code=R) על העותק
+        clone[k] = v
+    if _append_resource_sibling(bundle, existing[0], clone):
+        flt_desc = ",".join(f"{k}={v}" for k, v in flt.items())
+        return f"{rtype}[{flt_desc}]"
+    return None
 
 
 def _remove_by_path(obj: Any, path: str) -> bool:
@@ -747,6 +802,26 @@ class DotNetRunner:
             return False
         pub.value = copy.deepcopy(sample)
         overrides = executable.source_overrides or {}
+        # ★★ בניית resource חסר ע"י שכפול-אחות: אם התסריט דורש resource עם פילטר (PractitionerRole[code=R])
+        # שאינו בדוגמה — משכפלים אחות (code=N) וקובעים את הדיסקרימינטור. דורשים: overrides שאינם מחיקה +
+        # verify שאינו absent (אלה התסריטים ש"שולחים" את ה-resource). דינמי לכל סוג/פילטר.
+        idx = executable.transform_index or {}
+        spec = executable.verify_spec or {}
+        required: set = {p for p, v in overrides.items()
+                         if not (isinstance(v, str) and v.strip() in _REMOVE_MARKERS)}
+        for vv in (spec.get("verify") or []):
+            if not isinstance(vv, dict):
+                continue
+            exp = vv.get("expect")
+            if exp in _ABSENT_MARKERS or exp == "absent":
+                continue
+            s = _resolve_source_path(idx, vv.get("target_field")) if vv.get("target_field") else None
+            if s:
+                required.add(s)
+        for s in required:
+            built = _ensure_filtered_resource(pub.value, s)
+            if built:
+                self._log("SOURCE", "info", f"נבנה {built} (שוכפל מ-resource אחות) — התסריט דורש אותו אך לא היה בדוגמה")
         # ★ אימות-החלה: משווים את המסר *לפני ואחרי* כל דריסה. הפונקציה יכולה להחזיר True בלי לשנות כלום
         # (למשל write ל-leaf שלא קיים, או value שכבר שווה) — מה ש*נראה* כהצלחה אך משאיר את הערך המקורי.
         # זה היה הבאג הסמוי: ה-source_path מהטרנספורמציות לא תאם את מבנה מסר-הדוגמה → הערך נשאר M_PAT_HIST.

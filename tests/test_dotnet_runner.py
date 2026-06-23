@@ -795,6 +795,46 @@ def test_apply_source_sample_set_first_char_preserves_rest():
     assert pat["identifier"][0]["value"] == "2999735863"     # תו ראשון 0→2, השאר נשמר
 
 
+def test_apply_source_sample_clones_sibling_for_absent_resource():
+    """★ ה-builder: התסריט מאמת referral_practitioner (מקור PractitionerRole[code=R]) אך הדוגמה מכילה
+    רק code=N (act). משכפלים את האחות (code=N), קובעים code=R, ומוסיפים ל-Bundle — כך 'שלח רופא מפנה'
+    עובד בלי לשנות את הדוגמה. דינמי לכל סוג/פילטר."""
+    idx = {
+        "by_target_path": {"_data.referral_practitioner": "PractitionerRole[code=R].practitioner.reference"},
+        "by_target_leaf": {"referral_practitioner": "PractitionerRole[code=R].practitioner.reference"},
+        "rules": {"_data.referral_practitioner": {"kind": "verbatim", "map": None}},
+        "target_paths": ["_data.referral_practitioner"],
+    }
+    sample = {"resourceType": "Bundle", "entry": [
+        {"resource": {"resourceType": "PractitionerRole", "code": "N",
+                      "practitioner": {"reference": "Practitioner/1"}}},
+        {"resource": {"resourceType": "Practitioner", "id": "1", "name": "Dr Cohen"}},
+    ]}
+    ex = DotNetExecutableTestCase(
+        test_case_id="referral", transform_index=idx, source_sample=sample,
+        verify_spec={"verify": [{"target_field": "referral_practitioner"}]},
+        actions=[KafkaPublishAction(topic="s", value={}), KafkaWaitAction(topic="t", match={})],
+    )
+    DotNetRunner()._apply_source_sample(ex)
+    pub = next(a for a in ex.actions if isinstance(a, KafkaPublishAction))
+    roles = [e["resource"] for e in pub.value["entry"] if e["resource"]["resourceType"] == "PractitionerRole"]
+    codes = sorted(r.get("code") for r in roles)
+    assert codes == ["N", "R"]                               # נבנה code=R משכפול ה-code=N
+
+    # ביקורת: תרחיש "השמט code=R" (remove) **לא** בונה — אסור לבנות מה שמבקשים להסיר
+    ex2 = DotNetExecutableTestCase(
+        test_case_id="omit", transform_index=idx,
+        source_sample=copy.deepcopy(sample),
+        source_overrides={"PractitionerRole[code=R].practitioner.reference": "__REMOVE__"},
+        verify_spec={"verify": [{"target_field": "referral_practitioner", "expect": "absent"}]},
+        actions=[KafkaPublishAction(topic="s", value={}), KafkaWaitAction(topic="t", match={})],
+    )
+    DotNetRunner()._apply_source_sample(ex2)
+    pub2 = next(a for a in ex2.actions if isinstance(a, KafkaPublishAction))
+    roles2 = [e["resource"] for e in pub2.value["entry"] if e["resource"]["resourceType"] == "PractitionerRole"]
+    assert sorted(r.get("code") for r in roles2) == ["N"]    # לא נבנה code=R (התסריט מבקש היעדרו)
+
+
 def test_apply_verify_spec_all_populated_and_sanitize():
     # מסר-דוגמה שמכיל בפועל את המקורות (DiagnosticReport.category, Patient.name) — אחרת verify_all מדלג עליהם
     sample = {"resourceType": "Bundle", "entry": [
