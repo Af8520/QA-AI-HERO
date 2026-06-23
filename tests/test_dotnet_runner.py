@@ -778,11 +778,35 @@ def test_apply_verify_spec_builds_expected_fields():
     assert ef["_data.referral_practitioner"] == "__ABSENT__"  # absent marker
 
 
+def test_apply_source_sample_set_first_char_preserves_rest():
+    """★ ת"ז צה"ל: op set_first_char מחליף **רק** את התו הראשון של הערך המקורי מהדוגמה (0→2), ושומר את
+    שאר 9 הספרות ואת האורך (10) — לא מפברק ערך. דינמי לכל שדה/אורך."""
+    sample = {"resourceType": "Bundle", "entry": [
+        {"resource": {"resourceType": "Patient", "identifier": [{"system": "PID", "value": "0999735863"}]}}]}
+    ex = DotNetExecutableTestCase(
+        test_case_id="TC-tzahal",
+        source_sample=sample,
+        source_overrides={"Patient.identifier.value[system=PID]": "__SET_FIRST_CHAR__:2"},
+        actions=[KafkaPublishAction(topic="src", value={}), KafkaWaitAction(topic="tgt", match={})],
+    )
+    DotNetRunner()._apply_source_sample(ex)
+    pub = next(a for a in ex.actions if isinstance(a, KafkaPublishAction))
+    pat = [e["resource"] for e in pub.value["entry"] if e["resource"]["resourceType"] == "Patient"][0]
+    assert pat["identifier"][0]["value"] == "2999735863"     # תו ראשון 0→2, השאר נשמר
+
+
 def test_apply_verify_spec_all_populated_and_sanitize():
+    # מסר-דוגמה שמכיל בפועל את המקורות (DiagnosticReport.category, Patient.name) — אחרת verify_all מדלג עליהם
+    sample = {"resourceType": "Bundle", "entry": [
+        {"resource": {"resourceType": "DiagnosticReport",
+                      "category": [{"coding": [{"code": "M_PAT_HPV"}]}]}},
+        {"resource": {"resourceType": "Patient", "name": [{"family": "כהן", "given": ["יוסי"]}]}},
+        {"resource": {"resourceType": "MessageHeader", "id": "128"}},
+    ]}
     ex = DotNetExecutableTestCase(
         test_case_id="TC-all",
         transform_index=_IDX,
-        source_sample={"resourceType": "Bundle"},           # → strip_member
+        source_sample=sample,                               # → strip_member + מקורות קיימים
         verify_spec={"verify_all_populated": True},
         actions=[KafkaPublishAction(topic="src", value={}),
                  KafkaWaitAction(topic="tgt", match={})],
@@ -792,6 +816,34 @@ def test_apply_verify_spec_all_populated_and_sanitize():
     assert ef["_data.examination_type_code"] == "__PRESENT__"
     assert ef["_data.member_name"] == "__PRESENT__"
     assert "_data.scc_message_id" not in ef                  # זהות → סונן ע"י _sanitize
+
+
+def test_apply_verify_spec_all_populated_skips_absent_source():
+    """★ verify_all מדלג על שדה שמקורו אינו בדוגמה (referral_practitioner כשאין PractitionerRole code=R) —
+    כך 'ודא הכל מאוכלס' לא נכשל על שדה שה-Worker כלל לא יפיק. שדה שמקורו קיים (examination_type_code) נשמר."""
+    idx = {
+        "by_target_path": {"_data.examination_type_code": "DiagnosticReport.category[0].coding[0].code",
+                           "_data.referral_practitioner": "PractitionerRole[code=R].practitioner.reference"},
+        "by_target_leaf": {"examination_type_code": "DiagnosticReport.category[0].coding[0].code",
+                           "referral_practitioner": "PractitionerRole[code=R].practitioner.reference"},
+        "rules": {"_data.examination_type_code": {"kind": "code_map", "map": {"M_PAT_HPV": "1"}},
+                  "_data.referral_practitioner": {"kind": "verbatim", "map": None}},
+        "target_paths": ["_data.examination_type_code", "_data.referral_practitioner"],
+    }
+    sample = {"resourceType": "Bundle", "entry": [
+        {"resource": {"resourceType": "DiagnosticReport", "category": [{"coding": [{"code": "M_PAT_HPV"}]}]}},
+        {"resource": {"resourceType": "PractitionerRole", "code": "N",         # רק מבצע (N), אין מפנה (R)
+                      "practitioner": {"reference": "Practitioner/1"}}},
+    ]}
+    ex = DotNetExecutableTestCase(
+        test_case_id="TC-absent", transform_index=idx, source_sample=sample,
+        verify_spec={"verify_all_populated": True},
+        actions=[KafkaPublishAction(topic="src", value={}), KafkaWaitAction(topic="tgt", match={})],
+    )
+    DotNetRunner()._apply_verify_spec(ex)
+    ef = ex.actions[1].expected_fields
+    assert ef.get("_data.examination_type_code") == "__PRESENT__"   # מקור קיים → נשמר
+    assert "_data.referral_practitioner" not in ef                  # מקור (code=R) חסר → דולג
 
 
 def test_apply_verify_spec_derived_literal_downgraded_to_present():

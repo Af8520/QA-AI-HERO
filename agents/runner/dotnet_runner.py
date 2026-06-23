@@ -35,6 +35,10 @@ _UNIQUE_TOKEN = "__UNIQUE_ID__"
 # → ודא שהאובייקט לא נבנה ביעד". מסיר את השדה הספציפי בלבד (לא מרוקן מערכים שלמים).
 _REMOVE_MARKERS = {"__REMOVE__", "__DELETE__", "__OMIT__"}
 
+# ★ marker למוטציה-חלקית: "החלף רק את התו הראשון של הערך המקורי" (תרחיש "ספרה ראשונה=X" / "מתחיל ב-X",
+# למשל ת"ז צה"ל). שומר את שאר הערך ואת אורכו מהדוגמה — דינמי לכל שדה, לא תלוי-ספק. פורמט: "__SET_FIRST_CHAR__:X".
+_SET_FIRST_CHAR_PREFIX = "__SET_FIRST_CHAR__:"
+
 # sentinel ל-default arg של _filter_match (כדי לתמוך גם ב-pair בודד וגם ב-dict רב-מפתחי)
 _SENTINEL = object()
 
@@ -75,7 +79,7 @@ def _override_nested_field(obj: Any, name: str, uid: str) -> bool:
     if isinstance(obj, dict):
         for k, v in obj.items():
             if k == name:
-                obj[k] = uid
+                obj[k] = uid(v) if callable(uid) else uid
                 found = True
             elif _override_nested_field(v, name, uid):
                 found = True
@@ -224,7 +228,7 @@ def _override_by_path(obj: Any, path: str, value: Any) -> bool:
             if not isinstance(cur, list) or not (-len(cur) <= step < len(cur)):
                 return False
             if last:
-                cur[step] = value
+                cur[step] = value(cur[step]) if callable(value) else value
                 return True
             cur = cur[step]
             continue
@@ -238,7 +242,7 @@ def _override_by_path(obj: Any, path: str, value: Any) -> bool:
             cur = cur[0] if cur else None
         if isinstance(cur, dict) and step in cur:
             if last:
-                cur[step] = value
+                cur[step] = value(cur[step]) if callable(value) else value
                 return True
             cur = cur[step]
         else:
@@ -324,6 +328,101 @@ def _override_field_smart(obj: Any, path: str, value: Any) -> bool:
     if leaf and leaf not in _GENERIC_LEAVES:
         return _override_nested_field(obj, leaf, value)
     return False
+
+
+def _value_by_path(obj: Any, path: str) -> Any:
+    """קריאת ערך לפי נתיב (dotted/bracket/filter) — read-only mirror של _override_by_path.
+    _FIELD_MISSING אם לא נמצא. תומך ב-[0]/[?(@.k=='v')]/[k=v] ובסלחנות single-vs-array."""
+    steps = _parse_steps(path)
+    if not steps:
+        return _FIELD_MISSING
+    cur = obj
+    for i, step in enumerate(steps):
+        last = i == len(steps) - 1
+        if isinstance(step, dict):
+            if isinstance(cur, dict):
+                if _filter_match(cur, step):
+                    continue
+                return _FIELD_MISSING
+            if not isinstance(cur, list):
+                return _FIELD_MISSING
+            cur = next((e for e in cur if _filter_match(e, step)), None)
+            if cur is None:
+                return _FIELD_MISSING
+            continue
+        if isinstance(step, int):
+            if isinstance(cur, dict):
+                if last:
+                    return _FIELD_MISSING
+                continue
+            if not isinstance(cur, list) or not (-len(cur) <= step < len(cur)):
+                return _FIELD_MISSING
+            cur = cur[step]
+            continue
+        if isinstance(cur, list):
+            cur = cur[0] if cur else None
+        if isinstance(cur, dict) and step in cur:
+            cur = cur[step]
+        else:
+            return _FIELD_MISSING
+    return cur
+
+
+def _value_path_anywhere(obj: Any, parts: List[str]) -> Any:
+    """מחזיר את הערך של המופע הראשון ב-tree שבו הנתיב היחסי `parts` נפתר. _FIELD_MISSING אם אין."""
+    v = _value_by_path(obj, ".".join(parts))
+    if v is not _FIELD_MISSING:
+        return v
+    if isinstance(obj, dict):
+        for vv in obj.values():
+            r = _value_path_anywhere(vv, parts)
+            if r is not _FIELD_MISSING:
+                return r
+    elif isinstance(obj, list):
+        for it in obj:
+            r = _value_path_anywhere(it, parts)
+            if r is not _FIELD_MISSING:
+                return r
+    return _FIELD_MISSING
+
+
+def _read_field_smart(obj: Any, path: str) -> Any:
+    """קריאה format-agnostic — mirror read-only של _override_field_smart (ResourceType-aware → suffix →
+    leaf). מחזיר את הערך או _FIELD_MISSING. משמש לבדיקת קיום מקור בדוגמה (verify_all מדלג על שדה שמקורו חסר)."""
+    path = _normalize_filter_position(path)
+    parts = _split_path_segments(path)
+    if not parts:
+        return _FIELD_MISSING
+    rtype = re.sub(r"\[[^\]]*\]", "", parts[0])
+    rest = ".".join(parts[1:])
+    # ★ פילטר על ה-resource עצמו (PractitionerRole[code=R]) — מחייבים התאמה ו**אין** suffix-fallback (אחרת
+    # נתפוס resource אחר, code=N). כך 'יש רופא מפנה?' נענה נכון: אם אין code=R → _FIELD_MISSING.
+    first_flt = next((s for s in _parse_steps(parts[0]) if isinstance(s, dict)), None)
+    if rest:
+        resources = _fhir_resources_of_type(obj, rtype)
+        if first_flt is not None:
+            for res in (r for r in resources if _filter_match(r, first_flt)):
+                v = _value_by_path(res, rest)
+                if v is not _FIELD_MISSING:
+                    return v
+            return _FIELD_MISSING
+        for res in resources:
+            v = _value_by_path(res, rest)
+            if v is not _FIELD_MISSING:
+                return v
+    for i in range(len(parts) - 1):
+        sub = parts[i:]
+        if len(sub) < 2:
+            break
+        v = _value_path_anywhere(obj, sub)
+        if v is not _FIELD_MISSING:
+            return v
+    leaf = re.sub(r"\[[^\]]*\]", "", parts[-1])
+    if leaf and leaf not in _GENERIC_LEAVES:
+        r = _get_nested_field(obj, leaf)
+        if r is not None:
+            return r
+    return _FIELD_MISSING
 
 
 def _remove_by_path(obj: Any, path: str) -> bool:
@@ -657,9 +756,21 @@ class DotNetRunner:
             # ★ __REMOVE__ → מחיקת השדה/האלמנט (לתרחיש שלילי "השמט ת"ז → לא לבנות אובייקט"),
             # ולא דריסה לערך ריק. מסיר רק את השדה הספציפי, לא מרוקן מערכים שלמים.
             is_remove = isinstance(val, str) and val.strip() in _REMOVE_MARKERS
-            ok = _remove_field_smart(pub.value, path) if is_remove else _override_field_smart(pub.value, path, val)
+            # ★ מוטציה-חלקית "ספרה ראשונה=X": לוקחים את הערך **המקורי מהדוגמה** ומחליפים רק את התו הראשון,
+            # תוך שמירת שאר הספרות והאורך (ת"ז צה"ל = 10 ספרות, התו הראשון הוא הקוד). קריטי: לא לפברק ערך.
+            is_set_first = isinstance(val, str) and val.startswith(_SET_FIRST_CHAR_PREFIX)
+            if is_set_first:
+                ch = val[len(_SET_FIRST_CHAR_PREFIX):]
+                fn = lambda old, _c=ch: (_c + str(old)[1:]) if (old is not None and str(old)) else _c
+                ok = _override_field_smart(pub.value, path, fn)
+                verb = f"מוטציה תו-ראשון→{ch}"
+            elif is_remove:
+                ok = _remove_field_smart(pub.value, path)
+                verb = "השמטה"
+            else:
+                ok = _override_field_smart(pub.value, path, val)
+                verb = f"דריסה ={val}"
             changed = json.dumps(pub.value, ensure_ascii=False, sort_keys=True, default=str) != before
-            verb = "השמטה" if is_remove else f"דריסה ={val}"
             if ok and changed:
                 self._log("SOURCE", "info", f"{verb} {path} ✓")
             elif ok and not changed:
@@ -690,10 +801,25 @@ class DotNetRunner:
         if not waits:
             return
         overrides = executable.source_overrides or {}
+        sample = executable.source_sample
         expected: Dict[str, Any] = {}
+        absent_src: List[str] = []
         if spec.get("verify_all_populated"):
             for tp in idx.get("target_paths") or []:
+                # ★ דלג על שדה ש**מקורו אינו בדוגמה** (למשל referral_practitioner כשאין PractitionerRole code=R) —
+                # ה-Worker לא יפיק אותו, ואסור להכשיל "ודא הכל מאוכלס" על שדה שכלל לא קיים בקלט. רק למקור
+                # קונקרטי-יחיד (לא שרשור 'a + b' — כזה כן מופק מהדוגמה). דינמי לכל אפיון.
+                src = _resolve_source_path(idx, tp)
+                concrete = bool(src) and "+" not in src and " " not in src and ("." in src or "[" in src)
+                if sample is not None and concrete and src not in overrides \
+                        and _read_field_smart(sample, src) is _FIELD_MISSING:
+                    absent_src.append(tp)
+                    continue
                 expected[tp] = "__PRESENT__"
+        if absent_src:
+            self._log("VERIFY", "info",
+                      f"דולגו {len(absent_src)} שדות ב-verify_all (מקורם אינו במסר-הדוגמה → ה-Worker לא יפיק "
+                      f"אותם): {', '.join(absent_src)}")
         skipped: List[str] = []
         for v in spec.get("verify") or []:
             if not isinstance(v, dict):

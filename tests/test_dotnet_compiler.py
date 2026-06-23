@@ -261,6 +261,23 @@ def test_parse_anchored_response_derives_override_from_verify_codemap():
     assert ex3.source_overrides == {"DiagnosticReport.category[0].coding[0].code": "EXT_LAB"}
 
 
+def test_parse_anchored_response_set_first_char_op():
+    """★ op:set_first_char → marker __SET_FIRST_CHAR__:X ב-source_overrides (הרנר יחליף את התו הראשון
+    של הערך המקורי). דינמי — לא תלוי בשם השדה."""
+    idx = {
+        "by_target_path": {"_data.member_id": "Patient.identifier.value[system=PID]"},
+        "by_target_leaf": {"member_id": "Patient.identifier.value[system=PID]"},
+        "rules": {"_data.member_id": {"kind": "derived", "map": None}},
+        "target_paths": ["_data.member_id"],
+    }
+    c = DotNetCompiler(payload_templates={"source_topic": "s", "target_topic": "t", "templates": {"create": {}}},
+                       sample_messages=[{"resourceType": "Bundle"}], transform_index=idx)
+    data = {"overrides": [{"target_field": "member_id", "op": "set_first_char", "value": "2"}],
+            "expect_no_message": True}
+    ex = c._parse_anchored_response("צהל", None, "t", data)
+    assert ex.source_overrides == {"Patient.identifier.value[system=PID]": "__SET_FIRST_CHAR__:2"}
+
+
 def test_parse_anchored_response_empty_positive_test_defaults_to_verify_all():
     """★ failure 1 (referral pass שקרי): תרחיש חיובי בלי overrides, בלי verify, ובלי verify_all_populated →
     assert ריק → 'pass' טריוויאלי. הגארד מחיל verify_all_populated=true (אימות אמיתי, לא מעבר בשקר)."""

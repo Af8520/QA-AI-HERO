@@ -487,7 +487,8 @@ SYSTEM_PROMPT_DOTNET_ANCHORED = """אתה QA Test Compiler (.NET, מכבי). ה�
   "verify_all_populated": false,            // true רק אם התסריט אומר "ודא שכל השדות מאוכלסים"
   "overrides": [                            // השדות שהתסריט מבקש *לשנות במקור* (שם-שדה לוגי + הערך מהתסריט)
     {"target_field": "<שם מ-AVAILABLE_FIELDS>", "value": "<הערך מהתסריט, כפי שהוא>"},
-    {"target_field": "<שם>", "op": "remove"}   // להשמטת שדה (תרחיש 'שדה חסר → לא לבנות אובייקט')
+    {"target_field": "<שם>", "op": "remove"},            // להשמטת שדה (תרחיש 'שדה חסר → לא לבנות אובייקט')
+    {"target_field": "<שם>", "op": "set_first_char", "value": "X"}  // החלף רק את התו הראשון של הערך המקורי
   ],
   "verify": [                               // השדות שהתסריט מבקש *לאמת ביעד*
     {"target_field": "<שם>"},                       // ערך מחושב ע"י המערכת (מיפוי-קוד) או נוכחות
@@ -507,8 +508,10 @@ SYSTEM_PROMPT_DOTNET_ANCHORED = """אתה QA Test Compiler (.NET, מכבי). ה�
 - ★ `overrides[].value` = הערך **כפי שהתסריט אומר לשלוח במקור** (למשל קוד M_PAT_HPV, ת"ז לא-תקינה).
   **אל תמיר** (אל תכתוב 1 במקום M_PAT_HPV) — ההמרה נעשית במערכת.
 - ★ תרחיש שלילי "ערך לא-תקין" → הוסף override עם הערך הלא-תקין **+** expect_no_message=true.
-  ל"ערך מתחיל ב-X" / "ת"ז צה"ל (מתחילה ב-2 או 5)" — תן **ערך מייצג מלא** עם התכונה (למשל ת"ז בת 9 ספרות
-  שמתחילה ב-2: "299999999"), לא רק את הספרה.
+- ★★ "ספרה/תו ראשון = X" / "מתחיל ב-X" / "קידומת X" / "ת"ז צה"ל (מתחילה ב-2 או 5)" → השתמש ב-
+  `{"target_field": "<שדה>", "op": "set_first_char", "value": "X"}`. **אל תפברק ערך מלא** — המערכת תיקח את
+  הערך המקורי מהדוגמה ותחליף **רק** את התו הראשון (כך שאר הספרות והאורך התקינים נשמרים). ברוב המקרים זה תרחיש
+  שלילי → הוסף גם expect_no_message=true.
 - ★ "ודא שכל השדות מאוכלסים" → verify_all_populated=true (אל תפרט שדה-שדה).
 - ★ "האובייקט X לא נבנה / לא קיים" → verify עם expect:"absent". אם התסריט גם אומר "אל תשלח את שדה Y"
   → override עם op:"remove" על Y.
@@ -676,7 +679,8 @@ class DotNetCompiler:
         """ממיר את פלט ה-LLM המעוגן (שדות-לוגיים) ל-DotNetExecutableTestCase: ממפה כל override
         ל-source_path מדויק דרך ה-transform_index (בלי ניחוש), מסנתז publish/wait, ושומר verify_spec
         ל-runner. ה-runner יבנה את ה-publish מהדוגמה + הדריסות, ואת expected_fields מ-verify_spec."""
-        from agents.runner.dotnet_runner import _resolve_source_path, _canonical_target_path
+        from agents.runner.dotnet_runner import (_resolve_source_path, _canonical_target_path,
+                                                 _SET_FIRST_CHAR_PREFIX)
         pt = self.payload_templates or {}
         idx = self.transform_index or {}
         source_overrides: Dict[str, Any] = {}
@@ -697,6 +701,14 @@ class DotNetCompiler:
                 continue
             if ov.get("op") == "remove":
                 source_overrides[src] = "__REMOVE__"
+                continue
+            # ★ op:"set_first_char" — מוטציה-חלקית: המערכת תיקח את הערך המקורי מהדוגמה ותחליף רק את התו
+            # הראשון (תרחיש "ספרה ראשונה=X"/"מתחיל ב-X", כמו ת"ז צה"ל) — בלי לפברק ערך ובשמירת האורך.
+            if ov.get("op") == "set_first_char":
+                ch = str(ov.get("value", ""))[:1]
+                if ch:
+                    source_overrides[src] = _SET_FIRST_CHAR_PREFIX + ch
+                    notes.append(f"מוטציית תו-ראשון '{tf}'→{ch} (נשמר שאר הערך מהדוגמה)")
                 continue
             val = ov.get("value")
             # ★ reverse-map: ה-LLM לפעמים נותן את ערך-היעד (2) במקום קוד-המקור (M_PAT_NGC). אם לשדה יש
@@ -736,19 +748,23 @@ class DotNetCompiler:
                 if not src or not _is_concrete_source_path(src) or src in source_overrides:
                     continue
                 rule = (idx.get("rules") or {}).get(_canonical_target_path(idx, tf))
-                if not (rule and rule.get("kind") == "code_map"):
-                    continue
-                cmap = rule.get("map") or {}
-                if str(exp) in cmap:                                   # exp הוא כבר קוד-מקור
-                    chosen = str(exp)
-                else:                                                  # exp הוא ערך-יעד → reverse-map לקוד-מקור
-                    srcs = [k for k, vv in cmap.items() if str(vv) == str(exp)]
-                    if not srcs:
-                        continue
-                    # אם כמה קודים ממופים לאותו ערך (M_PAT_NGC/Z_PAT_NGC→2) — בוחרים את זה שבשם-התסריט; אחרת הראשון
-                    chosen = next((c for c in srcs if c in (test_case_id or "")), srcs[0])
+                kind = rule.get("kind") if rule else None
+                if kind == "code_map":
+                    cmap = rule.get("map") or {}
+                    if str(exp) in cmap:                               # exp הוא כבר קוד-מקור
+                        chosen = str(exp)
+                    else:                                              # exp הוא ערך-יעד → reverse-map לקוד-מקור
+                        srcs = [k for k, vv in cmap.items() if str(vv) == str(exp)]
+                        if not srcs:
+                            continue
+                        # כמה קודים לאותו ערך (M_PAT_NGC/Z_PAT_NGC→2) — בוחרים את זה שבשם-התסריט; אחרת הראשון
+                        chosen = next((c for c in srcs if c in (test_case_id or "")), srcs[0])
+                elif kind == "verbatim":
+                    chosen = str(exp)                                  # verbatim: ערך-המקור == ערך-היעד (urgent=0/1)
+                else:
+                    continue                                          # derived/lookup — לא ניתן לגזור דטרמיניסטית
                 source_overrides[src] = chosen
-                notes.append(f"גזירת override מ-verify '{tf}': יעד-צפוי={exp} → קוד-מקור={chosen} "
+                notes.append(f"גזירת override מ-verify '{tf}': יעד-צפוי={exp} → מקור={chosen} "
                              f"(ה-LLM לא הוסיף override; דטרמיניסטי)")
         # ★ גארד תרחיש-חיובי-ריק: תרחיש חיובי (לא expect_no_message) בלי overrides, בלי verify, ובלי
         # verify_all_populated → assert ריק → "pass" טריוויאלי שקרי (כמו referral שעבר בלי שנבדק). ברירת-מחדל
