@@ -156,9 +156,11 @@ def test_parse_transform_rule_arrow_and_verbatim():
 def test_parse_transform_rule_derived():
     # ביטויים מורכבים → derived (לא code_map שקרי)
     assert _parse_transform_rule("family + ' ' + given[0]")["kind"] == "derived"
-    assert _parse_transform_rule("strip first char (which becomes member_id_code)")["kind"] == "derived"
     assert _parse_transform_rule("")["kind"] == "derived"
     assert _parse_transform_rule(None)["kind"] == "derived"
+    # ★ מנוע מלא: "first char/split" מזוהה כעת כ-positional (ת"ז → member_id_code) — מדויק יותר מ-derived,
+    #   והתנהגות forward/verify זהה (presence); ה-setup הוא set_first_char.
+    assert _parse_transform_rule("strip first char (which becomes member_id_code)")["kind"] == "positional"
 
 
 # ============================================================
