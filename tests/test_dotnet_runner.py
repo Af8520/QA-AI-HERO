@@ -20,6 +20,7 @@ from agents.runner.dotnet_runner import (  # noqa: E402
     _compute_expected,
     _make_key_unique,
     _matches,
+    _parse_transform_rule,
     _resolve_source_path,
     _sanitize_expected_fields,
     _override_by_path,
@@ -760,6 +761,67 @@ def test_compute_expected_code_map_and_present():
     assert _compute_expected(_IDX, "_data.examination_type_code", {src: "WEIRD"}) == "__PRESENT__"
     # derived (member_name) → __PRESENT__ (לא ערך template)
     assert _compute_expected(_IDX, "_data.member_name", {}) == "__PRESENT__"
+
+
+def test_parse_transform_rule_recognizes_all_kinds():
+    """★ מנוע-חוקים עשיר: code_map/verbatim/concatenate/concat_multi/strip/positional/fixed; לא-ידוע→derived."""
+    assert _parse_transform_rule("A=1, B=2")["kind"] == "code_map"
+    assert _parse_transform_rule("verbatim")["kind"] == "verbatim"
+    # concatenate (מקור-יחיד) — מזהה מפריד
+    c = _parse_transform_rule("concatenate values with ;", "DiagnosticReport.organ")
+    assert c["kind"] == "concatenate" and c["sep"] == ";"
+    assert _parse_transform_rule("join by |", "X.list")["sep"] == "|"
+    # concat_multi — ה-source הוא ביטוי '+' (כמה נתיבים)
+    assert _parse_transform_rule("family + given", "Patient.name.family + name.given[0]")["kind"] == "concat_multi"
+    # strip / positional / fixed
+    assert _parse_transform_rule("strip leading zeros")["kind"] == "strip"
+    assert _parse_transform_rule("first digit is type code")["kind"] == "positional"
+    f = _parse_transform_rule("FIXED 510")
+    assert f["kind"] == "fixed" and f["value"] == "510"
+    # לא-ידוע → derived (ללא רגרסיה)
+    assert _parse_transform_rule("resolve reference and encrypt")["kind"] == "derived"
+    assert _parse_transform_rule("")["kind"] == "derived"
+
+
+_IDX_RICH = {
+    "by_target_path": {"_data.organ": "DiagnosticReport.organ", "_data.tz": "Patient.identifier.value"},
+    "by_target_leaf": {"organ": "DiagnosticReport.organ", "tz": "Patient.identifier.value"},
+    "rules": {"_data.organ": {"kind": "concatenate", "sep": ";", "map": None},
+              "_data.tz": {"kind": "strip", "what": "leading_zeros", "map": None}},
+    "target_paths": ["_data.organ", "_data.tz"],
+}
+
+
+def test_compute_expected_forward_concatenate_strip_from_sample():
+    """★ forward מדויק: concatenate משרשר את רשימת-המקור מהדוגמה; strip מסיר אפסים מובילים."""
+    sample = {"resourceType": "Bundle", "entry": [
+        {"resource": {"resourceType": "DiagnosticReport", "organ": ["LUNG", "LIVER"]}},
+        {"resource": {"resourceType": "Patient", "identifier": {"value": "0004549368"}}},
+    ]}
+    # concatenate מהדוגמה (בלי override) → "LUNG;LIVER"
+    assert _compute_expected(_IDX_RICH, "organ", {}, sample) == "LUNG;LIVER"
+    # strip leading zeros → "4549368"
+    assert _compute_expected(_IDX_RICH, "tz", {}, sample) == "4549368"
+    # בלי sample → presence (לא ניתן לחשב)
+    assert _compute_expected(_IDX_RICH, "organ", {}) == "__PRESENT__"
+
+
+def test_apply_source_sample_ensure_multi_op():
+    """★ __ENSURE_MULTI__: רשימת-מקור עם ערך-יחיד → מתווסף ערך שני (כדי שהשרשור יפיק מפריד). ≥2 → no-op."""
+    idx = {"by_target_path": {"_data.organ": "DiagnosticReport.organ"},
+           "by_target_leaf": {"organ": "DiagnosticReport.organ"},
+           "rules": {"_data.organ": {"kind": "concatenate", "sep": ";", "map": None}},
+           "target_paths": ["_data.organ"]}
+    sample = {"resourceType": "Bundle", "entry": [{"resource": {"resourceType": "DiagnosticReport", "organ": ["LUNG"]}}]}
+    ex = DotNetExecutableTestCase(
+        test_case_id="organ", transform_index=idx, source_sample=sample,
+        source_overrides={"DiagnosticReport.organ": "__ENSURE_MULTI__"},
+        actions=[KafkaPublishAction(topic="s", value={}), KafkaWaitAction(topic="t", match={})],
+    )
+    DotNetRunner()._apply_source_sample(ex)
+    pub = next(a for a in ex.actions if isinstance(a, KafkaPublishAction))
+    dr = [e["resource"] for e in pub.value["entry"] if e["resource"]["resourceType"] == "DiagnosticReport"][0]
+    assert dr["organ"] == ["LUNG", "LUNG"]                       # נוסף ערך שני
 
 
 def test_apply_verify_spec_builds_expected_fields():

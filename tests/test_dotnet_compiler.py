@@ -193,6 +193,22 @@ def test_parse_anchored_response_reverse_maps_target_value_to_source_code():
     assert ex2.source_overrides == {"DiagnosticReport.category[0].coding[0].code": "M_CYT"}
 
 
+def test_parse_anchored_response_concatenate_sets_ensure_multi():
+    """★ מנוע מלא: verify על שדה concatenate (organ) → setup __ENSURE_MULTI__ במקור (גם בלי expect),
+    כדי שהשרשור יופעל וה-forward יאמת אותו מדויק. דינמי מה-rule kind."""
+    idx = {
+        "by_target_path": {"_data.organ": "DiagnosticReport.organ"},
+        "by_target_leaf": {"organ": "DiagnosticReport.organ"},
+        "rules": {"_data.organ": {"kind": "concatenate", "sep": ";", "map": None}},
+        "target_paths": ["_data.organ"],
+    }
+    c = DotNetCompiler(payload_templates={"source_topic": "s", "target_topic": "t", "templates": {"create": {}}},
+                       sample_messages=[{"resourceType": "Bundle"}], transform_index=idx)
+    data = {"verify": [{"target_field": "organ"}]}              # ללא expect — עצם הבדיקה = בדיקת שרשור
+    ex = c._parse_anchored_response("organ test", None, "t", data)
+    assert ex.source_overrides == {"DiagnosticReport.organ": "__ENSURE_MULTI__"}
+
+
 def test_parse_anchored_response_skips_derived_field_override():
     """★ failures 2+4: ה-LLM ניסה override על member_name (שדה מחושב, source='...family + given[0]').
     override כזה משחית את ה-name במקור → מדלגים (שדה מחושב = verify בלבד), המסר לא נשחת."""

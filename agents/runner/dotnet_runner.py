@@ -39,6 +39,10 @@ _REMOVE_MARKERS = {"__REMOVE__", "__DELETE__", "__OMIT__"}
 # למשל ת"ז צה"ל). שומר את שאר הערך ואת אורכו מהדוגמה — דינמי לכל שדה, לא תלוי-ספק. פורמט: "__SET_FIRST_CHAR__:X".
 _SET_FIRST_CHAR_PREFIX = "__SET_FIRST_CHAR__:"
 
+# ★ marker ל-setup של concatenate: "ודא שלשדה-המקור (רשימה) יש ≥2 ערכים" — כך הטרנספורמציה מפיקה מפריד
+# ביעד (organ עם ';'). אם הרשימה כבר ≥2 → no-op. דינמי לכל שדה-רשימה.
+_ENSURE_MULTI_MARKER = "__ENSURE_MULTI__"
+
 # sentinel ל-default arg של _filter_match (כדי לתמוך גם ב-pair בודד וגם ב-dict רב-מפתחי)
 _SENTINEL = object()
 
@@ -596,23 +600,40 @@ def _resolve_logical_holder(obj: Any, path: str):
 _CODE_MAP_TOKEN = re.compile(r"\s*([^=,→>]+?)\s*(?:==|=|->|→)\s*([^,]+?)\s*(?:,|$)")
 
 
-def _parse_transform_rule(rule: Any) -> Dict[str, Any]:
-    """מפענח חוק-טרנספורמציה (טקסט חופשי מה-Payload Builder) לתבנית בטוחה בלבד:
-    - code_map: 'A=1, B=2' / 'A→1' / 'A/B=1' (פיצול LHS על '/'). רק כש-RHS סקלרי קצר (לא מילים/רווחים).
-    - verbatim: 'verbatim' / 'copy as-is' / 'same'.
-    - אחרת (concatenate/strip/lookup/derived/...) → 'derived' (→ ייפול ל-__PRESENT__ באימות).
-    מחזיר {'kind': 'code_map'|'verbatim'|'derived', 'map': {<src>: <dst>} או None}."""
+def _detect_concat_sep(rule: str) -> str:
+    """מזהה את תו-המפריד של concatenate מתוך טקסט-החוק: מפריד מצוטט ('...;...'), או 'separated by ;' /
+    'join with ;' / 'delimiter ;', או תו-מפריד בודד שמופיע בחוק. ברירת-מחדל ';'."""
+    m = re.search(r"(?:sep(?:arator)?|delimiter|with|by|מופרד[ים]*\s*ב|מפריד)\s*['\"]?([;,|/])['\"]?", rule, re.I)
+    if m:
+        return m.group(1)
+    for ch in (";", "|", ","):
+        if ch in rule:
+            return ch
+    return ";"
+
+
+def _parse_transform_rule(rule: Any, src_path: Optional[str] = None) -> Dict[str, Any]:
+    """מפענח חוק-טרנספורמציה (טקסט חופשי מה-Payload Builder) לתבנית בטוחה בלבד. מזהה רק תבניות ברורות;
+    כל השאר → 'derived' (→ __PRESENT__ באימות, ללא רגרסיה). מחזיר {'kind': ..., ...params}:
+    - code_map: 'A=1, B=2' / 'A→1' / 'A/B=1'. RHS סקלרי קצר בלבד.
+    - verbatim: 'verbatim'/'copy'/'same'.
+    - concatenate: שרשור של **שדה-מקור-יחיד (רשימה)** במפריד → {sep}. forward = sep.join(list).
+    - concat_multi: ה-source_path הוא ביטוי רב-נתיבי ('a + b') → לא בר-דריסה, forward שביר → presence.
+    - strip: 'strip leading zeros' → {what:'leading_zeros'}. forward = lstrip('0').
+    - positional: 'first char/digit'/'split'/'ספרה ראשונה' → setup הוא set_first_char.
+    - fixed: 'FIXED <const>' עם קבוע סקלרי → {value}. forward = const.
+    src_path משמש להבחנת concatenate (מקור-יחיד) מ-concat_multi (ביטוי '+')."""
     if not isinstance(rule, str) or not rule.strip():
         return {"kind": "derived", "map": None}
     low = rule.strip().lower()
     if low in ("verbatim", "copy", "copy as-is", "as-is", "same", "passthrough", "pass-through"):
         return {"kind": "verbatim", "map": None}
+    # code_map — מנסים ראשון (RHS סקלרי קצר)
     matches = _CODE_MAP_TOKEN.findall(rule)
     cmap: Dict[str, str] = {}
     ok = bool(matches)
     for lhs, rhs in matches:
         rhs = rhs.strip().strip("'\"")
-        # RHS חייב להיות סקלר קצר (מספר/קוד) — לא ביטוי עם רווחים/אופרטורים (concatenate וכו')
         if not rhs or len(rhs) > 24 or " " in rhs or "+" in rhs or "(" in rhs:
             ok = False
             break
@@ -622,6 +643,22 @@ def _parse_transform_rule(rule: Any) -> Dict[str, Any]:
                 cmap[token] = rhs
     if ok and cmap:
         return {"kind": "code_map", "map": cmap}
+    # concat_multi — ה-source עצמו הוא ביטוי רב-נתיבי (family + given[0]) → לא בר-חישוב/דריסה
+    if isinstance(src_path, str) and "+" in src_path:
+        return {"kind": "concat_multi", "map": None}
+    # concatenate — שדה-מקור-יחיד (רשימה) המשורשר במפריד
+    if any(k in low for k in ("concat", "join", "separated", "delimit", "שרשור", "משורשר", "מופרד")):
+        return {"kind": "concatenate", "sep": _detect_concat_sep(rule), "map": None}
+    # strip leading zeros
+    if ("zero" in low or "אפס" in low) and any(k in low for k in ("strip", "remove", "trim", "leading", "הסר", "מוביל")):
+        return {"kind": "strip", "what": "leading_zeros", "map": None}
+    # positional / split (ה-setup = set_first_char)
+    if any(k in low for k in ("first char", "first digit", "split", "ספרה ראשונה", "תו ראשון", "קידומת")):
+        return {"kind": "positional", "map": None}
+    # fixed — קבוע סקלרי
+    mfx = re.match(r"(?:fixed|const(?:ant)?|קבוע)\s*[:=]?\s*['\"]?([^\s'\"]{1,24})['\"]?$", rule.strip(), re.I)
+    if mfx:
+        return {"kind": "fixed", "value": mfx.group(1), "map": None}
     return {"kind": "derived", "map": None}
 
 
@@ -651,21 +688,39 @@ def _canonical_target_path(transform_index: Optional[Dict[str, Any]], ref: str) 
 
 
 def _compute_expected(transform_index: Optional[Dict[str, Any]], target_field: str,
-                      applied_overrides: Dict[str, Any]) -> Any:
-    """מחשב את הערך הצפוי ביעד לשדה — דטרמיניסטית, לא מ-template:
-    - rule=code_map + השדה דרסנו במקור → ממפה את ערך-הדריסה (M_PAT_HPV→1). לא-במפה → __PRESENT__.
-    - rule=verbatim + ערך-דריסה → הערך.
-    - אחרת (derived/לא-דרסנו/תלוי-דוגמה) → __PRESENT__ (אימות נוכחות, לא literal שגוי)."""
+                      applied_overrides: Dict[str, Any], source_sample: Any = None) -> Any:
+    """מחשב את ערך-היעד הצפוי לשדה — דטרמיניסטית, forward לפי סוג-החוק, מהערך-מקור ה**אפקטיבי**:
+    override אם דרסנו, אחרת הערך מהדוגמה (`_read_field_smart`). כך גם תרחיש בלי דריסה מאומת מדויק.
+    - code_map → map[src] (לא-במפה → __PRESENT__).   - verbatim → src.
+    - concatenate(sep) → sep.join(list) (אם רשימת-סקלרים).  - strip(leading_zeros) → src.lstrip('0').
+    - fixed → הקבוע.   - concat_multi/lookup/derived/positional → __PRESENT__ (לא ניתן לחשב מדויק בבטחה)."""
     rules = (transform_index or {}).get("rules") or {}
     tfp = _canonical_target_path(transform_index, target_field)
-    rule = rules.get(tfp)
+    rule = rules.get(tfp) or {}
+    kind = rule.get("kind")
     src = _resolve_source_path(transform_index, target_field)
     ov = (applied_overrides or {}).get(src) if src else None
-    if rule and rule.get("kind") == "code_map" and ov is not None:
+    # ערך-המקור האפקטיבי: override אם נדרס (ולא marker/callable), אחרת מהדוגמה
+    if ov is not None and not (isinstance(ov, str) and ov.startswith(("__REMOVE__", "__DELETE__", "__OMIT__",
+                                                                      _SET_FIRST_CHAR_PREFIX, _ENSURE_MULTI_MARKER))):
+        eff = ov
+    elif src and source_sample is not None:
+        read = _read_field_smart(source_sample, src)
+        eff = read if read is not _FIELD_MISSING else None
+    else:
+        eff = None
+
+    if kind == "code_map" and ov is not None:
         mapped = (rule.get("map") or {}).get(str(ov))
         return mapped if mapped is not None else "__PRESENT__"
-    if rule and rule.get("kind") == "verbatim" and ov is not None:
-        return ov
+    if kind == "verbatim" and eff is not None:
+        return eff
+    if kind == "concatenate" and isinstance(eff, list) and eff and all(not isinstance(x, (dict, list)) for x in eff):
+        return rule.get("sep", ";").join(str(x) for x in eff)
+    if kind == "strip" and rule.get("what") == "leading_zeros" and isinstance(eff, (str, int)):
+        return str(eff).lstrip("0") or "0"
+    if kind == "fixed" and rule.get("value") is not None:
+        return rule.get("value")
     return "__PRESENT__"
 
 
@@ -813,11 +868,24 @@ class DotNetRunner:
             # ★ מוטציה-חלקית "ספרה ראשונה=X": לוקחים את הערך **המקורי מהדוגמה** ומחליפים רק את התו הראשון,
             # תוך שמירת שאר הספרות והאורך (ת"ז צה"ל = 10 ספרות, התו הראשון הוא הקוד). קריטי: לא לפברק ערך.
             is_set_first = isinstance(val, str) and val.startswith(_SET_FIRST_CHAR_PREFIX)
+            # ★ __ENSURE_MULTI__: setup ל-concatenate — אם שדה-המקור (רשימה) קצר מ-2, מוסיף ערך שני (עותק
+            # של הראשון) כך שהטרנספורמציה תפיק מפריד ביעד. אם כבר ≥2 → no-op מוצלח.
+            is_ensure_multi = isinstance(val, str) and val == _ENSURE_MULTI_MARKER
             if is_set_first:
                 ch = val[len(_SET_FIRST_CHAR_PREFIX):]
                 fn = lambda old, _c=ch: (_c + str(old)[1:]) if (old is not None and str(old)) else _c
                 ok = _override_field_smart(pub.value, path, fn)
                 verb = f"מוטציה תו-ראשון→{ch}"
+            elif is_ensure_multi:
+                cur = _read_field_smart(pub.value, path)
+                if isinstance(cur, list) and len(cur) >= 2:
+                    ok = True                               # כבר רב-ערכי (no-op מוצלח)
+                elif isinstance(cur, list) and len(cur) == 1:
+                    cur.append(copy.deepcopy(cur[0]))       # מוסיף ערך שני (הרשימה היא reference במסר)
+                    ok = True
+                else:
+                    ok = False
+                verb = "ensure-multi (≥2 ערכים)"
             elif is_remove:
                 ok = _remove_field_smart(pub.value, path)
                 verb = "השמטה"
@@ -855,7 +923,10 @@ class DotNetRunner:
         if not waits:
             return
         overrides = executable.source_overrides or {}
-        sample = executable.source_sample
+        # ★ ה-forward (ערך-יעד מדויק) ובדיקת מקור-קיים חייבים לקרוא את **המקור האפקטיבי שנשלח** — pub.value
+        # *אחרי* _apply_source_sample (דריסות + setup כמו ENSURE_MULTI / המרת N→R), לא את הדוגמה המקורית.
+        _pub = next((a for a in executable.actions if isinstance(a, KafkaPublishAction)), None)
+        sample = (_pub.value if (_pub and _pub.value) else None) or executable.source_sample
         expected: Dict[str, Any] = {}
         absent_src: List[str] = []
         if spec.get("verify_all_populated"):
@@ -894,19 +965,24 @@ class DotNetRunner:
                 skipped.append(str(tf))
                 continue
             rule = (idx.get("rules") or {}).get(key)
+            rkind = rule.get("kind") if rule else None
+            # סוגים שאי-אפשר לחשב מהם ערך מדויק בבטחה → אימות נוכחות בלבד (לא לסמוך על literal של ה-LLM)
+            noncomputable = rkind in (None, "derived", "concat_multi", "positional", "lookup")
             if exp in _ABSENT_MARKERS or exp == "absent":
                 expected[key] = "__ABSENT__"
             elif exp in _PRESENT_MARKERS or exp == "present":
                 expected[key] = "__PRESENT__"
-            elif exp not in (None, "", "auto", "compute") and rule and rule.get("kind") == "derived":
-                # ★ שדה נגזר (שרשור family+given / lookup / strip): הערך תלוי-דוגמה ואינו בר-דריסה, ולכן
-                # ה-literal של ה-LLM הוא ניחוש שלא תואם את הדוגמה (member_name='טסט טסט חדש' מול 'כהן יוסי').
-                # מאמתים **נוכחות** בלבד — לא ניתן לאמת ערך מדויק של שדה מחושב בלי לשלוט במקור.
-                expected[key] = "__PRESENT__"
             elif exp not in (None, "", "auto", "compute"):
-                expected[key] = exp                       # literal מהתסריט (code_map/verbatim)
+                # יש literal מהתסריט. לשדה **בר-חישוב** (code_map/verbatim/concatenate/strip/fixed) מעדיפים את
+                # הערך ה**מחושב** מהמקור האפקטיבי (מדויק) על ה-literal של ה-LLM (שעלול להיות ניחוש — organ);
+                # לשדה לא-בר-חישוב (derived/concat_multi/lookup) — נוכחות בלבד (member_name='טסט טסט חדש').
+                if noncomputable:
+                    expected[key] = "__PRESENT__"
+                else:
+                    computed = _compute_expected(idx, tf, overrides, sample)
+                    expected[key] = computed if computed != "__PRESENT__" else exp
             else:
-                expected[key] = _compute_expected(idx, tf, overrides)
+                expected[key] = _compute_expected(idx, tf, overrides, sample)
         removed = _sanitize_expected_fields(expected, strip_member=bool(executable.source_sample))
         if skipped:
             self._log("VERIFY", "warn",

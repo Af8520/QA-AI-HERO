@@ -515,7 +515,7 @@ def _build_transform_index(payload_templates):
         leaf = target.split(".")[-1]
         # collision על leaf → None (לא לנחש)
         by_target_leaf[leaf] = None if leaf in by_target_leaf and by_target_leaf[leaf] != src_path else src_path
-        rules.setdefault(target, _parse_transform_rule(spec.get("rule")))
+        rules.setdefault(target, _parse_transform_rule(spec.get("rule"), src_path))
         if target not in target_paths:
             target_paths.append(target)
     if not forward:

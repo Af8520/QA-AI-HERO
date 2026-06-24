@@ -519,6 +519,8 @@ SYSTEM_PROMPT_DOTNET_ANCHORED = """אתה QA Test Compiler (.NET, מכבי). ה�
   "practitioner_id/license/name של act_practitioner") ורק האובייקט עצמו (act_practitioner) מופיע
   ב-AVAILABLE_FIELDS — אמת את **האובייקט** (`{"target_field":"act_practitioner"}`), לא את תת-השדות.
   אל תמציא שמות תת-שדה שאינם ברשימה.
+- ★ שדה עם **ערכים משורשרים/מרובים** (organ עם ';' וכו') → פשוט `verify` על השדה (בלי expect). המערכת תבנה
+  מקור רב-ערכי ותאמת את השרשור המדויק לבד — אל תחשב/תנחש את הערך המשורשר.
 - אל תכתוב נתיבים, אינדקסים, או מבני-JSON. שמות לוגיים בלבד. JSON תקני בלבד.
 """
 
@@ -680,7 +682,7 @@ class DotNetCompiler:
         ל-source_path מדויק דרך ה-transform_index (בלי ניחוש), מסנתז publish/wait, ושומר verify_spec
         ל-runner. ה-runner יבנה את ה-publish מהדוגמה + הדריסות, ואת expected_fields מ-verify_spec."""
         from agents.runner.dotnet_runner import (_resolve_source_path, _canonical_target_path,
-                                                 _SET_FIRST_CHAR_PREFIX)
+                                                 _SET_FIRST_CHAR_PREFIX, _ENSURE_MULTI_MARKER)
         pt = self.payload_templates or {}
         idx = self.transform_index or {}
         source_overrides: Dict[str, Any] = {}
@@ -741,14 +743,23 @@ class DotNetCompiler:
                 if not isinstance(v, dict):
                     continue
                 tf = v.get("target_field")
-                exp = v.get("expect")
-                if not tf or exp in (None, "", "auto", "compute", "present", "absent", "__PRESENT__", "__ABSENT__"):
+                if not tf:
                     continue
                 src = _resolve_source_path(idx, tf)
                 if not src or not _is_concrete_source_path(src) or src in source_overrides:
                     continue
                 rule = (idx.get("rules") or {}).get(_canonical_target_path(idx, tf))
                 kind = rule.get("kind") if rule else None
+                # ★ concatenate: עצם בדיקת השדה = בדיקת השרשור → setup ריבוי-ערכים במקור (ENSURE_MULTI),
+                # גם בלי expect מפורש. ה-runner יפיק מפריד ביעד וה-forward יאמת אותו מדויק. דינמי לכל שדה-רשימה.
+                if kind == "concatenate":
+                    source_overrides[src] = _ENSURE_MULTI_MARKER
+                    notes.append(f"setup concatenate '{tf}': __ENSURE_MULTI__ (≥2 ערכים במקור) — דטרמיניסטי")
+                    continue
+                # code_map/verbatim: גזירת override מ-expect (דורש ערך-יעד מפורש מהתסריט)
+                exp = v.get("expect")
+                if exp in (None, "", "auto", "compute", "present", "absent", "__PRESENT__", "__ABSENT__"):
+                    continue
                 if kind == "code_map":
                     cmap = rule.get("map") or {}
                     if str(exp) in cmap:                               # exp הוא כבר קוד-מקור
