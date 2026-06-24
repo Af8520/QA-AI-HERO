@@ -1597,6 +1597,20 @@ class DotNetRunner:
             )
             return step, {**observed, "candidates": candidates}
 
+        # ★ שקיפות: מציגים **מה** אומת (שדה=ערך-צפוי) גם במעבר — כדי שיהיה ברור על מה נרשם pass
+        # (לא רק "תקין"). מסננים markers/נוכחות לתצוגה קריאה.
+        ef = action.expected_fields or {}
+        if ef:
+            shown = []
+            for k, v in ef.items():
+                leaf = k.split(".")[-1]
+                if isinstance(v, str) and v in _PRESENT_MARKERS:
+                    shown.append(f"{leaf}=⟨קיים⟩")
+                elif isinstance(v, str) and v in _ABSENT_MARKERS:
+                    shown.append(f"{leaf}=⟨נעדר⟩")
+                else:
+                    shown.append(f"{leaf}={v}")
+            self._log("VERIFY", "success", f"אומתו {len(ef)} שדות ביעד: " + ", ".join(shown))
         self._log("MATCH", "success", f"נמצא מסר תואם offset={observed.get('offset')} + שדות תקינים")
         step = StepResult(
             step=f"WAIT topic={action.topic}",
