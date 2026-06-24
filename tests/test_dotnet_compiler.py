@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -113,6 +115,55 @@ def test_parse_llm_response_no_sample_leaves_fields_empty():
     assert ex is not None
     assert ex.source_sample is None
     assert ex.source_overrides == {}
+
+
+@pytest.mark.asyncio
+async def test_source_builder_agent_sees_sample_and_rules_and_applies_concrete_value():
+    """★ הסוכן Source-Builder: כשיש sample+transform_index, ה-prompt הוא SOURCE_BUILDER, ה-user_payload
+    כולל את ה-SOURCE_SAMPLE ואת ה-TRANSFORMATIONS (כולל rule), והערך הסופי שהסוכן מחזיר (ת"ז 2999735863
+    שחושב מהדוגמה) זורם ל-source_overrides דרך ה-parser הקיים."""
+    idx = {
+        "by_target_path": {"_data.member_id": "Patient.identifier.value[system=PID]"},
+        "by_target_leaf": {"member_id": "Patient.identifier.value[system=PID]"},
+        "forward": {"Patient.identifier.value[system=PID]": {"target_field_path": "_data.member_id",
+                                                             "rule": "first digit is type code"}},
+        "rules": {"_data.member_id": {"kind": "positional"}},
+        "target_paths": ["_data.member_id"],
+    }
+    sample = {"resourceType": "Bundle", "entry": [
+        {"resource": {"resourceType": "Patient",
+                      "identifier": [{"system": "PID", "value": "0999735863"}]}}]}
+    pt = {"source_topic": "s", "target_topic": "t", "templates": {"create": {}},
+          "target_entity_type": "lab", "transformations": idx["forward"]}
+
+    # הסוכן מחזיר ערך **סופי** שחושב מהדוגמה (ספרה ראשונה הוחלפה ל-2)
+    mock_resp = MagicMock()
+    mock_resp.choices = [MagicMock(message=MagicMock(content=json.dumps({
+        "overrides": [{"target_field": "member_id", "value": "2999735863"}],
+        "expect_no_message": True, "verify": [],
+    })))]
+    mock_client = MagicMock()
+    mock_client.chat.completions.create = AsyncMock(return_value=mock_resp)
+
+    with patch("agents.compiler.dotnet_compiler.settings") as mock_settings, \
+         patch("agents.compiler.dotnet_compiler._make_openai_client", return_value=mock_client):
+        mock_settings.azure_openai_enabled = True
+        mock_settings.compiler_deployment = "gpt-x"
+        mock_settings.KAFKA_DEFAULT_TIMEOUT_SECONDS = 30
+        mock_settings.COUCHBASE_DEFAULT_TIMEOUT_SECONDS = 30
+        c = DotNetCompiler(payload_templates=pt, sample_messages=[sample], transform_index=idx)
+        ex = await c.compile({"id": 7, "title": "צה\"ל ת.ז=2", "text": "שלח ת\"ז שמתחילה ב-2"})
+
+    # ה-prompt + ה-payload שנשלחו לסוכן
+    sent = mock_client.chat.completions.create.call_args.kwargs["messages"]
+    system_msg, user_msg = sent[0]["content"], sent[1]["content"]
+    assert "Source-Builder" in system_msg                    # ה-prompt הייעודי
+    assert "0999735863" in user_msg                          # ה-SOURCE_SAMPLE הוזן (ערך נוכחי לקריאה)
+    assert "Patient.identifier.value[system=PID]" in user_msg  # ה-TRANSFORMATIONS הוזנו (source_path+rule)
+    # הערך הסופי מהסוכן הוחל דרך ה-parser הקיים
+    assert ex.source_overrides == {"Patient.identifier.value[system=PID]": "2999735863"}
+    wait = next(a for a in ex.actions if a.kind == "kafka_wait")
+    assert wait.expect_no_message is True
 
 
 # ============================================================
