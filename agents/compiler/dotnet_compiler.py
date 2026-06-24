@@ -45,6 +45,10 @@ def _is_concrete_source_path(path: Any) -> bool:
         return False
     if p.upper().startswith(("FIXED", "DERIVED")):
         return False
+    # ★ נתיב סינתטי של ה-Payload Builder ('code__name', 'id__transaction') — אותו מקור עם מיפוי-יעד נוסף,
+    # **אינו** שדה אמיתי הניתן לדריסה. override עליו נכשל (השדה לא קיים) → לאימות בלבד (מחושב מה-base).
+    if re.search(r"__[A-Za-z]\w*$", p.split(".")[-1]):
+        return False
     # ★ defense-in-depth: שרשור שמבוטא ברווח (בלי '+') — יותר מנתיב-עם-נקודה אחד מופרד ברווח.
     # מקור-יחיד תקין הוא token אחד (גם עם פילטר [system=PID] — בלי רווחים בין נתיבים).
     if " " in p and sum(1 for tok in p.split() if "." in tok) > 1:
@@ -738,7 +742,8 @@ class DotNetCompiler:
         ל-source_path מדויק דרך ה-transform_index (בלי ניחוש), מסנתז publish/wait, ושומר verify_spec
         ל-runner. ה-runner יבנה את ה-publish מהדוגמה + הדריסות, ואת expected_fields מ-verify_spec."""
         from agents.runner.dotnet_runner import (_resolve_source_path, _canonical_target_path,
-                                                 _SET_FIRST_CHAR_PREFIX, _ENSURE_MULTI_MARKER)
+                                                 _SET_FIRST_CHAR_PREFIX, _ENSURE_MULTI_MARKER,
+                                                 _strip_synthetic_suffix)
         pt = self.payload_templates or {}
         idx = self.transform_index or {}
         source_overrides: Dict[str, Any] = {}
@@ -790,6 +795,31 @@ class DotNetCompiler:
         )
         verify_all = bool(data.get("verify_all_populated"))
         verify_list = data.get("verify") or []
+        # ★★★ חילוץ-קוד דטרמיניסטי מהתסריט (סוף ה-variance בתסריטי-קוד): קודי-המקור (M_PAT_HPV...) מופיעים
+        # **מילולית** בטקסט ("category.coding.code = M_PAT_HPV"). סורקים מול אוצר-הקודים של כל code_map ומגדירים
+        # את שדה-המקור + מוסיפים verify לכל היעדים שניזונים ממנו (code+name) → המנוע מחשב ערך מדויק. אפס תלות
+        # ב-LLM, דינמי לכל code_map שה-PB מגדיר. גובר על ה-LLM (הקוד בטקסט = אמת-קרקע).
+        by_tp = idx.get("by_target_path") or {}
+        for tfp, rule in (idx.get("rules") or {}).items():
+            if not (isinstance(rule, dict) and rule.get("kind") == "code_map"):
+                continue
+            base = _strip_synthetic_suffix(by_tp.get(tfp))
+            if not base or not _is_concrete_source_path(base):
+                continue
+            cmap = rule.get("map") or {}
+            for code in sorted(cmap, key=len, reverse=True):       # ארוך-ראשון (M_PAT_HPV לפני HPV)
+                if re.search(r"(?<![A-Za-z0-9_])" + re.escape(code) + r"(?![A-Za-z0-9_])", text or ""):
+                    if source_overrides.get(base) != code:
+                        source_overrides[base] = code
+                        notes.append(f"חילוץ-קוד דטרמיניסטי מהתסריט: {base} = {code}")
+                    # ודא verify לכל היעדים שניזונים מאותו מקור (examination_type_code + _name)
+                    have = {v.get("target_field") for v in verify_list if isinstance(v, dict)}
+                    for t, s in by_tp.items():
+                        leaf = t.split(".")[-1]
+                        if _strip_synthetic_suffix(s) == base and t not in have and leaf not in have:
+                            verify_list.append({"target_field": leaf})
+                            have.add(leaf)
+                    break
         # ★★★ גזירת override מ-verify (תיקון מרכזי): בתרחיש מיפוי-קוד חיובי ("ודא ש-Z_PAT_NGC→2") ה-LLM
         # פולט verify עם ערך-יעד צפוי (2) אבל **שוכח להוסיף override** שמגדיר את הקוד במקור → המקור נשאר
         # ערך-הדוגמה (M_PAT_HIST→3) → הערך הצפוי לא מתקבל. דטרמיניסטית: אם ל-verify יש ערך-יעד של code_map

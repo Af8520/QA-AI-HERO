@@ -166,6 +166,32 @@ async def test_source_builder_agent_sees_sample_and_rules_and_applies_concrete_v
     assert wait.expect_no_message is True
 
 
+def test_deterministic_code_extraction_from_test_text():
+    """★★★ סוף ה-variance בתסריטי-קוד: גם כשה-LLM מחזיר **כלום** ({}), הקוד מחולץ מילולית מטקסט-התסריט
+    ('category.coding.code = M_PAT_HPV') → נקבע במקור + נוספים verify ל-code ו-name (שניזונים מאותו מקור).
+    גם החוק עם מפריד ';' נפענח, וגם ה-synthetic path 'code__name' מטופל. אפס תלות ב-LLM."""
+    from pipeline.dotnet_pipeline import _build_transform_index
+    tfs = {
+        "DiagnosticReport.category[0].coding[0].code": {
+            "target_field_path": "_data.examination_type_code",
+            "rule": "M_PAT_HPV/Z_PAT_HPV=1; M_PAT_NGC/Z_PAT_NGC=2; M_CYT=7; EXT_LAB=5"},
+        "DiagnosticReport.category[0].coding[0].code__name": {
+            "target_field_path": "_data.examination_type_name",
+            "rule": "M_PAT_HPV/Z_PAT_HPV=PAP/HPV; M_PAT_NGC/Z_PAT_NGC=ציטולוגיה; EXT_LAB=מעבדות חוץ"},
+    }
+    idx = _build_transform_index({"transformations": tfs})
+    c = DotNetCompiler(payload_templates={"source_topic": "s", "target_topic": "t",
+                                          "templates": {"create": {}}, "transformations": tfs},
+                       sample_messages=[{"resourceType": "Bundle"}], transform_index=idx)
+    text = 'שלח מסר כאשר category.coding.code = "M_PAT_HPV" ב-DiagnosticReport'
+    ex = c._parse_anchored_response("תרחיש חיובי M_PAT_HPV", None, text, {})   # data={} = ה-LLM לא נתן כלום
+    # הקוד חולץ מהטקסט ונקבע במקור (הנתיב האמיתי, לא ה-synthetic)
+    assert ex.source_overrides == {"DiagnosticReport.category[0].coding[0].code": "M_PAT_HPV"}
+    # נוספו verify לשני היעדים שניזונים מאותו מקור
+    leaves = {v["target_field"] for v in ex.verify_spec["verify"]}
+    assert "examination_type_code" in leaves and "examination_type_name" in leaves
+
+
 # ============================================================
 # Phase 3 — anchored contract: _parse_anchored_response
 # ============================================================

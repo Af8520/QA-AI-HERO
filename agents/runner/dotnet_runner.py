@@ -597,7 +597,8 @@ def _resolve_logical_holder(obj: Any, path: str):
 # ★ עיגון דטרמיניסטי של transformations — parser חוקים + מיפוי שדה-לוגי
 # ============================================================
 
-_CODE_MAP_TOKEN = re.compile(r"\s*([^=,→>]+?)\s*(?:==|=|->|→)\s*([^,]+?)\s*(?:,|$)")
+# ★ מפריד-זוגות יכול להיות ',' **או** ';' (ה-Payload Builder משתמש ב-';': "A=1; B=2"). LHS/RHS לא כוללים מפריד.
+_CODE_MAP_TOKEN = re.compile(r"\s*([^=,;→>]+?)\s*(?:==|=|->|→)\s*([^,;]+?)\s*(?:[,;]|$)")
 
 
 def _detect_concat_sep(rule: str) -> str:
@@ -634,7 +635,8 @@ def _parse_transform_rule(rule: Any, src_path: Optional[str] = None) -> Dict[str
     ok = bool(matches)
     for lhs, rhs in matches:
         rhs = rhs.strip().strip("'\"")
-        if not rhs or len(rhs) > 24 or " " in rhs or "+" in rhs or "(" in rhs:
+        # RHS = ערך-יעד קצר (קוד/שם): מתירים עד 2 רווחים ("מעבדות חוץ") ו-'/' ("PAP/HPV"), אבל לא ביטוי/משפט.
+        if not rhs or len(rhs) > 32 or rhs.count(" ") > 2 or "+" in rhs or "(" in rhs:
             ok = False
             break
         for token in str(lhs).split("/"):
@@ -660,6 +662,22 @@ def _parse_transform_rule(rule: Any, src_path: Optional[str] = None) -> Dict[str
     if mfx:
         return {"kind": "fixed", "value": mfx.group(1), "map": None}
     return {"kind": "derived", "map": None}
+
+
+# ★ ה-Payload Builder מקודד "עוד target מאותו source" כ-'realpath__suffix' (code__name→examination_type_name,
+# id__transaction→mac_transaction_id). זה **אינו** נתיב אמיתי במסר — זה אותו מקור בדיוק עם מיפוי-יעד אחר.
+_SYNTH_SUFFIX_RE = re.compile(r"__[A-Za-z]\w*$")
+
+
+def _strip_synthetic_suffix(path: Optional[str]) -> Optional[str]:
+    """מסיר '__suffix' סינתטי מהסגמנט האחרון → הנתיב האמיתי. 'category[0].coding[0].code__name' →
+    'category[0].coding[0].code'; 'MessageHeader.id__transaction' → 'MessageHeader.id'. נתיב רגיל ללא שינוי."""
+    if not isinstance(path, str) or not path:
+        return path
+    segs = _split_path_segments(path)
+    if segs:
+        segs[-1] = _SYNTH_SUFFIX_RE.sub("", segs[-1])
+    return ".".join(segs)
 
 
 def _resolve_source_path(transform_index: Optional[Dict[str, Any]], ref: str) -> Optional[str]:
@@ -699,19 +717,26 @@ def _compute_expected(transform_index: Optional[Dict[str, Any]], target_field: s
     rule = rules.get(tfp) or {}
     kind = rule.get("kind")
     src = _resolve_source_path(transform_index, target_field)
-    ov = (applied_overrides or {}).get(src) if src else None
-    # ערך-המקור האפקטיבי: override אם נדרס (ולא marker/callable), אחרת מהדוגמה
-    if ov is not None and not (isinstance(ov, str) and ov.startswith(("__REMOVE__", "__DELETE__", "__OMIT__",
-                                                                      _SET_FIRST_CHAR_PREFIX, _ENSURE_MULTI_MARKER))):
+    base_src = _strip_synthetic_suffix(src) if src else None        # 'code__name' → 'code' (אותו מקור אמיתי)
+    # ★ ערך-המקור האפקטיבי: override (על ה-src או על ה-base האמיתי), אחרת הערך מהדוגמה (מ-base). כך
+    # examination_type_name (מקור סינתטי 'code__name') מחושב מאותו ערך-מקור כמו examination_type_code.
+    ov = None
+    for k in (src, base_src):
+        if k and k in (applied_overrides or {}):
+            ov = (applied_overrides or {})[k]
+            break
+    is_marker = isinstance(ov, str) and ov.startswith(("__REMOVE__", "__DELETE__", "__OMIT__",
+                                                       _SET_FIRST_CHAR_PREFIX, _ENSURE_MULTI_MARKER))
+    if ov is not None and not is_marker:
         eff = ov
-    elif src and source_sample is not None:
-        read = _read_field_smart(source_sample, src)
+    elif base_src and source_sample is not None:
+        read = _read_field_smart(source_sample, base_src)
         eff = read if read is not _FIELD_MISSING else None
     else:
         eff = None
 
-    if kind == "code_map" and ov is not None:
-        mapped = (rule.get("map") or {}).get(str(ov))
+    if kind == "code_map" and eff is not None:
+        mapped = (rule.get("map") or {}).get(str(eff))
         return mapped if mapped is not None else "__PRESENT__"
     if kind == "verbatim" and eff is not None:
         return eff

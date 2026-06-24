@@ -18,6 +18,7 @@ from agents.runner.dotnet_runner import (  # noqa: E402
     DotNetRunner,
     _check_expected_fields,
     _compute_expected,
+    _strip_synthetic_suffix,
     _make_key_unique,
     _matches,
     _parse_transform_rule,
@@ -36,6 +37,34 @@ from models.dotnet_test_case import (  # noqa: E402
     KafkaWaitAction,
 )
 from models.test_case import TestStatus  # noqa: E402
+
+
+def test_semicolon_codemap_and_synthetic_suffix_compute():
+    """★★★ שני באגים בחוזה ה-PB: (1) code_map עם מפריד ';' לא נפענח (→ presence-pass שקרי);
+    (2) 'code__name' synthetic path → examination_type_name לא חושב. שניהם מתוקנים: override על הקוד
+    האמיתי מחשב **גם** את הקוד (1) **וגם** את השם (PAP/HPV), מאותו ערך-מקור."""
+    assert _strip_synthetic_suffix("DiagnosticReport.category[0].coding[0].code__name") == \
+        "DiagnosticReport.category[0].coding[0].code"
+    assert _strip_synthetic_suffix("MessageHeader.id__transaction") == "MessageHeader.id"
+    assert _strip_synthetic_suffix("Patient.identifier.value") == "Patient.identifier.value"  # רגיל ללא שינוי
+
+    # code_map עם ';' (כמו בחוזה האמיתי) נפענח; RHS רב-מילים ('מעבדות חוץ') מותר
+    r = _parse_transform_rule("M_PAT_HPV/Z_PAT_HPV=PAP/HPV; M_CYT=ציטוגנטיקה; EXT_LAB=מעבדות חוץ")
+    assert r["kind"] == "code_map"
+    assert r["map"]["M_PAT_HPV"] == "PAP/HPV" and r["map"]["EXT_LAB"] == "מעבדות חוץ"
+
+    code_path = "DiagnosticReport.category[0].coding[0].code"
+    idx = {
+        "by_target_path": {"_data.examination_type_code": code_path,
+                           "_data.examination_type_name": code_path + "__name"},
+        "by_target_leaf": {"examination_type_code": code_path, "examination_type_name": code_path + "__name"},
+        "rules": {"_data.examination_type_code": {"kind": "code_map", "map": {"M_PAT_HPV": "1"}},
+                  "_data.examination_type_name": {"kind": "code_map", "map": {"M_PAT_HPV": "PAP/HPV"}}},
+        "target_paths": ["_data.examination_type_code", "_data.examination_type_name"],
+    }
+    applied = {code_path: "M_PAT_HPV"}                    # override על הקוד האמיתי בלבד
+    assert _compute_expected(idx, "examination_type_code", applied) == "1"
+    assert _compute_expected(idx, "examination_type_name", applied) == "PAP/HPV"  # מחושב מה-base
 
 
 def test_substitute_token():
