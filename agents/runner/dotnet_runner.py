@@ -765,7 +765,10 @@ def _sanitize_expected_fields(expected: Dict[str, Any], strip_member: bool) -> L
     removed: List[str] = []
     for k in list(expected.keys()):
         leaf = k.split(".")[-1]
-        if leaf in drop or "mac_" in k:
+        # ★ מסירים רק את השדות התנודתיים המפורשים (KEY/זהות/correlation/transaction) — **לא** כל mac_*:
+        # שדות-Header קבועים (mac_producer_id/mac_sys_name/mac_channel...) הם בני-אימות שוויון ותסריט ה-Header
+        # מאמת אותם במפורש. (mac_correlation_id/mac_transaction_id התנודתיים כבר ב-_NON_ASSERTABLE_LEAVES.)
+        if leaf in drop:
             del expected[k]
             removed.append(k)
     return removed
@@ -956,6 +959,9 @@ class DotNetRunner:
         absent_src: List[str] = []
         if spec.get("verify_all_populated"):
             for tp in idx.get("target_paths") or []:
+                # ★ דלג על נתיב-יעד עם wildcard ('_data.*.practitioner_name') — אינו שדה ממשי בר-אימות.
+                if "*" in str(tp):
+                    continue
                 # ★ דלג על שדה ש**מקורו אינו בדוגמה** (למשל referral_practitioner כשאין PractitionerRole code=R) —
                 # ה-Worker לא יפיק אותו, ואסור להכשיל "ודא הכל מאוכלס" על שדה שכלל לא קיים בקלט. רק למקור
                 # קונקרטי-יחיד (לא שרשור 'a + b' — כזה כן מופק מהדוגמה). דינמי לכל אפיון.
@@ -2024,6 +2030,10 @@ def _resolve_field_path(obj: Any, path: str) -> Any:
             val = _find_suffix_anywhere(obj, fields[-2:])
         else:
             val = _find_by_leaf_name(obj, fields[-1] if fields else path)
+    elif val is _FIELD_MISSING:
+        # ★ נתיב חד-סגמנטי (leaf בודד בלי '.', כמו 'mac_producer_id' שהתסריט מאמת) — חיפוש חד-משמעי בכל
+        # עומק (גם תחת 'header'/'_data'). כך אסרשנים על שדות שהתסריט נוקב בשמם הפשוט נפתרים. דו-משמעי → missing.
+        val = _find_by_leaf_name(obj, path)
     return val
 
 
@@ -2071,13 +2081,12 @@ def _check_expected_fields(value: Dict[str, Any], expected: Dict[str, Any]) -> L
     if not expected:
         return issues
     if not isinstance(value, (dict, list)):
-        return [k for k in expected.keys() if not _is_producer_metadata_key(k)]
+        return list(expected.keys())
     for k, want in expected.items():
-        if _is_producer_metadata_key(k):
-            continue                  # metadata של ה-producer → soft (מדלגים)
-        actual = _resolve_field_path(value, k) if "." in k else (
-            value.get(k, _FIELD_MISSING) if isinstance(value, dict) else _FIELD_MISSING
-        )
+        # ★ פותרים כל מפתח דרך _resolve_field_path (תומך dotted + leaf-בודד חד-משמעי בכל עומק, כולל תחת
+        # 'header'/'_data'). כך אסרשנים שהתסריט נוקב בשמם הפשוט (mac_producer_id=75) נפתרים ומאומתים.
+        # (השדות התנודתיים — mac_correlation_id/mac_transaction_id — כבר הוסרו ב-_sanitize_expected_fields.)
+        actual = _resolve_field_path(value, k)
         # ★ אימות היעדרות — השדה לא אמור להופיע ביעד (תרחיש "אובייקט לא נבנה")
         if isinstance(want, str) and want in _ABSENT_MARKERS:
             present_nonempty = actual is not _FIELD_MISSING and str(actual).strip() != "" and actual not in (None, {}, [])

@@ -324,22 +324,20 @@ def test_check_expected_fields_auto_list_index():
                _check_expected_fields({"_data": {"parameters": []}}, {"_data.parameters.member_id": "1"}))
 
 
-def test_check_expected_fields_skips_producer_metadata():
-    """★ header.mac_* = metadata של ה-producer (לא טרנספורמציה) → מדולג, גם אם הערך 'שגוי'.
-    ה-LLM לא יודע את ערך ה-mac_sys_name האמיתי (encryption_child_development_worker)."""
-    value = {"header": {"mac_sys_name": "encryption_child_development_worker"},
+def test_check_expected_fields_verifies_header_constants():
+    """★ שדות-Header קבועים (mac_producer_id/mac_sys_name/mac_channel) הם **בני-אימות** — תסריט ה-Header
+    מאמת אותם מול הערך שהתסריט נוקב. נפתרים כ-leaf בודד (תחת 'header') וגם dotted; mismatch נתפס.
+    (השדות התנודתיים mac_correlation_id/mac_transaction_id מוסרים מראש ב-_sanitize_expected_fields, לא כאן.)"""
+    value = {"header": {"mac_sys_name": ".NET", "mac_producer_id": 75, "mac_channel": "Internal"},
              "action": "create",
              "_data": {"parameters": [{"member_id": "555"}]}}
-    # mac_sys_name='Worker' שגוי — אבל מדולג (metadata) → אין כשל
-    assert _check_expected_fields(value, {"header.mac_sys_name": "Worker"}) == []
-    assert _check_expected_fields(value, {"headers.mac_producer_name": "Worker"}) == []
-    # שדה דאטה אמיתי עדיין נאכף לצד metadata מדולג
-    issues = _check_expected_fields(value, {
-        "header.mac_sys_name": "Worker",          # מדולג
-        "_data.parameters.0.member_id": "999",    # שגוי → נתפס
-    })
-    assert any("member_id" in i for i in issues)
-    assert not any("mac_sys_name" in i for i in issues)
+    # leaf בודד + dotted — שניהם נפתרים ומאומתים (75 int מול '75' str OK)
+    assert _check_expected_fields(value, {"mac_sys_name": ".NET", "mac_producer_id": "75"}) == []
+    assert _check_expected_fields(value, {"header.mac_channel": "Internal"}) == []
+    # ערך שגוי לקבוע-Header → נתפס (לא מדולג יותר)
+    assert any("mac_sys_name" in i for i in _check_expected_fields(value, {"mac_sys_name": "Worker"}))
+    # שדה דאטה אמיתי עדיין נאכף
+    assert any("member_id" in i for i in _check_expected_fields(value, {"_data.parameters.0.member_id": "999"}))
 
 
 @pytest.mark.asyncio
