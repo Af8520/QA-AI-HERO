@@ -14,11 +14,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from agents.bug_agent.ado_client import ADOClient
 from agents.bug_agent.bug_agent import BugAgent
-from agents.compiler.smart_compiler import SmartCompiler
+from agents.compiler.smart_compiler import LLMUnavailableError, SmartCompiler
 from agents.reporter.reporter_agent import ReporterAgent
 from agents.runner import get_runner
 from agents.validator.validator_agent import ValidatorAgent
@@ -101,6 +101,8 @@ async def run_esb_pipeline(session: ChatSession) -> PipelineResult:
     compiler = SmartCompiler(spec_md=spec_md, collection=collection)
     executables: List[ExecutableTestCase] = []
     compile_failures = 0
+    # ★ כשל-LLM תשתיתי (רשת/proxy/auth) הוא גורף — עוצרים מיד עם הודעה אחת ברורה, לא 25× "compile failed".
+    llm_unavailable: Optional[str] = None
     for raw in raw_cases:
         tc_label = raw.get("title") or f"TC-{raw.get('id')}"
         try:
@@ -108,6 +110,23 @@ async def run_esb_pipeline(session: ChatSession) -> PipelineResult:
             executables.append(ex)
             url_display = ex.request.url if ex.request.url else "(no url)"
             await emit(f"  ✓ {ex.test_case_id} → {ex.request.method} {url_display}")
+        except LLMUnavailableError as e:
+            from models.executable_test_case import HttpRequestSpec
+            from models.test_case import ResponseAssertion
+            llm_unavailable = e.detail
+            log.warning("esb_compile_llm_unavailable", category=e.category, detail=e.detail)
+            for r in raw_cases[len(executables):]:
+                executables.append(ExecutableTestCase(
+                    test_case_id=r.get("title") or f"TC-{r.get('id')}",
+                    ado_test_case_id=r.get("id"),
+                    request=HttpRequestSpec(method="GET", url="about:blank"),
+                    expected_response=ResponseAssertion(status=0),
+                    source_text=r.get("text") or "",
+                    compiler_notes=f"LLM לא נגיש — {e.detail}",
+                ))
+            compile_failures = len(raw_cases)
+            await emit(f"  ⛔ עצירה — ה-LLM לא נגיש: {e.detail}")
+            break
         except Exception as e:
             # אל תפיל את כל ה-pipeline על תסריט אחד בעייתי
             compile_failures += 1
@@ -124,10 +143,13 @@ async def run_esb_pipeline(session: ChatSession) -> PipelineResult:
             )
             executables.append(placeholder)
             await emit(f"  ✗ {tc_label} → שגיאת קומפילציה: {str(e)[:100]}")
-    if compile_failures:
-        await emit(f"⚠ {compile_failures} תסריטים נכשלו בקומפילציה (יסומנו BLOCKED בריצה)")
-    compile_status = "done" if compile_failures == 0 else ("failed" if compile_failures == len(raw_cases) else "done")
-    await tl_step(3, compile_status, f"Compile ({len(raw_cases) - compile_failures}/{len(raw_cases)} OK)")
+    if llm_unavailable:
+        await tl_step(3, "failed", f"LLM לא נגיש — {llm_unavailable[:80]}")
+    else:
+        if compile_failures:
+            await emit(f"⚠ {compile_failures} תסריטים נכשלו בקומפילציה (יסומנו BLOCKED בריצה)")
+        compile_status = "done" if compile_failures == 0 else ("failed" if compile_failures == len(raw_cases) else "done")
+        await tl_step(3, compile_status, f"Compile ({len(raw_cases) - compile_failures}/{len(raw_cases)} OK)")
 
     # שלב 4 — execute
     await tl_step(4, "active", f"Execute (0/{len(executables)})")

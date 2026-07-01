@@ -16,6 +16,7 @@ from typing import List, Optional, Tuple
 from agents.bug_agent.ado_client import ADOClient
 from agents.bug_agent.bug_agent import BugAgent
 from agents.compiler.dotnet_compiler import DotNetCompiler
+from agents.compiler.smart_compiler import LLMUnavailableError
 from agents.payload_builder import PayloadBuilderBridge
 from agents.payload_builder.payload_builder_bridge import PayloadBuilderError
 from agents.reporter.reporter_agent import ReporterAgent
@@ -141,6 +142,10 @@ async def run_dotnet_pipeline(session: ChatSession) -> PipelineResult:
     key_source_path = _extract_key_source_path(payload_templates)
     executables: List[DotNetExecutableTestCase] = []
     compile_failures = 0
+    # ★ כשל-LLM תשתיתי (רשת/proxy/auth/model) הוא **גורף** — לא עוד TC בודד. במקום להריץ 25 קריאות
+    #   כושלות ולהציג 25× "compile failed" מטעה, עוצרים מיד עם הודעה אחת ברורה (כמו infra early-abort
+    #   של ה-runner). ה-TC הראשון משמש למעשה כ-preflight.
+    llm_unavailable: Optional[str] = None
     for raw in raw_cases:
         tc_label = raw.get("title") or f"TC-{raw.get('id')}"
         try:
@@ -155,6 +160,22 @@ async def run_dotnet_pipeline(session: ChatSession) -> PipelineResult:
             executables.append(ex)
             kinds = [a.kind for a in ex.actions] or ["(empty)"]
             await emit(f"  ✓ {ex.test_case_id} → actions: {', '.join(kinds)}")
+        except LLMUnavailableError as e:
+            # ★ עצירה מסודרת: מסמנים את ה-TC הנוכחי ואת כל השאר כ-actions ריק עם הודעה מפורשת,
+            #   ולא ממשיכים לקרוא ל-LLM. שלב 4 יסמן אותם BLOCKED.
+            llm_unavailable = e.detail
+            log.warning("dotnet_compile_llm_unavailable", category=e.category, detail=e.detail)
+            for r in raw_cases[len(executables):]:
+                executables.append(DotNetExecutableTestCase(
+                    test_case_id=r.get("title") or f"TC-{r.get('id')}",
+                    ado_test_case_id=r.get("id"),
+                    actions=[],
+                    source_text=r.get("text") or "",
+                    compiler_notes=f"LLM לא נגיש — {e.detail}",
+                ))
+            compile_failures = len(raw_cases)
+            await emit(f"  ⛔ עצירה — ה-LLM לא נגיש: {e.detail}")
+            break
         except Exception as e:
             compile_failures += 1
             log.warning("dotnet_compile_failed", tc=tc_label, error=str(e))
@@ -167,10 +188,13 @@ async def run_dotnet_pipeline(session: ChatSession) -> PipelineResult:
             ))
             await emit(f"  ✗ {tc_label} → שגיאת קומפילציה: {str(e)[:100]}")
 
-    compile_status = "done" if compile_failures == 0 else (
-        "failed" if compile_failures == len(raw_cases) else "done"
-    )
-    await tl_step(3, compile_status, f"Compile ({len(raw_cases) - compile_failures}/{len(raw_cases)} OK)")
+    if llm_unavailable:
+        await tl_step(3, "failed", f"LLM לא נגיש — {llm_unavailable[:80]}")
+    else:
+        compile_status = "done" if compile_failures == 0 else (
+            "failed" if compile_failures == len(raw_cases) else "done"
+        )
+        await tl_step(3, compile_status, f"Compile ({len(raw_cases) - compile_failures}/{len(raw_cases)} OK)")
 
     # שלב 4 — Execute (Publish + Observe)
     await tl_step(4, "active", f"Publish+Observe (0/{len(executables)})")

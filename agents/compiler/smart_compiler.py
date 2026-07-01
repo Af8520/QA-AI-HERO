@@ -67,6 +67,78 @@ def _make_openai_client():
     )
 
 
+class LLMUnavailableError(RuntimeError):
+    """שגיאת-תשתית של קריאת-LLM (רשת/proxy/auth/model 404) — **נבדלת** מ-parse ריק של תסריט בודד.
+
+    כשה-LLM לא נגיש (למשל proxy ב-VDI שמחזיר "Host Not Resolvable"), אסור לבלוע את השגיאה
+    ולהחזיר actions ריק (מוצג כ-"compile failed" מטעה). במקום זה זורקים את זה — וה-pipeline
+    עוצר מוקדם עם הודעה אחת ברורה. נושא `category` ו-`detail` להצגה למשתמש.
+    """
+
+    def __init__(self, category: str, detail: str):
+        self.category = category  # connectivity | auth | model | other
+        self.detail = detail
+        super().__init__(f"[{category}] {detail}")
+
+
+def classify_llm_error(exc: Exception) -> LLMUnavailableError:
+    """ממפה חריגה מקריאת-LLM ל-LLMUnavailableError עם קטגוריה + הודעה קריאה בעברית.
+
+    עמיד: מזהה לפי שם-מחלקה של החריגה **וגם** לפי טקסט ההודעה (כולל דף-חסימה של McAfee/proxy),
+    בלי תלות-import קשיחה ב-openai. קטגוריות: connectivity (רשת/DNS/proxy/timeout/SSL),
+    auth (401/403), model (404 deployment/api-version), other."""
+    name = type(exc).__name__
+    msg = str(exc) or ""
+    low = msg.lower()
+
+    connectivity_markers = (
+        "host not resolvable", "not resolvable", "getaddrinfo", "name or service not known",
+        "temporarily unavailable", "temporary unavailable", "proxy", "timed out", "timeout",
+        "ssl", "certificate", "mcafee", "web gateway", "<html", "<!doctype",
+        "connection refused", "connection reset", "connection aborted", "failed to establish",
+        "max retries", "network is unreachable",
+    )
+    connectivity_types = {
+        "APIConnectionError", "APITimeoutError", "ConnectError", "ConnectTimeout",
+        "ReadTimeout", "ReadError", "TimeoutException", "ProxyError", "RemoteProtocolError",
+    }
+    if name in connectivity_types or any(m in low for m in connectivity_markers):
+        return LLMUnavailableError(
+            "connectivity",
+            "ה-LLM לא נגיש מהסביבה (רשת/proxy/DNS). בדוק שה-AZURE_OPENAI_ENDPOINT נגיש "
+            f"וש-host מותר ב-proxy של ה-VDI. פרטים: {msg[:300]}",
+        )
+    if name in {"AuthenticationError", "PermissionDeniedError"} or " 401" in msg or " 403" in msg \
+            or "invalid api key" in low or "access denied" in low or "unauthorized" in low:
+        return LLMUnavailableError(
+            "auth",
+            f"אימות ל-LLM נכשל (401/403). בדוק AZURE_OPENAI_KEY. פרטים: {msg[:300]}",
+        )
+    if name == "NotFoundError" or " 404" in msg or "deploymentnotfound" in low \
+            or ("deployment" in low and "does not exist" in low):
+        return LLMUnavailableError(
+            "model",
+            "ה-deployment של ה-LLM לא נמצא (404). בדוק AZURE_OPENAI_DEPLOYMENT / "
+            f"AZURE_OPENAI_API_VERSION / AZURE_OPENAI_USE_V1. פרטים: {msg[:300]}",
+        )
+    return LLMUnavailableError("other", f"קריאת-LLM נכשלה: {msg[:300]}")
+
+
+# קטגוריות תשתיתיות שמצדיקות עצירה גורפת (הבעיה זהה לכל ה-TCs) — להבדיל מ-"other"
+# (שגיאה חד-פעמית/לא-ידועה שעדיף להשאיר כ-fallback חינני לתסריט בודד).
+_INFRA_CATEGORIES = frozenset({"connectivity", "auth", "model"})
+
+
+def raise_if_llm_unavailable(exc: Exception) -> LLMUnavailableError:
+    """מסווג שגיאת-LLM. אם הקטגוריה **תשתיתית** (connectivity/auth/model — משפיעה על כל הקריאות) —
+    זורק LLMUnavailableError כדי שה-pipeline יעצור מוקדם עם הודעה אחת ברורה. אחרת ('other', חד-פעמי) —
+    **מחזיר** את השגיאה הממופה בלי לזרוק, והקורא נשאר בהתנהגות הישנה (return None → fallback)."""
+    err = classify_llm_error(exc)
+    if err.category in _INFRA_CATEGORIES:
+        raise err
+    return err
+
+
 def _coerce_to_string(value: Any) -> Optional[str]:
     """ממיר ערך ל-string. אם זה dict/list — serialize ל-JSON.
 
@@ -530,6 +602,7 @@ class SmartCompiler:
             "POSTMAN_TEMPLATE": rendered_template,
         }
 
+        # ★ כשל רשת/תשתית → LLMUnavailableError (ה-pipeline עוצר עם הודעה ברורה). JSON לא-תקין → None.
         try:
             resp = await client.chat.completions.create(
                 model=settings.AZURE_OPENAI_DEPLOYMENT,
@@ -540,10 +613,15 @@ class SmartCompiler:
                 response_format={"type": "json_object"},
                 temperature=0,
             )
+        except Exception as e:
+            err = raise_if_llm_unavailable(e)   # תשתיתי → זורק (עצירה); 'other' → fallback ל-template render
+            log.warning("compiler_llm_call_failed", error=err.detail, tc=test_case_id)
+            return None
+        try:
             content = resp.choices[0].message.content or "{}"
             data = json.loads(content)
         except Exception as e:
-            log.warning("compiler_llm_call_failed", error=str(e), tc=test_case_id)
+            log.warning("compiler_llm_bad_json", error=str(e), tc=test_case_id)
             return None
 
         return self._build_executable(
@@ -575,6 +653,7 @@ class SmartCompiler:
             "SPEC_MD": self.spec_md or "(אין MD זמין — חלץ הכל מטקסט ה-TEST_CASE)",
         }
 
+        # ★ כשל רשת/תשתית → LLMUnavailableError (עצירה מסודרת). JSON לא-תקין → None (דילוג TC).
         try:
             resp = await client.chat.completions.create(
                 model=settings.AZURE_OPENAI_DEPLOYMENT,
@@ -585,10 +664,15 @@ class SmartCompiler:
                 response_format={"type": "json_object"},
                 temperature=0,
             )
+        except Exception as e:
+            err = raise_if_llm_unavailable(e)   # תשתיתי → זורק (עצירה); 'other' → fallback
+            log.warning("compiler_llm_only_call_failed", error=err.detail, tc=test_case_id)
+            return None
+        try:
             content = resp.choices[0].message.content or "{}"
             data = json.loads(content)
         except Exception as e:
-            log.warning("compiler_llm_only_call_failed", error=str(e), tc=test_case_id)
+            log.warning("compiler_llm_only_bad_json", error=str(e), tc=test_case_id)
             return None
 
         request_data = data.get("request") or {}

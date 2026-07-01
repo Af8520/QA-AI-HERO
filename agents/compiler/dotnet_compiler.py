@@ -16,7 +16,11 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 
-from agents.compiler.smart_compiler import _make_openai_client
+from agents.compiler.smart_compiler import (
+    LLMUnavailableError,
+    _make_openai_client,
+    raise_if_llm_unavailable,
+)
 from config.logging_config import get_logger
 from config.settings import settings
 from models.dotnet_test_case import (
@@ -722,13 +726,20 @@ class DotNetCompiler:
             }
             system_prompt = SYSTEM_PROMPT_DOTNET_WITH_TEMPLATES
 
+        # ★ הפרדה קריטית: כשל **רשת/תשתית** בקריאת ה-LLM → LLMUnavailableError (ה-pipeline עוצר עם
+        # הודעה ברורה). כשל **parse** של תשובה ספציפית (JSON לא-תקין) → None (התנהגות ישנה, דילוג TC).
         try:
             resp = await _chat_json(client, settings.compiler_deployment, system_prompt,
                                     json.dumps(user_payload, ensure_ascii=False, default=str))
+        except Exception as e:
+            err = raise_if_llm_unavailable(e)   # תשתיתי → זורק (עצירה); 'other' → נופל ל-fallback
+            log.warning("dotnet_compiler_templates_llm_failed", error=err.detail, tc=test_case_id)
+            return None
+        try:
             content = resp.choices[0].message.content or "{}"
             data = json.loads(content)
         except Exception as e:
-            log.warning("dotnet_compiler_templates_llm_failed", error=str(e), tc=test_case_id)
+            log.warning("dotnet_compiler_templates_bad_json", error=str(e), tc=test_case_id)
             return None
 
         if anchored:
@@ -902,13 +913,19 @@ class DotNetCompiler:
             "SPEC_MD": self.spec_md or "(אין MD זמין — חלץ הכל מטקסט ה-TEST_CASE)",
         }
 
+        # ★ הפרדה: כשל רשת/תשתית → LLMUnavailableError (עצירה מסודרת); JSON לא-תקין → None (דילוג TC).
         try:
             resp = await _chat_json(client, settings.compiler_deployment, SYSTEM_PROMPT_DOTNET,
                                     json.dumps(user_payload, ensure_ascii=False, default=str))
+        except Exception as e:
+            err = raise_if_llm_unavailable(e)   # תשתיתי → זורק (עצירה); 'other' → fallback
+            log.warning("dotnet_compiler_llm_call_failed", error=err.detail, tc=test_case_id)
+            return None
+        try:
             content = resp.choices[0].message.content or "{}"
             data = json.loads(content)
         except Exception as e:
-            log.warning("dotnet_compiler_llm_call_failed", error=str(e), tc=test_case_id)
+            log.warning("dotnet_compiler_llm_bad_json", error=str(e), tc=test_case_id)
             return None
 
         return self._parse_llm_response(test_case_id, ado_id, text, data, source_label="LLM")

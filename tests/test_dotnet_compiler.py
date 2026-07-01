@@ -193,6 +193,66 @@ def test_deterministic_code_extraction_from_test_text():
 
 
 # ============================================================
+# LLM-unavailable — כשל רשת/proxy מרים LLMUnavailableError (לא actions ריק שקט)
+# ============================================================
+
+def test_classify_llm_error_categories():
+    """★ המסווג מזהה McAfee/DNS/proxy כ-connectivity, 401/403 כ-auth, 404 כ-model."""
+    from agents.compiler.smart_compiler import LLMUnavailableError, classify_llm_error
+
+    conn = classify_llm_error(Exception("The Host is not resolvable — McAfee Web Gateway <html>"))
+    assert isinstance(conn, LLMUnavailableError) and conn.category == "connectivity"
+
+    class APIConnectionError(Exception):
+        pass
+    assert classify_llm_error(APIConnectionError("boom")).category == "connectivity"
+
+    assert classify_llm_error(Exception("Error code: 401 - invalid api key")).category == "auth"
+    assert classify_llm_error(Exception("Error code: 404 - DeploymentNotFound")).category == "model"
+
+
+@pytest.mark.asyncio
+async def test_templates_mode_network_error_raises_llm_unavailable():
+    """★★★ הרגרסיה שנתפסה: כשקריאת ה-LLM נכשלת ברשת (proxy VDI), הקומפיילר **זורק**
+    LLMUnavailableError במקום להחזיר actions=[] שקט (שהוצג כ-'compile failed' מטעה)."""
+    from agents.compiler.smart_compiler import LLMUnavailableError
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create = AsyncMock(
+        side_effect=Exception("Connection error — Host Not Resolvable (McAfee Web Gateway)"))
+
+    with patch("agents.compiler.dotnet_compiler.settings") as mock_settings, \
+         patch("agents.compiler.dotnet_compiler._make_openai_client", return_value=mock_client):
+        mock_settings.azure_openai_enabled = True
+        mock_settings.compiler_deployment = "gpt-x"
+        c = DotNetCompiler(payload_templates={"source_topic": "s", "target_topic": "t",
+                                              "templates": {"create": {}}})
+        with pytest.raises(LLMUnavailableError) as ei:
+            await c.compile({"id": 9, "title": "TC-net", "text": "פרסם ל-topic X את {}"})
+    assert ei.value.category == "connectivity"
+
+
+@pytest.mark.asyncio
+async def test_templates_mode_bad_json_still_returns_none():
+    """★ תאימות: תשובת-LLM שאינה JSON תקין (לתסריט בודד) → None (דילוג TC), **לא** LLMUnavailableError."""
+    mock_resp = MagicMock()
+    mock_resp.choices = [MagicMock(message=MagicMock(content="not json at all"))]
+    mock_client = MagicMock()
+    mock_client.chat.completions.create = AsyncMock(return_value=mock_resp)
+
+    with patch("agents.compiler.dotnet_compiler.settings") as mock_settings, \
+         patch("agents.compiler.dotnet_compiler._make_openai_client", return_value=mock_client):
+        mock_settings.azure_openai_enabled = True
+        mock_settings.compiler_deployment = "gpt-x"
+        c = DotNetCompiler(payload_templates={"source_topic": "s", "target_topic": "t",
+                                              "templates": {"create": {}}})
+        # regex-fallback יתפוס את ה-publish → actions לא ריק, אבל בלי crash
+        ex = await c.compile({"id": 10, "title": "TC-badjson",
+                              "text": "פרסם ל-topic X את {\"a\": 1}"})
+    assert ex is not None  # לא נזרקה LLMUnavailableError
+
+
+# ============================================================
 # Phase 3 — anchored contract: _parse_anchored_response
 # ============================================================
 
