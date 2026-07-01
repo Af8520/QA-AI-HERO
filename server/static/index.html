@@ -2146,16 +2146,38 @@ async function openSessionsModal() {
 }
 function closeSessionsModal() { document.getElementById('sessionsModal').classList.remove('open'); }
 async function rerunSession(id) {
+  let data;
   try {
     const r = await fetch(`/sessions/${encodeURIComponent(id)}/rerun`, { method: 'POST' });
     if (!r.ok) { alert('הרצה חוזרת נכשלה: ' + (await r.text())); return; }
-    const data = await r.json();
-    sessionId = data.session_id;
-    setPhase(data.phase || 'B_pipeline');
-    closeSessionsModal();
-    addSystem(`▶ הרצה חוזרת — session חדש (${data.test_cases} tcs · payloads=${data.has_payloads} · samples=${data.has_samples}). התוצאות יופיעו ב-timeline.`);
-    openSSE();
-  } catch (e) { alert('שגיאה: ' + e); }
+    data = await r.json();
+  } catch (e) { alert('שגיאה: ' + e); return; }
+  const dept = data.department || 'dotnet';
+  closeSessionsModal();
+  // ★ עוברים למסך ה-app של המחלקה כדי שה-timeline/צ'אט יוצגו (הבאג: הרצה ממסך אחר לא הראתה כלום).
+  //   קובעים _initialDepartment=dept *לפני* שינוי ה-hash כדי לנטרל את reload-trap שמאבד את ה-session.
+  _initialDepartment = dept;
+  if (currentDepartment() !== dept) {
+    window.location.hash = '#/integration/' + dept;
+  }
+  navigate();                       // ודא שמסך ה-app מוצג (idempotent)
+  enterRerunView(data);
+}
+
+// מציג תצוגת Phase B נקייה (צ'אט + timeline, ללא WebChat) ומתחבר ל-SSE של ה-session החדש.
+function enterRerunView(data) {
+  sessionId = data.session_id;
+  if (canvasWrap) canvasWrap.classList.add('hidden');
+  if (embedWrap) embedWrap.classList.add('hidden');
+  if (chatEl_root) chatEl_root.classList.remove('hidden');
+  if (footerEl) footerEl.classList.add('hidden');   // בהרצה חוזרת אין צורך בקלט
+  if (chatEl) chatEl.innerHTML = '';                 // תצוגה נקייה לריצה החדשה
+  const tcList = document.getElementById('tl-tc-list');
+  if (tcList) tcList.innerHTML = '';
+  setPhase(data.phase || 'B_pipeline');
+  addSystem(`▶ הרצה חוזרת — ${data.test_cases || 0} tcs (קאש: payloads=${!!data.has_payloads}, `
+            + `samples=${!!data.has_samples}). ממתין לתוצאות ב-timeline...`);
+  openSSE();
 }
 window.openSessionsModal = openSessionsModal;
 window.closeSessionsModal = closeSessionsModal;
