@@ -2115,9 +2115,81 @@ if (runLogsFilterEl) runLogsFilterEl.addEventListener('input', _rerenderRunLog);
 const runLogsDownloadBtn = document.getElementById('runLogsDownloadBtn');
 if (runLogsDownloadBtn) runLogsDownloadBtn.addEventListener('click', downloadRunLog);
 
+// ============ Sessions history + הרצה חוזרת ============
+function _escHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+async function openSessionsModal() {
+  const modal = document.getElementById('sessionsModal');
+  const body = document.getElementById('sessionsBody');
+  body.innerHTML = 'טוען...';
+  modal.classList.add('open');
+  try {
+    const data = await (await fetch('/sessions/list')).json();
+    const sessions = (data && data.sessions) || [];
+    if (!sessions.length) { body.innerHTML = 'אין סשנים שמורים עדיין.'; return; }
+    body.innerHTML = sessions.map(s => {
+      const when = (s.updated_ts || '').replace('T', ' ');
+      const badges = [s.payload_templates_file ? 'payloads' : '', s.sample_messages_file ? 'samples' : '',
+                      s.run_id ? ('run ' + s.run_id) : ''].filter(Boolean).join(' · ');
+      const canRerun = !!s.phase_a_json_file;
+      return `<div class="sess-row">
+        <div>
+          <div class="sess-label">${_escHtml(s.label || s.session_id)}</div>
+          <div class="sess-meta">${_escHtml(s.department || '')} · ${s.n_test_cases || 0} tcs · ${_escHtml(when)}${badges ? ' · ' + _escHtml(badges) : ''}</div>
+        </div>
+        <button type="button" class="sess-rerun" ${canRerun ? '' : 'disabled'} onclick="rerunSession('${_escHtml(s.session_id)}')">▶ הרצה חוזרת</button>
+      </div>`;
+    }).join('');
+  } catch (e) { body.innerHTML = '❌ שגיאה בטעינת סשנים: ' + _escHtml(e); }
+}
+function closeSessionsModal() { document.getElementById('sessionsModal').classList.remove('open'); }
+async function rerunSession(id) {
+  try {
+    const r = await fetch(`/sessions/${encodeURIComponent(id)}/rerun`, { method: 'POST' });
+    if (!r.ok) { alert('הרצה חוזרת נכשלה: ' + (await r.text())); return; }
+    const data = await r.json();
+    sessionId = data.session_id;
+    setPhase(data.phase || 'B_pipeline');
+    closeSessionsModal();
+    addSystem(`▶ הרצה חוזרת — session חדש (${data.test_cases} tcs · payloads=${data.has_payloads} · samples=${data.has_samples}). התוצאות יופיעו ב-timeline.`);
+    openSSE();
+  } catch (e) { alert('שגיאה: ' + e); }
+}
+window.openSessionsModal = openSessionsModal;
+window.closeSessionsModal = closeSessionsModal;
+window.rerunSession = rerunSession;
+
 // boot — navigation מציג את ה-screen הראשון, startSession טוען את המצב לרקע
 navigate();
 startSession();
 </script>
+
+<!-- Sessions history + הרצה חוזרת -->
+<button id="sessionsBtn" type="button" class="sessions-fab" onclick="openSessionsModal()">🕘 סשנים</button>
+<div class="tc-detail-modal" id="sessionsModal" onclick="if(event.target===this)closeSessionsModal()">
+  <div class="tc-detail-box" style="max-width:760px;width:90%;">
+    <div class="tc-detail-head">
+      <span>🕘 סשנים קודמים — הרצה חוזרת (בלי לקרוא שוב ל-Copilot / Payload Builder)</span>
+      <button type="button" onclick="closeSessionsModal()">✕</button>
+    </div>
+    <div id="sessionsBody"></div>
+  </div>
+</div>
+<style>
+  .sessions-fab { position: fixed; bottom: 16px; left: 16px; z-index: 9999;
+    background:#2563eb; color:#fff; border:none; border-radius:24px; padding:10px 16px;
+    font-size:14px; cursor:pointer; box-shadow:0 2px 10px rgba(0,0,0,.4); }
+  .sessions-fab:hover { background:#1d4ed8; }
+  #sessionsBody { padding:12px; max-height:60vh; overflow:auto; }
+  .sess-row { display:flex; justify-content:space-between; align-items:center; gap:10px;
+    border:1px solid #333; border-radius:8px; padding:10px; margin-bottom:8px; }
+  .sess-label { font-weight:600; }
+  .sess-meta { font-size:12px; opacity:.7; margin-top:2px; }
+  .sess-rerun { white-space:nowrap; background:#16a34a; color:#fff; border:none;
+    border-radius:6px; padding:8px 12px; cursor:pointer; }
+  .sess-rerun[disabled] { background:#555; cursor:not-allowed; }
+</style>
 </body>
 </html>

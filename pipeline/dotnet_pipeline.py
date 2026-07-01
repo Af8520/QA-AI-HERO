@@ -410,6 +410,12 @@ async def _build_payloads(session: ChatSession, spec_text, emit):
       - spec_text ריק
       - שגיאה / timeout — מודיע בלוג ב-emit + structlog
     """
+    # ★ הרצה-חוזרת: אם ה-templates כבר בקאש (נטענו מדיסק ב-reload) — לדלג על קריאת ה-Copilot.
+    if session.payload_templates:
+        await emit(f"שלב 2/{TOTAL_STAGES} — משתמש ב-payload templates מהקאש (הרצה חוזרת) — "
+                   f"דילוג על קריאת Payload Builder.")
+        log.info("payload_builder_reused_from_cache", session_id=session.session_id)
+        return session.payload_templates
     if not settings.DOTNET_PAYLOAD_COPILOT_TOKEN_ENDPOINT:
         await emit("שלב 2/" + str(TOTAL_STAGES) + " — Payload Builder לא מוגדר (DOTNET_PAYLOAD_COPILOT_TOKEN_ENDPOINT ריק). דילוג.")
         log.warning("payload_builder_skipped_no_endpoint")

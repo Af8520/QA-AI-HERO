@@ -37,6 +37,15 @@ _CANDIDATE_CAP = 50  # כמה רשומות לאסוף ל-logging (לא רק את
 # שה-broker יספיק להחזיר שגיאת UNKNOWN_PARTITION ל-partition לא-קיים, אך קצר (×N partitions).
 _PROBE_FETCH_TIMEOUT_MS = 200
 
+# ★ סריקה חיה פר-partition (ראה _scan_partition):
+# - MAX_BATCHES: תקרת-בטיחות של fetches בסבב אחד (במקום התקרה הישנה של 8 — היא פספסה את ה-tip).
+# - EMPTY_TIP: כמה fetches ריקים *רצופים* מסמנים שהגענו ל-tip. ה-REST proxy מחזיר ריק ב-fetch הראשון
+#   אחרי seek (warm-up) — לכן לא שוברים על ריק בודד, אלא רק אחרי כמה ריקים רצופים.
+# - MAX_LOOKBACK: תקרת ההעמקה של ה-re-anchor ל-partition שקרא 0 (יוצא מאזור ה-tip הלא-אמין).
+_SCAN_MAX_BATCHES = 400
+_SCAN_EMPTY_TIP = 3
+_SCAN_MAX_LOOKBACK = 50_000
+
 
 class KafkaRestClient:
     def __init__(
@@ -163,22 +172,35 @@ class KafkaRestClient:
                 # נקרא ברגע שהוא קיים בלוג. starts[p] מתקדם כדי לא לקרוא ישנים שוב.
                 starts: Dict[int, Optional[int]] = {p: None for _, p in consumers}
                 live_counts: Dict[int, int] = {p: 0 for _, p in consumers}
+                # ★ meta פר-partition לדיאגנוסטיקה מכריעה: מאיפה התחלנו לקרוא, log_start/HW משוער, וה-offset
+                #   המקסימלי שהושג. חושף מיד partition שקרא 0 (seek מעל ה-tip / warm-up נכשל) מול תעבורה.
+                scan_meta: Dict[int, Dict[str, Any]] = {p: {} for _, p in consumers}
+                # ★ lookback דינמי פר-partition ל-re-anchor: partition שקרא 0 בסבב → מעמיקים (יוצאים
+                #   מאזור ה-tip הלא-אמין של ה-REST proxy) עד תקרה. מונע "partition שקורא ריק לנצח".
+                lookbacks: Dict[int, int] = {p: 3000 for _, p in consumers}
 
                 async def _scan_partition(ib, p):
                     if starts[p] is None:
                         # התחל קרוב ל-HW (לא log-start) — מכבד retention ו-out-of-range
                         starts[p] = await self._find_recent_start(
-                            client, ib, topic, p, headers_json, poll_headers)
+                            client, ib, topic, p, headers_json, poll_headers,
+                            lookback=lookbacks[p], meta=scan_meta[p])
                     try:
                         await client.post(f"{ib}/positions", headers=headers_json,
                                           json={"offsets": [{"topic": topic, "partition": p,
                                                              "offset": starts[p]}]}, auth=self.auth)
                     except httpx.HTTPError:
                         return None
-                    for _ in range(8):   # קרא קדימה כמה batches של data קיים
+                    read_this_round = 0
+                    empty_streak = 0
+                    # ★★★ קוראים **עד ה-tip** (לא תקרת 8 batches!) — partition בתעבורה גבוהה חייב להתנקז
+                    #   עד הסוף כדי להגיע למסר הטרי שלנו. warm-up: ה-REST proxy מחזיר ריק ב-fetch הראשון
+                    #   אחרי seek — לכן **לא שוברים על ריק בודד** אלא רק אחרי כמה ריקים רצופים (הגענו ל-tip).
+                    #   זה תיקן את הבאג: קודם partition "קר" קרא 0 (live_counts=0) ופספס את המסר.
+                    for _ in range(_SCAN_MAX_BATCHES):
                         try:
                             rr = await client.get(f"{ib}/records", headers=poll_headers,
-                                                  params={"timeout": 1000}, auth=self.auth)
+                                                  params={"timeout": 1200}, auth=self.auth)
                         except httpx.HTTPError:
                             break
                         if rr.status_code >= 400:
@@ -188,17 +210,29 @@ class KafkaRestClient:
                         except Exception:
                             recs = []
                         if not isinstance(recs, list) or not recs:
-                            break
+                            empty_streak += 1
+                            if empty_streak >= _SCAN_EMPTY_TIP:
+                                break            # הגענו ל-tip (או warm-up לא הצליח) — סוף הסבב
+                            continue             # ★ warm-up: נסה שוב במקום לשבור על ריק ראשון
+                        empty_streak = 0
+                        read_this_round += len(recs)
                         live_counts[p] = live_counts.get(p, 0) + len(recs)
                         maxoff = max((r.get("offset", -1) for r in recs if isinstance(r, dict)), default=-1)
                         if maxoff >= 0:
-                            starts[p] = maxoff + 1   # התקדם — לא לקרוא שוב את אותם הישנים
+                            starts[p] = maxoff + 1        # התקדם — לא לקרוא שוב את אותם הישנים
+                            scan_meta[p]["max_off"] = maxoff
                         m = _scan_records(recs, topic, match, candidates,
                                           key_equals=key_equals, key_contains=key_contains,
                                           value_contains=value_contains,
                                           min_timestamp_ms=min_timestamp_ms)
                         if m is not None:
                             return m
+                    # ★ re-anchor: partition שקרא 0 גם אחרי warm-up → ה-start נחת מעל ה-tip/באזור לא-אמין.
+                    #   מעמיקים lookback ומאלצים חישוב-start מחדש בסבב הבא (עד תקרה) — כיסוי אמין לכל partition.
+                    if read_this_round == 0 and lookbacks[p] < _SCAN_MAX_LOOKBACK:
+                        lookbacks[p] = min(lookbacks[p] * 5, _SCAN_MAX_LOOKBACK)
+                        starts[p] = None
+                        scan_meta[p]["reanchor_lookback"] = lookbacks[p]
                     return None
 
                 deadline = time.monotonic() + timeout_seconds
@@ -215,20 +249,20 @@ class KafkaRestClient:
                 if matched is not None:
                     log.info("kafka_rest_consumed", topic=topic, offset=matched.get("offset"),
                              partition=matched.get("partition"), candidates_seen=len(candidates))
-                    return {"matched": matched, "candidates": candidates,
-                            "assign": assign_info, "live_counts": live_counts}
+                    return {"matched": matched, "candidates": candidates, "assign": assign_info,
+                            "live_counts": live_counts, "scan_meta": scan_meta}
                 # ★ לא נמצא match — דיאגנוסטיקה מכריעה
                 diag = await self._diagnose_partitions(
                     client, consumers, topic, key_contains, headers_json, poll_headers)
                 return {"matched": None, "candidates": candidates, "assign": assign_info,
-                        "live_counts": live_counts, "diag": diag}
+                        "live_counts": live_counts, "scan_meta": scan_meta, "diag": diag}
             finally:
                 for ib, _p in consumers:
                     await self._safe_delete(client, ib)
 
     async def _find_recent_start(self, client, ib: str, topic: str, p: int,
                                  headers_json: Dict[str, str], poll_headers: Dict[str, str],
-                                 lookback: int = 3000) -> int:
+                                 lookback: int = 3000, meta: Optional[Dict[str, Any]] = None) -> int:
         """מחזיר אופסט קריאה התחלתי קרוב ל-HW (כדי לא לקרוא את כל ה-retention).
 
         ★ ה-topic בעל retention → ה-log-start הוא לא 0. seek ל-offset 0 = out-of-range →
@@ -270,7 +304,10 @@ class KafkaRestClient:
                 lo = mid          # יש data ב-mid → ה-HW גבוה יותר
             else:
                 hi = mid          # ריק → mid >= HW
-        return max(log_start, lo - lookback)
+        start = max(log_start, lo - lookback)
+        if meta is not None:
+            meta.update({"log_start": log_start, "hw_est": lo, "lookback": lookback, "start": start})
+        return start
 
     async def _diagnose_partitions(self, client, consumers, topic: str, key_contains,
                                    headers_json: Dict[str, str], poll_headers: Dict[str, str]):

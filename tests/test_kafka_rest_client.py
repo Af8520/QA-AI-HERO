@@ -557,3 +557,85 @@ async def test_consume_reads_per_partition_finds_worker_message(monkeypatch):
     assert rich.get("matched") is not None
     assert rich["matched"]["partition"] == 5
     assert rich["assign"]["n_partitions"] == 6
+
+
+def test_scan_records_matches_real_target_key_format():
+    """★ התרחיש האמיתי: ה-KEY ביעד הוא <entity_type>::0::<member_id>. עם uid=2373712 שהוזרק,
+    ה-KEY מכיל אותו → value_contains תופס את *שלנו* ולא מסר זר (member_id אחר). (הכשל בפועל היה
+    כיסוי ה-consume, לא ה-matcher — הטסט הזה מוודא שה-matcher אכן תופס את המסר.)"""
+    ours = {"value": {"entity_type": "child_development", "action": "create",
+                      "_data": {"member_id": "2373712"}},
+            "offset": 5, "partition": 4, "topic": "t", "key": "child_development::0::2373712"}
+    foreign = {"value": {"entity_type": "child_development", "action": "create",
+                         "_data": {"member_id": "233506427"}},
+               "offset": 4, "partition": 4, "topic": "t", "key": "child_development::0::233506427"}
+    match = {"entity_type": "child_development", "root.action": "create"}
+    got = _scan_records([foreign, ours], "t", match, value_contains="2373712")
+    assert got is not None and got["offset"] == 5           # תפס את שלנו, לא הזר
+
+
+@pytest.mark.asyncio
+async def test_consume_warmup_retry_survives_empty_first_fetch(monkeypatch):
+    """★★★ הבאג שתוקן: ה-REST proxy מחזיר ריק ב-/records הראשון אחרי כל seek (warm-up).
+    הקוד הישן שבר על ריק ראשון ('if not recs: break') וכל סבב re-seek → perpetual 0 →
+    ה-partition לא נקרא (בדיוק live_counts=0 לכל p חוץ מ-p3). ה-fix: retry על ריק (empty_streak)
+    → ה-fetch השני (בלי re-seek) מחזיר את המסר. מסמלץ: seek→cold, GET ראשון אחרי seek→ריק, ואז data."""
+    monkeypatch.setattr(_settings, "KAFKA_TARGET_PARTITIONS", 6)
+    worker_rec = {"key": _b64("child_development::0::2373712"),
+                  "value": _b64('{"header":{"mac_sys_name":"encryption_child_development_worker"},'
+                                 '"entity_type":"child_development"}'),
+                  "offset": 500, "partition": 5, "timestamp": 5000}
+
+    def _inst(url):
+        return url.split("/instances/")[1].split("/")[0] if "/instances/" in url else None
+
+    class _WarmupFake(_FakeProxyClient):
+        """כל seek (POST /positions*) מסמן את ה-instance כ'קר'; ה-GET הראשון אחרי seek מחזיר ריק
+        (warm-up), וה-הבאים מחזירים data. רק p5 מכיל את מסר ה-Worker."""
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self._by_instance = {}
+            self._cold = {}
+
+        async def post(self, url, json=None, **kw):
+            inst = _inst(url)
+            if url.endswith("/assignments"):
+                self._by_instance[inst] = [p["partition"] for p in (json or {}).get("partitions", [])]
+            if "/positions" in url:
+                self._cold[inst] = True          # seek → ה-fetch הבא "קר"
+            return await super().post(url, json=json, **kw)
+
+        async def get(self, url, **kw):
+            self.calls.append(("GET", url))
+            if url.endswith("/records"):
+                inst = _inst(url)
+                if self._cold.get(inst):
+                    self._cold[inst] = False       # ה-fetch הראשון אחרי seek → ריק (warm-up)
+                    return _FakeResp(200, [])
+                if self._by_instance.get(inst) == [5]:
+                    return _FakeResp(200, [worker_rec])
+                return _FakeResp(200, [])
+            return _FakeResp(200, {})
+
+    fake = _WarmupFake(existing={0, 1, 2, 3, 4, 5})
+
+    class _CM:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return fake
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr("agents.runner.kafka_rest_client.httpx.AsyncClient", _CM)
+
+    rich = await _rest_client().consume(
+        "t", {"entity_type": "child_development"}, timeout_seconds=2, group="g",
+        value_contains="2373712", on_ready=None, skew_ms=0)
+    # למרות ה-ריק ב-fetch הראשון אחרי כל seek — ה-warm-retry הגיע ל-data ומצא את המסר
+    assert rich.get("matched") is not None
+    assert rich["matched"]["partition"] == 5
+    assert (rich.get("live_counts") or {}).get(5, 0) > 0          # p5 קרא בפועל (לא 0)
+    assert "scan_meta" in rich                                    # דיאגנוסטיקה פר-partition נחשפת

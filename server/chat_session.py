@@ -27,6 +27,8 @@ class ChatSession:
     # (לסוכן יש flow שונה לקובץ vs טקסט; קובץ נותן פלט מלא הרבה יותר).
     spec_bytes: Optional[bytes] = None
     spec_content_type: Optional[str] = None
+    # ★ נתיב ל-spec שנשמר לדיסק (logs/specs/<sid>...) — לאפשר reload/הרצה-חוזרת של סשן קודם
+    spec_file: Optional[str] = None
     postman_collection: Optional[PostmanCollection] = None
     suite_id: Optional[int] = None
     # Foundry mode: test_cases מועברים ישירות (ללא ADO)

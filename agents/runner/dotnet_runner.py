@@ -1451,6 +1451,21 @@ class DotNetRunner:
                 if lc:
                     self._log("CONSUME", "info",
                               "live records לכל partition: " + json.dumps(lc, ensure_ascii=False))
+                    # ★ אזהרה מכריעה: partition שקרא 0 חי בעוד אחר קרא הרבה = בעיית כיסוי (warm-up/seek),
+                    #   לא בעיית תזמון. בדיוק מה שראינו (רק p3 קרא). התיקון: warm-up-retry + re-anchor.
+                    zeros = [p for p, c in lc.items() if not c]
+                    if zeros and any(c for c in lc.values()):
+                        self._log("CONSUME", "warn",
+                                  f"partitions שקראו 0 חי: {zeros} (בעוד אחרים קראו) — בעיית כיסוי seek/warm-up.")
+                # ★ scan_meta פר-partition: מאיפה התחלנו לקרוא, HW משוער, וה-offset שהושג — מכריע *איפה*
+                #   בדיוק נעצרה הסריקה (start מעל ה-tip? לא הגיע ל-HW? re-anchor הופעל?).
+                sm = rich.get("scan_meta") or {}
+                for p in sorted(sm.keys()):
+                    m = sm[p]
+                    extra = f" re-anchor→lookback={m['reanchor_lookback']}" if m.get("reanchor_lookback") else ""
+                    self._log("scan", "info",
+                              f"p{p} start={m.get('start')} (log_start={m.get('log_start')} "
+                              f"hw≈{m.get('hw_est')} lookback={m.get('lookback')}) max_off={m.get('max_off')}{extra}")
                 # ★ דיאגנוסטיקת כשל: מה ניתן לקרוא מכל partition (seek-to-beginning) —
                 # מכריע בין "בעיית fetch צד-שרת" (partition מחזיר 0/שגיאה) ל-"בעיית תזמון".
                 diag = rich.get("diag") or {}
@@ -1580,6 +1595,13 @@ class DotNetRunner:
                       f"לא נמצא מסר תואם ל-{corr_desc} מתוך {len(candidates)} מסרים. "
                       f"אם ה-uid לא הופק ב-target — בדוק שה-__UNIQUE_ID__ הוזרק בשדה ה-id הנכון במקור "
                       f"(\"פתח פרטים\" → 📤 נשלח ל-source).")
+            # ★ רמז כיסוי: אם ה-KEY שלנו קיים ביעד (המשתמש רואה אותו) אך לא נמצא — כנראה בעיית כיסוי:
+            #   ה-partition שלו לא נסרק. בדוק שמספר ה-partitions הנקראים = המספר האמיתי של ה-topic.
+            _asg = (rich.get("assign") if isinstance(rich, dict) else None) or {}
+            self._log("CONSUME", "warn",
+                      f"נסרקו {_asg.get('n_partitions', '?')} partitions (mode={_asg.get('mode', '?')}). "
+                      f"אם אתה רואה את ה-KEY ביעד ב-Kafka אך הוא לא נמצא — ודא שכל ה-partitions של ה-topic "
+                      f"נסרקים (KAFKA_TARGET_PARTITIONS = מספר ה-partitions המדויק) וקרא את שורות ה-scan/live.")
             step = StepResult(
                 step=f"WAIT topic={action.topic} (timeout {action.timeout_seconds}s)",
                 expected_result="message arrived matching " + json.dumps(action.match, ensure_ascii=False),

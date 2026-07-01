@@ -174,7 +174,9 @@ async def extract_spec(
     # כ-attachment (כמו ש-WebChat 📎 עושה). הסוכן מעבד קובץ הרבה יותר טוב מטקסט.
     session.spec_bytes = raw
     session.spec_content_type = file.content_type or _content_type_for(file.filename)
+    session.spec_file = _persist_spec(sid or session.session_id, session)   # ★ לאפשר reload
     session.touch()
+    _upsert_session_index(session)
     log.info("spec_extracted", session_id=sid, filename=file.filename, chars=len(text), bytes=len(raw))
     return {
         "session_id": session.session_id,
@@ -254,6 +256,7 @@ async def upload_sample_messages(
     session.sample_source_messages = messages
     session.sample_messages_file = _persist_sample_messages(sid, messages)
     session.touch()
+    _upsert_session_index(session)
     log.info("sample_messages_uploaded", session_id=sid, filename=file.filename, count=len(messages))
     return {
         "session_id": session.session_id,
@@ -310,6 +313,7 @@ async def direct_json(request: Request, payload: dict):
     json_file = _persist_phase_a_json(sid or session.session_id, test_cases)
     session.phase_a_json_file = json_file
     session.touch()
+    _upsert_session_index(session)
 
     # הדפסה לטרמינל — הסוכן הוא JSON של 20-35 cases ולכן זה ראדבל
     print(f"\n========== PHASE A JSON SAVED — {len(test_cases)} test cases ==========")
@@ -349,6 +353,176 @@ def _persist_phase_a_json(session_id: str, test_cases: list) -> str:
     except Exception as e:
         log.warning("phase_a_persist_failed", error=str(e), path=str(fpath))
     return str(fpath)
+
+
+# ============================================================
+# ניהול-סשנים + הרצה-חוזרת — אינדקס לדיסק (logs/sessions/index.jsonl) כדי לטעון סשן קודם
+# ולהריץ שוב את Phase B בלי לקרוא שוב ל-Copilot / Payload Builder.
+# ============================================================
+
+def _sessions_index_path():
+    from pathlib import Path
+    p = Path("logs") / "sessions"
+    p.mkdir(parents=True, exist_ok=True)
+    return p / "index.jsonl"
+
+
+def _session_label(session: ChatSession) -> str:
+    """תווית קריאה ל-sidebar: שם קובץ ה-spec, או כותרת ה-TC הראשון, או תחילת ה-session_id."""
+    if session.spec_filename:
+        return session.spec_filename
+    tcs = session.phase_a_raw_json or session.direct_test_cases or []
+    if tcs and isinstance(tcs[0], dict):
+        lbl = str(tcs[0].get("title") or tcs[0].get("test_case_id") or "").strip()
+        if lbl:
+            return lbl[:60]
+    return session.session_id[:8]
+
+
+def _persist_spec(session_id: str, session: ChatSession) -> Optional[str]:
+    """שומר את spec_text ל-logs/specs/<ts>_<sid>.txt כדי לאפשר reload מלא. best-effort."""
+    if not session.spec_text:
+        return None
+    import datetime
+    from pathlib import Path
+    logs_dir = Path("logs") / "specs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_sid = (session_id or "anon")[:12]
+    fpath = logs_dir / f"{ts}_{safe_sid}.txt"
+    try:
+        fpath.write_text(session.spec_text, encoding="utf-8")
+    except Exception as e:
+        log.warning("spec_persist_failed", error=str(e))
+        return None
+    return str(fpath)
+
+
+def _upsert_session_index(session: ChatSession) -> None:
+    """מוסיף רשומת-אינדקס (append-only JSONL; הקריאה מאחדת לפי session_id — האחרון מנצח).
+    best-effort — לעולם לא מפיל את הזרימה."""
+    import datetime
+    try:
+        rec = {
+            "session_id": session.session_id,
+            "updated_ts": datetime.datetime.now().isoformat(timespec="seconds"),
+            "department": session.department,
+            "label": _session_label(session),
+            "phase": session.phase,
+            "run_id": session.run_id,
+            "n_test_cases": len(session.direct_test_cases or session.phase_a_raw_json or []),
+            "phase_a_json_file": session.phase_a_json_file,
+            "payload_templates_file": session.payload_templates_file,
+            "sample_messages_file": session.sample_messages_file,
+            "spec_file": session.spec_file,
+        }
+        with _sessions_index_path().open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception as e:
+        log.warning("session_index_upsert_failed", error=str(e))
+
+
+def _read_sessions_index() -> list:
+    """קורא את כל הרשומות, מאחד לפי session_id (אחרון מנצח), ממוין updated_ts יורד."""
+    path = _sessions_index_path()
+    merged: dict = {}
+    try:
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                sid = rec.get("session_id")
+                if sid:
+                    merged[sid] = rec
+    except Exception as e:
+        log.warning("session_index_read_failed", error=str(e))
+    items = list(merged.values())
+    items.sort(key=lambda r: r.get("updated_ts") or "", reverse=True)
+    return items
+
+
+def _find_session_record(session_id: str) -> Optional[dict]:
+    for rec in _read_sessions_index():
+        if rec.get("session_id") == session_id:
+            return rec
+    return None
+
+
+async def _reload_session_from_disk(source_session_id: str) -> ChatSession:
+    """טוען את פלטי-הדיסק של סשן קודם ל-ChatSession **חדש** (session_id חדש), בלי Copilot."""
+    from pathlib import Path
+    rec = _find_session_record(source_session_id)
+    if not rec:
+        raise HTTPException(404, "session לא נמצא באינדקס")
+    s = await store.get_or_create(None)      # session_id חדש
+    s.department = (rec.get("department") or "dotnet").lower()
+    paj = rec.get("phase_a_json_file")
+    if paj and Path(paj).exists():
+        tcs = json.loads(Path(paj).read_text(encoding="utf-8"))
+        if isinstance(tcs, list) and tcs:
+            s.phase_a_raw_json = tcs
+            s.phase_a_json_file = paj
+            from agents.foundry.foundry_writer import foundry_to_raw_cases
+            s.direct_test_cases = foundry_to_raw_cases(tcs)
+            s.suite_id = 0
+    ptf = rec.get("payload_templates_file")
+    if ptf and Path(ptf).exists():
+        s.payload_templates = json.loads(Path(ptf).read_text(encoding="utf-8"))
+        s.payload_templates_file = ptf
+    smf = rec.get("sample_messages_file")
+    if smf and Path(smf).exists():
+        s.sample_source_messages = json.loads(Path(smf).read_text(encoding="utf-8"))
+        s.sample_messages_file = smf
+    spf = rec.get("spec_file")
+    if spf and Path(spf).exists():
+        s.spec_text = Path(spf).read_text(encoding="utf-8")
+        s.spec_file = spf
+    s.spec_filename = rec.get("label")
+    s.touch()
+    log.info("session_reloaded", source=source_session_id, new=s.session_id,
+             tcs=len(s.direct_test_cases or []), has_pt=bool(s.payload_templates))
+    return s
+
+
+def _reload_info(s: ChatSession, source_session_id: str) -> dict:
+    return {
+        "session_id": s.session_id,
+        "source_session_id": source_session_id,
+        "department": s.department,
+        "test_cases": len(s.direct_test_cases or []),
+        "has_payloads": bool(s.payload_templates),
+        "has_samples": bool(s.sample_source_messages),
+        "has_spec": bool(s.spec_text),
+    }
+
+
+@router.get("/sessions/list")
+async def sessions_list():
+    """רשימת הסשנים הקודמים (מהאינדקס) ל-sidebar."""
+    return {"sessions": _read_sessions_index()}
+
+
+@router.post("/sessions/{session_id}/reload")
+async def session_reload(session_id: str):
+    """טוען סשן קודם מהדיסק ל-session חדש (בלי להריץ). מחזיר את ה-session_id החדש."""
+    s = await _reload_session_from_disk(session_id)
+    return _reload_info(s, session_id)
+
+
+@router.post("/sessions/{session_id}/rerun")
+async def session_rerun(session_id: str):
+    """★ הרצה-חוזרת: טוען סשן קודם מהדיסק ומריץ מיד את Phase B — בלי Copilot ובלי Payload Builder
+    (משתמש ב-payload_templates + direct_test_cases + sample_messages מהקאש). חוסך קריאות לסוכנים."""
+    s = await _reload_session_from_disk(session_id)
+    if not s.direct_test_cases:
+        raise HTTPException(400, "אין test cases בקאש להרצה חוזרת (חסר phase_a_json_file).")
+    await _trigger_phase_b(s, suite_id=0)
+    return {"phase": s.phase, **_reload_info(s, session_id)}
 
 
 @router.get("/session/{session_id}/phase-a-json")
@@ -404,7 +578,11 @@ async def upload_document(
     text = _extract_text(file.filename or "doc", raw)
     session.spec_text = text
     session.spec_filename = file.filename
+    session.spec_bytes = raw
+    session.spec_content_type = file.content_type or _content_type_for(file.filename)
+    session.spec_file = _persist_spec(sid or session.session_id, session)   # ★ לאפשר reload
     session.touch()
+    _upsert_session_index(session)
 
     agent_response = await _bridge.send_document(session.session_id, text, filename=file.filename)
     completion = _bridge.is_completion_message(agent_response)
@@ -556,6 +734,11 @@ async def _trigger_phase_b(session: ChatSession, suite_id: int) -> None:
             await session.emit("error", {"text": f"שגיאה ב-pipeline: {e}"})
             session.phase = "done"
             await session.emit("pipeline_done", {"error": str(e)})
+        finally:
+            # ★ עדכון אינדקס-הסשן בסיום — עכשיו יש run_id + payload_templates_file + status סופי
+            _upsert_session_index(session)
+
+    _upsert_session_index(session)   # רשומה מוקדמת (department/phase) כדי שהסשן יופיע ב-sidebar מיד
 
     session.pipeline_task = asyncio.create_task(runner())
 
