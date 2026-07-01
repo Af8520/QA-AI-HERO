@@ -777,19 +777,21 @@ def _sanitize_expected_fields(expected: Dict[str, Any], strip_member: bool) -> L
 def _make_key_unique(value_obj: Any, key_source_path: str, uid: str) -> Optional[str]:
     """מזריק ערך ייחודי לשדה-המקור שהופך ל-target KEY (verbatim) → ה-KEY ביעד ייחודי לכל ריצה.
     שומר על מבנה הערך: מחליף את **רצף הספרות הראשון** ב-uid (SCC-TST.128...→SCC-TST.<uid>...),
-    כך שהסיומת (HISTO.final.0) והפורמט נשמרים. מחזיר את הערך החדש, או None אם השדה לא נמצא."""
-    holder, field = _resolve_logical_holder(value_obj, key_source_path)
-    if holder is None or field is None:
-        return None
-    cur = holder.get(field)
-    if not isinstance(cur, (str, int)):
+    כך שהסיומת (HISTO.final.0) והפורמט נשמרים. מחזיר את הערך החדש, או None אם השדה לא נמצא.
+
+    ★ filter-aware: משתמש ב-_read_field_smart/_override_field_smart (שתומכים בפילטרים כמו
+    `_data.identifier[type=NI].value`), ולא ב-_resolve_logical_holder הפשוט — כי לרוב שדה-המקור שבונה
+    את ה-KEY הוא איבר במערך identifier לפי type (הת"ז), לא נתיב-נקודות פשוט."""
+    cur = _read_field_smart(value_obj, key_source_path)
+    if cur is _FIELD_MISSING or not isinstance(cur, (str, int)):
         return None
     s = str(cur)
     if uid in s:                       # כבר מכיל את ה-uid (ה-token כבר הוזרק כאן) → לא לדרוס שוב
         return s
     new = re.sub(r"\d+", uid, s, count=1) if re.search(r"\d", s) else f"{s}.{uid}"
-    holder[field] = new
-    return new
+    if _override_field_smart(value_obj, key_source_path, new):
+        return new
+    return None
 
 
 def _get_nested_field(obj: Any, name: str) -> Optional[str]:
@@ -2094,6 +2096,33 @@ def _is_producer_metadata_key(k: str) -> bool:
     return kl.startswith("header.mac_") or kl.startswith("headers.mac_")
 
 
+def _as_number(v: Any) -> Optional[float]:
+    """ממיר למספר להשוואה סלחנית (1.0==1, '1'==1, '013'=='13'). None אם לא-מספרי. bool אינו מספר."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        try:
+            return float(v.strip())
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def _values_match(actual: Any, want: Any) -> bool:
+    """השוואה **מבנית + סלחנית-מספרית** — מחליפה את str(a)!=str(b) המחמיר שגרם לכשלי-שווא:
+    - dict/list/scalar לפי `==` (dict ב-Python בלתי-תלוי-סדר-מפתחות → payer identifier עובר).
+    - מספרים לפי ערך (1.0==1, '1'==1, אפסים-מובילים → mac_message_version=1.0 מול 1).
+    - אחרת fallback ל-str מנוקה (התנהגות קודמת לשדות טקסט)."""
+    if actual == want:
+        return True
+    na, nw = _as_number(actual), _as_number(want)
+    if na is not None and nw is not None and na == nw:
+        return True
+    return str(actual).strip() == str(want).strip()
+
+
 def _check_expected_fields(value: Dict[str, Any], expected: Dict[str, Any]) -> List[str]:
     """מחזיר רשימה של שדות שחסרים / לא תואמים. ריק = הכל בסדר.
     מפתח עם נקודה ('root.action', '_data.parameters.0.gender') נחשב dotted path מקונן.
@@ -2123,7 +2152,7 @@ def _check_expected_fields(value: Dict[str, Any], expected: Dict[str, Any]) -> L
         if actual is _FIELD_MISSING:
             issues.append(f"{k} (missing)")
             continue
-        if str(actual) != str(want):
+        if not _values_match(actual, want):
             issues.append(f"{k}={actual!r}≠{want!r}")
     return issues
 

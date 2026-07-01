@@ -1065,3 +1065,40 @@ def test_normalize_filter_position():
     assert nf("PractitionerRole[code=R].practitioner.reference") == "PractitionerRole[code=R].practitioner.reference"
     # אינדקס [0] → לא מזיזים
     assert nf("category[0].coding[0].code") == "category[0].coding[0].code"
+
+
+def test_make_key_unique_injects_into_identifier_by_type():
+    """★★★ התיקון המרכזי: ה-uid מוזרק לשדה-המקור שבונה את ה-KEY (הת"ז לפי type=NI), filter-aware —
+    ולא לשדה entity_id ברמת-root (שהופך ל-mac_tech_id). כך ה-KEY ביעד = Patient/<uid> ייחודי."""
+    msg = {"entity_id": "013133947", "_data": {"identifier": [
+        {"value": "0013172896", "type": "NI"},
+        {"system": "passport-ISR", "value": "35372843", "type": "PPN"}]}}
+    new = _make_key_unique(msg, "_data.identifier[type=NI].value", "14304439")
+    assert new == "14304439"
+    assert msg["_data"]["identifier"][0]["value"] == "14304439"   # הוזרק ל-NI (הת"ז)
+    assert msg["_data"]["identifier"][1]["value"] == "35372843"   # PPN לא נגע
+    assert msg["entity_id"] == "013133947"                        # entity_id ברמת-root לא נגע
+
+
+def test_values_match_structural_numeric():
+    from agents.runner.dotnet_runner import _values_match
+    # סדר מפתחות ב-dict בתוך list — תוכן זהה (payer)
+    assert _values_match([{"value": "X", "type": "NI"}], [{"type": "NI", "value": "X"}])
+    # float מול int (header mac_message_version)
+    assert _values_match(1.0, 1) and _values_match("1.0", 1)
+    # אפסים מובילים
+    assert _values_match("013172895", "13172895")
+    # דיף אמיתי עדיין נכשל
+    assert not _values_match("1", "2")
+    assert not _values_match("עזב", "פעיל")
+
+
+def test_check_expected_fields_tolerates_key_order_and_numeric():
+    """★ payer (סדר מפתחות) + numeric (str '1' מול int 1) — לא כשלי-שווא; דיף אמיתי כן נתפס."""
+    value = {"_data": {"payer": {"identifier": [{"value": "0013172895", "type": "NI"}]},
+                       "mac_status": {"code": "1"}}}
+    assert _check_expected_fields(value, {
+        "_data.payer.identifier": [{"type": "NI", "value": "0013172895"}],
+        "_data.mac_status.code": 1,
+    }) == []
+    assert _check_expected_fields(value, {"_data.mac_status.code": 2}) != []

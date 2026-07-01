@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import List, Optional, Tuple
 
 from agents.bug_agent.ado_client import ADOClient
@@ -486,32 +487,66 @@ _KEY_TARGET_FIELDS = {"entity_id", "scc_message_id", "_data.scc_message_id",
                       "root.entity_id", "_data.entity_id"}
 
 
+def _normalize_bare_filter(path):
+    """מנרמל פילטר-alternation "עירום" (בלי '=') שה-Payload Builder שם על מערך identifier לפי type:
+    `_data.identifier[NI|PI].value` → `_data.identifier[type=NI].value` (בוחר את הראשון — הת"ז הראשית),
+    כדי שמנוע-הנתיבים (שמכיר רק `[key=value]`/`[?()]`/`[0]`/`[*]`) יוכל לפתור אותו.
+    לא נוגע ב-`[0]` / `[*]` / `[k=v]` / `[?(...)]`."""
+    if not isinstance(path, str) or "[" not in path:
+        return path
+
+    def repl(m):
+        inner = m.group(1).strip()
+        if "=" in inner or "?" in inner or inner == "*" or inner.lstrip("-").isdigit():
+            return m.group(0)                       # כבר פילטר/אינדקס תקין — לא לגעת
+        first = inner.split("|")[0].strip()          # NI|PI → NI
+        return f"[type={first}]" if first else m.group(0)
+
+    return re.sub(r"\[([^\]]*)\]", repl, path)
+
+
 def _extract_key_source_path(payload_templates):
-    """מחלץ את נתיב-המקור (לוגי) שהופך ל-target KEY (verbatim) — דינמי לכל אפיון. סדר עדיפויות:
-    1. ★ שדה מפורש `key_source_field` מה-Payload Builder (top-level או target_templates[*]) — הכי אמין.
-    2. fallback: transformation שה-target שלה הוא entity_id/scc_message_id (היוריסטיקה).
-    כך אם ה-PB מחזיר את השדה המפורש (מומלץ) — אין ניחוש; אם לא — נשענים על ה-transformations.
-    None אם שום סימן לא נמצא → ה-runner ייפול ל-member_id/token. למשל → "MessageHeader.id"."""
+    """מחלץ את **נתיב-המקור** (לוגי) שהופך ל-target KEY (verbatim) — דינמי לכל אפיון.
+
+    ★ תיקון קריטי: `key_source_field` שה-PB מחזיר הוא לרוב שם ה-שדה ב-**יעד** (למשל "entity_id"),
+    ולא נתיב-מקור. אם הוא מופיע כ-`target_field_path` באחת ה-transformations — פותרים דרכה את נתיב-המקור
+    האמיתי (`_data.identifier[NI|PI].value`). כך ה-uid מוזרק לשדה שבאמת בונה את ה-KEY (הת"ז) → KEY ייחודי.
+
+    סדר: (1) קבע את שם שדה-ה-KEY ביעד (key_source_field / key_built_from); (2) פתור דרך transformations
+    ל-source; (3) fallback: transformation → entity_id/scc_message_id; (4) אחרון: השם כפי-שהוא (אולי כבר
+    נתיב-מקור). None אם אין. הפלט מנורמל מפילטר-עירום ([NI|PI]→[type=NI])."""
     if not isinstance(payload_templates, dict):
         return None
-    # 1) שדה מפורש (top-level)
+    tfs = payload_templates.get("transformations") or {}
+
+    # 1) שם שדה-ה-KEY ביעד — מ-key_source_field (top-level או target_templates[*])
+    key_target = None
     explicit = payload_templates.get("key_source_field")
     if isinstance(explicit, str) and explicit.strip():
-        return explicit.strip()
-    # 1b) שדה מפורש בתוך target_templates[<action>]
-    tt = payload_templates.get("target_templates") or {}
-    if isinstance(tt, dict):
-        for tmpl in tt.values():
+        key_target = explicit.strip()
+    else:
+        for tmpl in (payload_templates.get("target_templates") or {}).values():
             if isinstance(tmpl, dict):
                 e = tmpl.get("key_source_field")
                 if isinstance(e, str) and e.strip():
-                    return e.strip()
-    # 2) fallback היוריסטי: transformation → entity_id/scc_message_id
-    tfs = payload_templates.get("transformations") or {}
+                    key_target = e.strip()
+                    break
+
+    # 2) יש key_source_field: אם הוא שם שדה-**יעד** שיש לו transformation מ-source → פותרים את נתיב-
+    #    המקור האמיתי (entity_id → _data.identifier[NI|PI].value). אחרת — מפורש גובר (אולי כבר נתיב-מקור,
+    #    כמו MessageHeader.id) ומוחזר כפי-שהוא. כך שמירה על תאימות-לאחור + תיקון ה-target-name.
+    if key_target:
+        if isinstance(tfs, dict):
+            for src_path, spec in tfs.items():
+                if isinstance(spec, dict) and spec.get("target_field_path") == key_target:
+                    return _normalize_bare_filter(str(src_path))
+        return _normalize_bare_filter(key_target)
+
+    # 3) אין key_source_field → fallback היוריסטי: transformation שה-target שלה entity_id/scc_message_id
     if isinstance(tfs, dict):
         for src_path, spec in tfs.items():
             if isinstance(spec, dict) and spec.get("target_field_path") in _KEY_TARGET_FIELDS:
-                return str(src_path)
+                return _normalize_bare_filter(str(src_path))
     return None
 
 

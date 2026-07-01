@@ -198,3 +198,39 @@ def test_build_transform_index_none_without_transformations():
     assert _build_transform_index({}) is None
     assert _build_transform_index({"transformations": {}}) is None
     assert _build_transform_index(None) is None
+
+
+# ============================================================
+# _extract_key_source_path — פותר שם שדה-יעד לנתיב-מקור דרך transformations
+# ============================================================
+
+def test_extract_key_source_path_resolves_target_field_to_source():
+    """★ הבאג המרכזי: key_source_field='entity_id' הוא שם שדה-ה-**יעד**; יש לפתור דרך ה-transformations
+    את נתיב-ה-**מקור** שבונה אותו (_data.identifier[NI|PI].value), מנורמל ל-[type=NI]. לשם מוזרק ה-uid."""
+    pt = {
+        "key_source_field": "entity_id",
+        "transformations": {
+            "_data.identifier[NI|PI].value": {"target_field_path": "entity_id",
+                                              "rule": "'Patient/' + value where type=NI or PI"},
+            "entity_id": {"target_field_path": "_data.identifier[2].value",
+                          "rule": "source entity_id → mac_tech_id"},
+        },
+    }
+    assert _extract_key_source_path(pt) == "_data.identifier[type=NI].value"
+
+
+def test_extract_key_source_path_plain_source_passthrough():
+    """אם אין transformation שה-target שלה == key_source_field → מוחזר כפי-שהוא (אולי כבר נתיב-מקור)."""
+    pt = {"key_source_field": "MessageHeader.id", "transformations": {}}
+    assert _extract_key_source_path(pt) == "MessageHeader.id"
+
+
+def test_normalize_bare_filter():
+    from pipeline.dotnet_pipeline import _normalize_bare_filter
+    assert _normalize_bare_filter("_data.identifier[NI|PI].value") == "_data.identifier[type=NI].value"
+    assert _normalize_bare_filter("_data.identifier[NI].value") == "_data.identifier[type=NI].value"
+    # פילטרים/אינדקסים תקינים — לא נגעים
+    assert _normalize_bare_filter("a[0].b") == "a[0].b"
+    assert _normalize_bare_filter("a[*].b") == "a[*].b"
+    assert _normalize_bare_filter("a[system=PID].b") == "a[system=PID].b"
+    assert _normalize_bare_filter("a[?(@.x=='y')].b") == "a[?(@.x=='y')].b"
