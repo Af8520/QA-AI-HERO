@@ -18,6 +18,8 @@ from agents.runner.dotnet_runner import (  # noqa: E402
     DotNetRunner,
     _check_expected_fields,
     _compute_expected,
+    _gen_unique_member_id,
+    _israeli_id_check_digit,
     _strip_synthetic_suffix,
     _make_key_unique,
     _matches,
@@ -125,9 +127,9 @@ def test_apply_unique_id_overrides_concrete_member_id():
     assert wait.match["entity_type"] == "child_development"
 
 
-def test_apply_unique_id_leading_zeros_conditional():
-    """★ תלוי-בקשה: רק כשה-member_id *בתסריט* מתחיל באפסים (000555) — המקור נשלח עם אפסים
-    מובילים (9 ספרות) והיעד נקי, לבדיקת הסרת אפסים. (אם רגיל — ראה הטסט הקודם: בלי אפסים.)"""
+def test_apply_unique_id_member_id_injection_9digit():
+    """★ מסלול member_id (ללא key_source_path): המקור וה-target מקבלים את אותו uid בן 9 ספרות (ת"ז תקין).
+    (קודם נבדק תרחיש הסרת-אפסים; כעת ה-uid תמיד 9 ספרות תקין ולכן זהה במקור וביעד.)"""
     ex = DotNetExecutableTestCase(
         test_case_id="TC-z",
         actions=[
@@ -140,9 +142,9 @@ def test_apply_unique_id_leading_zeros_conditional():
     uid = DotNetRunner()._apply_unique_id(ex)
     pub, wait = ex.actions
     src = pub.value["_data"]["member_details"]["member_id"]
-    assert len(src) == 9 and src[0] == "0"          # מקור: 9 ספרות עם אפס מוביל
-    assert int(src) == int(uid)                     # אותו מספר; ה-form הנקי = uid
-    assert wait.expected_fields["_data.parameters.0.member_id"] == uid   # יעד ללא אפסים → בודק הסרה
+    assert len(uid) == 9
+    assert src == uid                                                    # מקור = ה-uid (9 ספרות)
+    assert wait.expected_fields["_data.parameters.0.member_id"] == uid   # יעד = ה-uid
 
 
 def test_apply_unique_id_negative_correlates_via_value_contains():
@@ -1102,3 +1104,41 @@ def test_check_expected_fields_tolerates_key_order_and_numeric():
         "_data.mac_status.code": 1,
     }) == []
     assert _check_expected_fields(value, {"_data.mac_status.code": 2}) != []
+
+
+def _valid_israeli_id(v: str) -> bool:
+    """מאמת ת"ז ישראלי בן 9 ספרות (אלגוריתם ספרת-ביקורת) — לצורך הטסט."""
+    if len(v) != 9 or not v.isdigit():
+        return False
+    total = 0
+    for i, ch in enumerate(v):
+        x = int(ch) * (1 if i % 2 == 0 else 2)
+        total += x if x < 10 else x - 9
+    return total % 10 == 0
+
+
+def test_gen_unique_member_id_is_valid_israeli_id():
+    """★ ה-uid הוא ת"ז ישראלי **תקין** (9 ספרות + ספרת-ביקורת) — כדי שה-Worker שמאמת ת"ז יקבל אותו."""
+    assert _israeli_id_check_digit("12345678") == "2"          # 123456782 הוא ת"ז תקין ידוע
+    for _ in range(20):
+        uid = _gen_unique_member_id()
+        assert len(uid) == 9 and uid.isdigit()
+        assert _valid_israeli_id(uid)                          # תמיד תקין
+
+
+def test_apply_unique_id_injects_key_without_source_sample():
+    """★★★ תיקון הייחודיות: הזרקת ה-uid לשדה שבונה את ה-KEY (ת"ז ב-identifier NI) פועלת גם ב-template-mode
+    (בלי source_sample). קודם היא הותנתה ב-source_sample וה-KEY חזר על ערך ה-template."""
+    pub = KafkaPublishAction(topic="src", value={"_data": {"identifier": [
+        {"value": "0013172896", "type": "NI"},
+        {"value": "35372843", "type": "PPN"}]}})
+    wait = KafkaWaitAction(topic="tgt")
+    ex = DotNetExecutableTestCase(test_case_id="TC", ado_test_case_id=None, actions=[pub, wait])
+    ex.key_source_path = "_data.identifier[type=NI].value"
+    ex.key_built_from = ["entity_id"]
+    ex.source_sample = None                                    # מצב template
+    uid = DotNetRunner()._apply_unique_id(ex)
+    assert uid and len(uid) == 9
+    assert pub.value["_data"]["identifier"][0]["value"] == uid       # ה-NI (הת"ז) הוזרק
+    assert pub.value["_data"]["identifier"][1]["value"] == "35372843"  # PPN לא נגע
+    assert wait.value_contains == uid                                # קורלציה לפי ה-uid

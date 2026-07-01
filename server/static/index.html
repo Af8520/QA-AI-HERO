@@ -1964,7 +1964,7 @@ function addTcDetailBubble(tcId, response) {
   const finIcon = _STEP_ICON[fin] || '•';
   head.innerHTML = '';
   const headStrong = document.createElement('strong');
-  headStrong.textContent = `📋 ${tcId} `;
+  headStrong.textContent = `📋 ${response.title || tcId} `;
   head.appendChild(headStrong);
   const finSpan = document.createElement('span');
   finSpan.textContent = isDotnet ? `→ ${finIcon} ${finalStatus}` : `→ HTTP ${finalStatus != null ? finalStatus : 'err'}`;
@@ -1973,20 +1973,62 @@ function addTcDetailBubble(tcId, response) {
   head.appendChild(finSpan);
   bubble.appendChild(head);
 
-  // שורות steps (dotnet)
-  const steps = response.steps || [];
-  if (steps.length) {
-    const list = document.createElement('div');
-    list.style.cssText = 'margin-top:6px; font-size:12px; line-height:1.7;';
-    for (const s of steps) {
-      const st = String(s.status || '').toLowerCase();
-      const line = document.createElement('div');
-      line.style.color = _STEP_COLOR[st] || 'var(--text)';
-      const detail = s.error || s.detail || '';
-      line.textContent = `${_STEP_ICON[st] || '•'} ${s.label}${detail ? ' — ' + detail : ''}`;
-      list.appendChild(line);
+  // ★ כרטיס בסגנון ADO Test Plan: שלבים מה-JSON (step + expected_result), ואז מה אומת ✓ / מה נכשל ✗.
+  const specSteps = response.spec_steps || [];
+  if (specSteps.length) {
+    const stTitle = document.createElement('div');
+    stTitle.textContent = 'שלבים:';
+    stTitle.style.cssText = 'margin-top:8px; font-weight:600; font-size:12px;';
+    bubble.appendChild(stTitle);
+    const ol = document.createElement('div');
+    ol.style.cssText = 'font-size:12px; line-height:1.6; margin-top:2px;';
+    specSteps.forEach((s, i) => {
+      const stepLine = document.createElement('div');
+      stepLine.textContent = `${i + 1}. ${s.step || ''}`;
+      ol.appendChild(stepLine);
+      const exp = s.expected_result || s.expectedResult || '';
+      if (exp) {
+        const expLine = document.createElement('div');
+        expLine.textContent = `    צפוי: ${exp}`;
+        expLine.style.color = 'var(--text-dim)';
+        ol.appendChild(expLine);
+      }
+    });
+    bubble.appendChild(ol);
+  }
+
+  // ✓ מה אומת ביעד (ירוק) / ✗ מה נכשל (אדום)
+  const verified = response.verified || [];
+  const failed = response.failed || [];
+  for (const v of verified) {
+    const line = document.createElement('div');
+    line.textContent = '✓ ' + v;
+    line.style.cssText = 'margin-top:4px; font-size:12px; color: var(--success);';
+    bubble.appendChild(line);
+  }
+  for (const f of failed) {
+    const line = document.createElement('div');
+    line.textContent = '✗ ' + f;
+    line.style.cssText = 'margin-top:4px; font-size:12px; color: var(--danger);';
+    bubble.appendChild(line);
+  }
+
+  // fallback: אין כרטיס-ADO (ESB / אין steps מקוריים) → הצג את ה-steps הטכניים כמו קודם
+  if (!specSteps.length && !verified.length && !failed.length) {
+    const steps = response.steps || [];
+    if (steps.length) {
+      const list = document.createElement('div');
+      list.style.cssText = 'margin-top:6px; font-size:12px; line-height:1.7;';
+      for (const s of steps) {
+        const st = String(s.status || '').toLowerCase();
+        const line = document.createElement('div');
+        line.style.color = _STEP_COLOR[st] || 'var(--text)';
+        const detail = s.error || s.detail || '';
+        line.textContent = `${_STEP_ICON[st] || '•'} ${s.label}${detail ? ' — ' + detail : ''}`;
+        list.appendChild(line);
+      }
+      bubble.appendChild(list);
     }
-    bubble.appendChild(list);
   }
 
   const btn = document.createElement('button');

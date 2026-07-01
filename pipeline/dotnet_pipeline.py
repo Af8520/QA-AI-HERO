@@ -203,6 +203,17 @@ async def run_dotnet_pipeline(session: ChatSession) -> PipelineResult:
     runner = DotNetRunner()
     results: List[TestCaseResult] = []
     http_shaped_for_validator: List[ExecutableTestCase] = []
+    # ★ steps מקוריים מ-Phase A (step + expected_result) לפי test_case_id — להצגת כרטיס בסגנון ADO בצ'אט.
+    #   ה-title של ה-executable == test_case_id של ה-Phase A JSON (foundry_to_raw_cases).
+    steps_by_tc: dict = {}
+    for _tc in (session.phase_a_raw_json or []):
+        if isinstance(_tc, dict):
+            _tid = _tc.get("test_case_id") or _tc.get("title")
+            if _tid:
+                steps_by_tc[str(_tid)] = {
+                    "title": str(_tc.get("test_case_id") or _tid),
+                    "steps": [s for s in (_tc.get("steps") or []) if isinstance(s, dict)],
+                }
     # ★ Early abort: אם נתקלים בשגיאת תשתית fatal (ACL, auth) — לא מריצים את שאר ה-TCs
     infra_failure: Optional[str] = None
     for i, ex in enumerate(executables, 1):
@@ -270,6 +281,14 @@ async def run_dotnet_pipeline(session: ChatSession) -> PipelineResult:
             await emit(f"  → ({i}/{len(executables)}) {ex.test_case_id} → {r.status.value}")
             await tl_tc(i, len(executables), ex.test_case_id, tc_status,
                         int((r.api_response or {}).get("status", 0) or 0))
+            # ★ כרטיס בסגנון ADO: steps מקוריים (Phase A) + מה אומת (VERIFY) ומה נכשל (ASSERT/MATCH),
+            #   מתוך ה-log שכבר נצבר — מחרוזות קריאות לבודק, ללא JSON.
+            _log = (r.api_response or {}).get("log", []) or []
+            _spec = steps_by_tc.get(ex.test_case_id) or {}
+            verified_lines = [le.get("message", "") for le in _log
+                              if le.get("action") == "VERIFY" and le.get("status") == "success"]
+            failed_lines = [le.get("message", "") for le in _log
+                            if le.get("status") == "error" and le.get("action") in ("ASSERT", "MATCH", "CONSUME")]
             await emit_tc_detail(ex.test_case_id, {
                 "kind": "dotnet",
                 "actions": [a.model_dump() for a in ex.actions],
@@ -277,6 +296,11 @@ async def run_dotnet_pipeline(session: ChatSession) -> PipelineResult:
             }, {
                 "status": r.status.value,
                 "kind": "dotnet",
+                # ★ כרטיס תסריט: כותרת + ה-steps מה-Phase A JSON + אימות ✓/✗ (לתצוגה ידידותית בצ'אט)
+                "title": _spec.get("title") or ex.test_case_id,
+                "spec_steps": _spec.get("steps") or [],
+                "verified": verified_lines,
+                "failed": failed_lines,
                 # ★ steps לצ'אט — מה עבר/נכשל פר step
                 "steps": [
                     {"label": s.step, "status": s.status.value,

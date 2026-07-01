@@ -47,11 +47,22 @@ _ENSURE_MULTI_MARKER = "__ENSURE_MULTI__"
 _SENTINEL = object()
 
 
+def _israeli_id_check_digit(first8: str) -> str:
+    """ספרת-הביקורת (הספרה ה-9) של ת"ז ישראלי לפי 8 הספרות הראשונות: משקלים 1,2,1,2... ;
+    מכפלה דו-ספרתית → סכום ספרותיה; check = (10 - sum%10) % 10."""
+    total = 0
+    for i, ch in enumerate(first8):
+        v = int(ch) * (1 if i % 2 == 0 else 2)
+        total += v if v < 10 else v - 9
+    return str((10 - (total % 10)) % 10)
+
+
 def _gen_unique_member_id() -> str:
-    """ה-form ה'נקי' של member_id (ללא אפסים מובילים) — מה שה-Worker מפיק ב-target.
-    עד 8 ספרות כך ש-zfill(9) במקור מוסיף לפחות אפס מוביל אחד (כדי לבדוק הסרת אפסים ביעד).
-    TCs רצים שניות זה מזה → ייחודי בין טסטים."""
-    return str((int(time.time() * 1000) % 99_999_999) + 1)
+    """מפיק ת"ז ישראלי **תקין** (9 ספרות: 8 + ספרת-ביקורת) וייחודי לריצה. 8 הספרות הראשונות מבוססות-זמן
+    (ייחודיות בין טסטים/ריצות שרצים שניות זה מזה), והספרה ה-9 מחושבת באלגוריתם ת"ז — כך שה-Worker (שמאמת
+    ת"ז) יקבל את המסר ויפיק פלט ביעד, וה-KEY שנבנה ממנה יהיה ייחודי בכל ריצה."""
+    first8 = str(int(time.time() * 1000) % 100_000_000).zfill(8)   # בדיוק 8 ספרות (עם אפסים מובילים)
+    return first8 + _israeli_id_check_digit(first8)
 
 
 def _substitute_token(obj: Any, token: str, value: str) -> Any:
@@ -1060,11 +1071,11 @@ class DotNetRunner:
                 if had_token:
                     token_seen = True
                 action.value = _substitute_token(action.value, token, uid_source)   # token → uid (קודם — מונע uid כפול ב-KEY)
-                # ★★★ ראשי (מסלול מסר-דוגמה/FHIR): הזרקה לשדה-המקור שהופך ל-target KEY **verbatim**
-                # (scc_message_id/entity_id). זה השדה היחיד שעובר ליעד ללא טרנספורמציה → ה-uid שורד שלם
-                # ב-KEY → קורלציה מדויקת. (member_id עובר strip-first-char ולכן לא אמין.) מוגבל ל-source_sample
-                # כדי לא לשנות את מסלול ה-MACKAF (template) הקיים. no-op אם ה-token כבר הזריק את ה-uid שם.
-                if executable.key_source_path and executable.source_sample:
+                # ★★★ ראשי: הזרקה לשדה-המקור שהופך ל-target KEY **verbatim** (scc_message_id/entity_id/
+                # ת"ז ב-identifier). זה השדה שעובר ליעד ובונה את ה-KEY → ה-uid שורד שלם ב-KEY → קורלציה
+                # מדויקת ו-KEY ייחודי בכל ריצה. פועל בכל מצב (template **וגם** sample) — קודם היה מוגבל
+                # ל-source_sample, וזה גרם ל-KEY לחזור על ערך ה-template בין ריצות. no-op אם ה-token כבר הזריק.
+                if executable.key_source_path:
                     nk = _make_key_unique(action.value, executable.key_source_path, uid_target)
                     if nk is not None:
                         key_set, new_key_val = True, nk
